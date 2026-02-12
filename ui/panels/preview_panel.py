@@ -1,0 +1,1251 @@
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QMenu,
+    QProgressBar,
+    QSlider,
+)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QRect, QEvent
+from PyQt6.QtGui import QPixmap, QImage, QColor, QPainter, QRadialGradient, QBrush, QIcon, QImageReader
+import qtawesome as qta
+import os
+import cv2
+import numpy as np
+from utils.file.file import load_image, raw_exts
+from utils.log_manager import LogManager
+
+from ui.widgets.rating_filter_widget import StarRatingWidget
+from ui.utils.color_manager import ColorManager
+from cache.big_image_cache_manager import BigImageCacheManager
+import json
+
+class PreviewPanel(QWidget):
+    """图片预览面板"""
+    
+    # 信号：可见性改变 (is_visible)
+    visibility_changed = pyqtSignal(bool)
+    # 信号：收藏状态改变 (checked)
+    fav_toggled = pyqtSignal(bool)
+    # 信号：评分改变 (rating)
+    rating_changed = pyqtSignal(int)
+    # 信号：色标改变 (label)
+    label_changed = pyqtSignal(str)
+    vertical_toggle_requested = pyqtSignal()
+    
+    def __init__(self, settings_manager, parent=None, cache_context: str = "library"):
+        super().__init__(parent)
+        self.settings_manager = settings_manager
+        self._cache_context = str(cache_context or "library")
+        self._big_cache = BigImageCacheManager.instance(self._cache_context)
+        self.current_original_pixmap = None
+        self.current_image_path = None
+        self.is_expanded = True # 默认展开
+        self.current_label = None
+        self._overlay_bbox = None
+        self._overlay_focus_point = None
+        self._overlay_orig_size = None
+        self._zoom_percent = 100
+        self._pan_offset = (0, 0)
+        self._panning = False
+        self._last_pan_pos = None
+        self._vert_collapsed = False
+        
+        # 色标颜色映射 (与 ImageThumbnail 保持一致)
+        self.LABEL_COLORS = {
+            'Red': '#FF3B30',      # Apple Red
+            'Yellow': '#FFCC00',   # Apple Yellow
+            'Green': '#66BB6A',    # Desaturated Green
+            'Blue': '#007AFF',     # Apple Blue
+            'Purple': '#AF52DE',   # Apple Purple
+            'White': '#FFFFFF',    # White
+            'Orange': '#FF9500',   # Apple Orange
+            'Pink': '#FF80AB',     # Desaturated Pink
+            'Black': '#48484A',    # Apple Gray
+            'Cyan': '#5AC8FA',     # Apple Cyan
+            'Gray': '#8E8E93',     # Apple Gray
+            'None': '#B0B0B0'      # Default Gray
+        }
+        
+        self.init_ui()
+        ColorManager.instance().register_listener(self._apply_theme_styles)
+        
+    def init_ui(self):
+        # 基本属性
+        self.setMinimumWidth(150)
+        self.setMaximumWidth(800)
+        self.setMinimumHeight(34)
+        
+        # 主布局
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(15, 10, 15, 10)
+        self.main_layout.setSpacing(10)
+        
+        # 1. 顶部：折叠按钮
+        self.header_widget = QWidget()
+        self.header_widget.setStyleSheet("border: none; background: transparent;")
+        try:
+            self.header_widget.setFixedHeight(34)
+        except Exception:
+            pass
+        self.top_widget = self.header_widget
+        top_layout = QHBoxLayout(self.header_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setIconSize(QSize(18, 18))
+        self.toggle_btn.setFixedSize(24, 24)
+        self.toggle_btn.setToolTip("折叠预览")
+        self.toggle_btn.clicked.connect(self.on_toggle_clicked)
+        
+        top_layout.addWidget(self.toggle_btn)
+
+        self.vert_toggle_btn = QPushButton()
+        self.vert_toggle_btn.setIconSize(QSize(18, 18))
+        self.vert_toggle_btn.setFixedSize(24, 24)
+        self.vert_toggle_btn.setToolTip("收起预览")
+        self.vert_toggle_btn.clicked.connect(lambda: self.vertical_toggle_requested.emit())
+        top_layout.addWidget(self.vert_toggle_btn)
+        top_layout.addStretch()
+
+        self.zoom_out_btn = QPushButton()
+        self.zoom_out_btn.setFixedSize(24, 24)
+        self.zoom_out_btn.setToolTip("缩小")
+
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(10, 400)
+        self.zoom_slider.setValue(int(self._zoom_percent))
+        self.zoom_slider.setFixedWidth(120)
+
+        self.zoom_in_btn = QPushButton()
+        self.zoom_in_btn.setFixedSize(24, 24)
+        self.zoom_in_btn.setToolTip("放大")
+
+        self.zoom_label = QLabel(f"{int(self._zoom_percent)}%")
+        self.zoom_label.setMinimumWidth(44)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.zoom_out_btn.clicked.connect(lambda: self._set_zoom_percent(int(self._zoom_percent) - 10))
+        self.zoom_in_btn.clicked.connect(lambda: self._set_zoom_percent(int(self._zoom_percent) + 10))
+        self.zoom_slider.valueChanged.connect(self._set_zoom_percent)
+
+        top_layout.addWidget(self.zoom_out_btn)
+        top_layout.addWidget(self.zoom_slider)
+        top_layout.addWidget(self.zoom_in_btn)
+
+        self.zoom_reset_btn = QPushButton()
+        self.zoom_reset_btn.setFixedSize(24, 24)
+        self.zoom_reset_btn.setToolTip("恢复适配")
+        self.zoom_reset_btn.clicked.connect(self.reset_view)
+        top_layout.addWidget(self.zoom_reset_btn)
+
+        top_layout.addWidget(self.zoom_label)
+        self.main_layout.addWidget(self.header_widget)
+        
+        self.body_widget = QWidget()
+        body_layout = QVBoxLayout(self.body_widget)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+
+        # 2. 中间：预览图片
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setMinimumSize(1, 1)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_label.setScaledContents(False) # 保持比例，手动缩放
+        self.image_label.setMouseTracking(True)
+        self.image_label.installEventFilter(self)
+        body_layout.addWidget(self.image_label, 1)
+
+        self.progress_widget = QWidget()
+        self.progress_widget.setStyleSheet("border: none; background: transparent;")
+        progress_layout = QVBoxLayout(self.progress_widget)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(6)
+
+        self.task_progress_bar = QProgressBar()
+        self.task_progress_bar.setFixedHeight(8)
+        self.task_progress_bar.setTextVisible(False)
+        progress_layout.addWidget(self.task_progress_bar)
+
+        self.task_progress_label = QLabel("")
+        self.task_progress_label.setWordWrap(True)
+        progress_layout.addWidget(self.task_progress_label)
+
+        body_layout.addWidget(self.progress_widget)
+        self.progress_widget.hide()
+        
+        # 3. 底部：收藏和评分
+        self.bottom_widget = QWidget()
+        self.bottom_widget.setStyleSheet("border: none; background: transparent;")
+        bottom_layout = QHBoxLayout(self.bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(8)
+        bottom_layout.addStretch()
+        
+        # 收藏按钮
+        self.fav_btn = QPushButton()
+        self.fav_btn.setIconSize(QSize(24, 24))
+        self.fav_btn.setCheckable(True)
+        self.fav_btn.setFixedSize(36, 36)
+        self.fav_btn.setToolTip("收藏")
+        self.fav_btn.toggled.connect(self.on_fav_toggled)
+        bottom_layout.addWidget(self.fav_btn)
+        
+        # 色标按钮
+        self.label_btn = QPushButton()
+        self.label_btn.setFixedSize(36, 36)
+        self.label_btn.setToolTip("设置色标")
+        self.label_btn.clicked.connect(self.on_label_clicked)
+        self.update_label_icon(None) # 初始化为灰色
+        bottom_layout.addWidget(self.label_btn)
+
+        # 评分控件
+        self.star_rating = StarRatingWidget(size=28, font_size=20)
+        self.star_rating.ratingChanged.connect(self.on_rating_changed)
+        bottom_layout.addWidget(self.star_rating)
+        
+        bottom_layout.addStretch()
+        body_layout.addWidget(self.bottom_widget)
+        self.bottom_widget.hide() # 初始状态隐藏，直到加载图片
+
+        self.main_layout.addWidget(self.body_widget, 1)
+        self._apply_theme_styles()
+
+    def _set_zoom_percent(self, value):
+        try:
+            v = int(value)
+        except Exception:
+            return
+        v = max(10, min(400, v))
+        if int(getattr(self, "_zoom_percent", 100) or 100) == v:
+            return
+        self._zoom_percent = v
+        try:
+            if self.zoom_slider.value() != v:
+                self.zoom_slider.blockSignals(True)
+                self.zoom_slider.setValue(v)
+                self.zoom_slider.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            self.zoom_label.setText(f"{int(v)}%")
+        except Exception:
+            pass
+        try:
+            self.update_image_size()
+        except Exception:
+            pass
+
+    def reset_view(self):
+        self._pan_offset = (0, 0)
+        self._panning = False
+        self._last_pan_pos = None
+        try:
+            self._set_zoom_percent(100)
+        except Exception:
+            try:
+                self.update_image_size()
+            except Exception:
+                pass
+
+    def set_vertical_collapsed(self, collapsed: bool):
+        self._vert_collapsed = bool(collapsed)
+        try:
+            self.body_widget.setVisible(not bool(collapsed))
+        except Exception:
+            pass
+        try:
+            self.zoom_out_btn.setEnabled(not bool(collapsed))
+            self.zoom_in_btn.setEnabled(not bool(collapsed))
+            self.zoom_slider.setEnabled(not bool(collapsed))
+            self.zoom_reset_btn.setEnabled(not bool(collapsed))
+        except Exception:
+            pass
+        try:
+            for w in (self.zoom_out_btn, self.zoom_slider, self.zoom_in_btn, self.zoom_reset_btn, self.zoom_label):
+                w.setVisible(not bool(collapsed))
+        except Exception:
+            pass
+        try:
+            if bool(collapsed):
+                self.main_layout.setContentsMargins(6, 4, 6, 4)
+                self.main_layout.setSpacing(0)
+            else:
+                self.main_layout.setContentsMargins(15, 10, 15, 10)
+                self.main_layout.setSpacing(10)
+        except Exception:
+            pass
+        try:
+            self._apply_theme_styles()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "image_label", None):
+            try:
+                t = event.type()
+            except Exception:
+                t = None
+            if t == QEvent.Type.MouseButtonPress:
+                try:
+                    if event.button() == Qt.MouseButton.LeftButton:
+                        if self.current_original_pixmap is not None and not self.current_original_pixmap.isNull():
+                            self._panning = True
+                            self._last_pan_pos = event.position()
+                            try:
+                                self.image_label.setCursor(Qt.CursorShape.ClosedHandCursor)
+                            except Exception:
+                                pass
+                            return True
+                except Exception:
+                    pass
+            elif t == QEvent.Type.MouseMove:
+                if bool(getattr(self, "_panning", False)) and getattr(self, "_last_pan_pos", None) is not None:
+                    try:
+                        cur = event.position()
+                        last = self._last_pan_pos
+                        dx = float(cur.x() - last.x())
+                        dy = float(cur.y() - last.y())
+                        ox, oy = self._pan_offset
+                        self._pan_offset = (int(ox + dx), int(oy + dy))
+                        self._last_pan_pos = cur
+                        self.update_image_size()
+                        return True
+                    except Exception:
+                        pass
+            elif t == QEvent.Type.MouseButtonRelease:
+                try:
+                    if event.button() == Qt.MouseButton.LeftButton:
+                        self._panning = False
+                        self._last_pan_pos = None
+                        try:
+                            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+                        except Exception:
+                            pass
+                        return True
+                except Exception:
+                    pass
+            elif t == QEvent.Type.Leave:
+                if bool(getattr(self, "_panning", False)):
+                    self._panning = False
+                    self._last_pan_pos = None
+                    try:
+                        self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+                    except Exception:
+                        pass
+        try:
+            return super().eventFilter(obj, event)
+        except Exception:
+            return False
+
+    def _apply_theme_styles(self):
+        cm = ColorManager.instance()
+        panel_bg = cm.get("theme.background.primary")
+        border = cm.get("popup.border.primary")
+        icon_color = cm.get("theme.text.dark")
+        hover_bg = cm.get("theme.primary")
+        fav_hover = cm.get("theme.background.dark")
+        tooltip_text = cm.get("tooltip.text")
+        tooltip_bg = cm.get("theme.text.light")
+        tooltip_border = cm.get("tooltip.border")
+        text_color = cm.get("popup.text.primary", "#333333")
+        primary_color = cm.get("theme.primary", "#2196F3")
+        progress_bg = cm.get("settings.shortcut_table.header.border", "#D0D0D0")
+
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {panel_bg};
+                border-top: 1px solid {border};
+            }}
+        """)
+        header_btn_qss = f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                padding: 2px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+                border-radius: 3px;
+            }}
+            QToolTip {{
+                color: {tooltip_text};
+                background-color: {tooltip_bg};
+                border: 1px solid {tooltip_border};
+                font-family: "Microsoft YaHei";
+            }}
+        """
+        self.toggle_btn.setStyleSheet(header_btn_qss)
+        try:
+            self.vert_toggle_btn.setStyleSheet(header_btn_qss)
+        except Exception:
+            pass
+        if self.is_expanded:
+            self.toggle_btn.setIcon(qta.icon("mdi6.chevron-right", color=icon_color, options=[{"scale_factor": 1.1}]))
+        else:
+            self.toggle_btn.setIcon(qta.icon("mdi6.chevron-left", color=icon_color, options=[{"scale_factor": 1.1}]))
+        try:
+            if bool(getattr(self, "_vert_collapsed", False)):
+                self.vert_toggle_btn.setIcon(qta.icon("mdi6.chevron-down", color=icon_color, options=[{"scale_factor": 1.1}]))
+                self.vert_toggle_btn.setToolTip("展开预览")
+            else:
+                self.vert_toggle_btn.setIcon(qta.icon("mdi6.chevron-up", color=icon_color, options=[{"scale_factor": 1.1}]))
+                self.vert_toggle_btn.setToolTip("收起预览")
+        except Exception:
+            pass
+        self.image_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {panel_bg};
+                border: 1px solid {border};
+            }}
+        """)
+        try:
+            btn_qss = f"""
+                QPushButton {{
+                    background: transparent;
+                    border: 1px solid {border};
+                    border-radius: 4px;
+                }}
+                QPushButton:hover {{
+                    border: 1px solid {primary_color};
+                    background-color: {fav_hover};
+                }}
+                QToolTip {{
+                    color: {tooltip_text};
+                    background-color: {tooltip_bg};
+                    border: 1px solid {tooltip_border};
+                    font-family: "Microsoft YaHei";
+                }}
+            """
+            self.zoom_out_btn.setStyleSheet(btn_qss)
+            self.zoom_in_btn.setStyleSheet(btn_qss)
+            self.zoom_reset_btn.setStyleSheet(btn_qss)
+            self.zoom_out_btn.setIcon(qta.icon("mdi6.magnify-minus-outline", color=icon_color, options=[{"scale_factor": 1.0}]))
+            self.zoom_in_btn.setIcon(qta.icon("mdi6.magnify-plus-outline", color=icon_color, options=[{"scale_factor": 1.0}]))
+            self.zoom_reset_btn.setIcon(qta.icon("mdi6.fit-to-screen-outline", color=icon_color, options=[{"scale_factor": 1.0}]))
+            self.zoom_label.setStyleSheet(f"QLabel {{ color: {text_color}; background: transparent; border: none; font-size: 12px; }}")
+        except Exception:
+            pass
+        self.fav_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {fav_hover};
+            }}
+            QToolTip {{
+                color: {tooltip_text};
+                background-color: {tooltip_bg};
+                border: 1px solid {tooltip_border};
+                font-family: "Microsoft YaHei";
+            }}
+        """)
+        self._update_fav_icon()
+        self.label_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 18px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton::menu-indicator {{
+                image: none;
+            }}
+            QToolTip {{
+                color: {tooltip_text};
+                background-color: {tooltip_bg};
+                border: 1px solid {tooltip_border};
+                font-family: "Microsoft YaHei";
+            }}
+        """)
+
+        self.task_progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {progress_bg};
+                border-radius: 4px;
+                border: none;
+            }}
+            QProgressBar::chunk {{
+                background-color: {primary_color};
+                border-radius: 4px;
+            }}
+        """)
+        self.task_progress_label.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
+                font-size: 12px;
+                border: none;
+                background: transparent;
+            }}
+        """)
+
+    def set_task_progress(self, *, visible: bool, current: int = 0, total: int = 0, text: str = ""):
+        """
+        设置面板中的任务进度显示。
+
+        Args:
+            visible: 是否显示进度区域
+            current: 已完成数量
+            total: 总数量
+            text: 进度说明文字
+        """
+        try:
+            self.task_progress_label.setText(str(text or ""))
+        except Exception:
+            pass
+
+        if not visible:
+            self.progress_widget.hide()
+            return
+
+        if total and total > 0:
+            try:
+                self.task_progress_bar.setRange(0, int(total))
+                self.task_progress_bar.setValue(min(int(current), int(total)))
+            except Exception:
+                pass
+        else:
+            try:
+                self.task_progress_bar.setRange(0, 0)
+            except Exception:
+                pass
+
+        self.progress_widget.show()
+
+    def _update_fav_icon(self):
+        if self.fav_btn.isChecked():
+            icon_color = ColorManager.instance().get("preview.favorite.active")
+            icon_name = "mdi6.heart"
+        else:
+            icon_color = ColorManager.instance().get("theme.text.dark")
+            icon_name = "mdi6.heart-outline"
+        self.fav_btn.setIcon(qta.icon(icon_name, color=icon_color, options=[{"scale_factor": 1.1}]))
+
+    def load_image(self, image_path):
+        """加载并在预览区显示图片"""
+        self.current_image_path = image_path
+        
+        if not image_path:
+            # 清空显示，不显示"图片不存在"，保持空白或显示之前的统计信息(如果没被清空的话)
+            # 但这里我们清空它，以便 clear_preview 能正常工作
+            self.image_label.setText("") 
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            self._overlay_bbox = None
+            self._overlay_focus_point = None
+            self._overlay_orig_size = None
+            self.bottom_widget.hide()
+            try:
+                self.zoom_out_btn.setEnabled(False)
+                self.zoom_in_btn.setEnabled(False)
+                self.zoom_slider.setEnabled(False)
+                self.zoom_reset_btn.setEnabled(False)
+            except Exception:
+                pass
+            return
+
+        if not os.path.exists(image_path):
+            self.image_label.setText("图片不存在")
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            self._overlay_bbox = None
+            self._overlay_focus_point = None
+            self._overlay_orig_size = None
+            self.bottom_widget.hide()
+            try:
+                self.zoom_out_btn.setEnabled(False)
+                self.zoom_in_btn.setEnabled(False)
+                self.zoom_slider.setEnabled(False)
+                self.zoom_reset_btn.setEnabled(False)
+            except Exception:
+                pass
+            return
+
+        try:
+            try:
+                self.current_original_pixmap = None
+                self.image_label.setPixmap(QPixmap())
+            except Exception:
+                pass
+
+            cached = None
+            try:
+                cached = self._big_cache.get(image_path)
+            except Exception:
+                cached = None
+            if cached is not None and not cached.isNull():
+                pixmap = QPixmap.fromImage(cached)
+                if not pixmap.isNull():
+                    self.current_original_pixmap = pixmap
+                    self.update_image_size()
+                    self.image_label.setText("")
+                    if self.is_expanded:
+                        self.bottom_widget.show()
+                    try:
+                        self.zoom_out_btn.setEnabled(True)
+                        self.zoom_in_btn.setEnabled(True)
+                        self.zoom_slider.setEnabled(True)
+                        self.zoom_reset_btn.setEnabled(True)
+                    except Exception:
+                        pass
+                    return
+            ext = ""
+            try:
+                ext = os.path.splitext(str(image_path))[1].lower()
+            except Exception:
+                ext = ""
+
+            pixmap = None
+            qimage = None
+            if ext and ext not in set([str(x).lower() for x in (raw_exts or [])]):
+                try:
+                    from utils.system.stderr_suppressor import suppress_stderr_fd
+
+                    with suppress_stderr_fd():
+                        reader = QImageReader(image_path)
+                        reader.setAutoTransform(True)
+                    try:
+                        size = reader.size()
+                    except Exception:
+                        size = None
+
+                    try:
+                        panel_size = self.size()
+                        margins = self.main_layout.contentsMargins()
+                        bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+                        top_height = self.top_widget.height()
+                        available_width = panel_size.width() - margins.left() - margins.right() - 4
+                        available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
+                        max_edge = int(max(800, min(2048, max(available_width, available_height))))
+                    except Exception:
+                        max_edge = 1600
+
+                    if size is not None and size.isValid():
+                        try:
+                            w = int(size.width())
+                            h = int(size.height())
+                        except Exception:
+                            w = 0
+                            h = 0
+                        if w > 0 and h > 0:
+                            long_edge = max(w, h)
+                            if long_edge > max_edge:
+                                if w >= h:
+                                    tw = int(max_edge)
+                                    th = max(1, int(h * (tw / max(1, w))))
+                                else:
+                                    th = int(max_edge)
+                                    tw = max(1, int(w * (th / max(1, h))))
+                                reader.setScaledSize(QSize(tw, th))
+
+                    with suppress_stderr_fd():
+                        qimage = reader.read()
+                    if qimage is not None and not qimage.isNull():
+                        pixmap = QPixmap.fromImage(qimage)
+                except Exception:
+                    pixmap = None
+                    qimage = None
+
+            if pixmap is None or pixmap.isNull():
+                cv_img = load_image(image_path)
+                if cv_img is not None:
+                    cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                    height, width, channel = cv_img.shape
+                    bytes_per_line = 3 * width
+                    qimage = QImage(cv_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                    pixmap = QPixmap.fromImage(qimage)
+                else:
+                    pixmap = QPixmap(image_path)
+
+            if pixmap.isNull():
+                self.image_label.setText("无法加载图片")
+                self.image_label.setPixmap(QPixmap())
+                self.current_original_pixmap = None
+                self.bottom_widget.hide()
+                return
+            try:
+                if qimage is None:
+                    qimage = pixmap.toImage()
+                if qimage is not None and not qimage.isNull():
+                    self._big_cache.put(image_path, qimage)
+            except Exception:
+                pass
+            
+            self.current_original_pixmap = pixmap
+            self.update_image_size()
+            self.image_label.setText("")
+            
+            if self.is_expanded:
+                self.bottom_widget.show()
+            try:
+                self.zoom_out_btn.setEnabled(True)
+                self.zoom_in_btn.setEnabled(True)
+                self.zoom_slider.setEnabled(True)
+                self.zoom_reset_btn.setEnabled(True)
+            except Exception:
+                pass
+            
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"预览图片失败: {e}")
+            except Exception:
+                pass
+            self.image_label.setText(f"预览失败: {str(e)}")
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            self._overlay_bbox = None
+            self._overlay_focus_point = None
+            self._overlay_orig_size = None
+            self.bottom_widget.hide()
+            try:
+                self.zoom_out_btn.setEnabled(False)
+                self.zoom_in_btn.setEnabled(False)
+                self.zoom_slider.setEnabled(False)
+                self.zoom_reset_btn.setEnabled(False)
+            except Exception:
+                pass
+
+    def set_overlays(self, bbox=None, focus_point=None, orig_size=None):
+        self._overlay_bbox = bbox
+        self._overlay_focus_point = focus_point
+        self._overlay_orig_size = orig_size
+        try:
+            self.update_image_size()
+        except Exception:
+            pass
+
+    def show_folder_stats(self, folder_name, stats):
+        """显示文件夹统计信息"""
+        self.current_image_path = None
+        self.current_original_pixmap = None
+        self._overlay_bbox = None
+        self._overlay_focus_point = None
+        self._overlay_orig_size = None
+        self.bottom_widget.hide()
+        try:
+            self.zoom_out_btn.setEnabled(False)
+            self.zoom_in_btn.setEnabled(False)
+            self.zoom_slider.setEnabled(False)
+            self.zoom_reset_btn.setEnabled(False)
+        except Exception:
+            pass
+        
+        if not stats:
+            cm = ColorManager.instance()
+            text_color = cm.get("theme.text.dark")
+            self.image_label.setText(f"<div style='text-align: center; color: {text_color};'><h3>{folder_name}</h3><p>暂无统计信息</p></div>")
+            return
+            
+        species_count = stats.get('species_count', 0)
+        image_count = stats.get('image_count', 0)
+        
+        cm = ColorManager.instance()
+        text_color = cm.get("theme.text.dark")
+        accent_color = cm.get("theme.primary")
+        html = f"""
+        <div style='text-align: center; color: {text_color};'>
+            <h2 style='margin-bottom: 20px;'>{folder_name}</h2>
+            <div style='font-size: 16px; margin: 10px;'>
+                <p>物种数量: <span style='color: {accent_color}; font-weight: bold;'>{species_count}</span></p>
+                <p>图片总数: <span style='color: {accent_color}; font-weight: bold;'>{image_count}</span></p>
+            </div>
+        </div>
+        """
+        self.image_label.setText(html)
+        self.image_label.show()
+
+    def update_image_size(self):
+        """根据面板大小调整图片显示"""
+        if not self.current_original_pixmap:
+            return
+            
+        if not self.is_expanded or self.image_label.isHidden():
+            return
+
+        try:
+            pixmap = self.current_original_pixmap
+            try:
+                canvas_w = int(self.image_label.width() or 0)
+                canvas_h = int(self.image_label.height() or 0)
+            except Exception:
+                canvas_w = 0
+                canvas_h = 0
+            if canvas_w <= 1 or canvas_h <= 1:
+                panel_size = self.size()
+                margins = self.main_layout.contentsMargins()
+                bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+                top_height = self.top_widget.height()
+                canvas_w = int(panel_size.width() - margins.left() - margins.right() - 4)
+                canvas_h = int(panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20)
+            canvas_w = max(1, int(canvas_w))
+            canvas_h = max(1, int(canvas_h))
+
+            # 计算缩放
+            pixmap_width = pixmap.width()
+            pixmap_height = pixmap.height()
+            
+            scale_w = canvas_w / pixmap_width if pixmap_width > 0 else 1
+            scale_h = canvas_h / pixmap_height if pixmap_height > 0 else 1
+            scale = min(scale_w, scale_h)
+            try:
+                z = float(getattr(self, "_zoom_percent", 100) or 100) / 100.0
+            except Exception:
+                z = 1.0
+            try:
+                z = float(max(0.1, min(4.0, z)))
+            except Exception:
+                z = 1.0
+            scale = float(scale) * float(z)
+            
+            new_width = int(pixmap_width * scale)
+            new_height = int(pixmap_height * scale)
+            
+            scaled_pixmap = pixmap.scaled(new_width, new_height,
+                                         Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+            try:
+                bbox = self._overlay_bbox
+                fp = self._overlay_focus_point
+                orig_size = self._overlay_orig_size
+
+                def _parse_bbox(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if not s:
+                            return None
+                        try:
+                            v = json.loads(s)
+                        except Exception:
+                            return None
+                    if isinstance(v, dict):
+                        try:
+                            x = float(v.get("x"))
+                            y = float(v.get("y"))
+                            w = float(v.get("w"))
+                            h = float(v.get("h"))
+                            return x, y, x + w, y + h
+                        except Exception:
+                            pass
+                        try:
+                            if all(k in v for k in ("x1", "y1", "x2", "y2")):
+                                return float(v.get("x1")), float(v.get("y1")), float(v.get("x2")), float(v.get("y2"))
+                        except Exception:
+                            pass
+                        try:
+                            if all(k in v for k in ("left", "top", "right", "bottom")):
+                                return float(v.get("left")), float(v.get("top")), float(v.get("right")), float(v.get("bottom"))
+                        except Exception:
+                            pass
+                        return None
+                    if isinstance(v, (list, tuple)) and len(v) == 4:
+                        try:
+                            x1, y1, x2, y2 = v
+                            return float(x1), float(y1), float(x2), float(y2)
+                        except Exception:
+                            return None
+                    return None
+
+                def _parse_fp(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if not s:
+                            return None
+                        try:
+                            v = json.loads(s)
+                        except Exception:
+                            return None
+                    if isinstance(v, dict):
+                        try:
+                            if "x" in v and "y" in v:
+                                return float(v.get("x")), float(v.get("y"))
+                        except Exception:
+                            return None
+                    if isinstance(v, (list, tuple)) and len(v) >= 2:
+                        try:
+                            return float(v[0]), float(v[1])
+                        except Exception:
+                            return None
+                    return None
+
+                bbox = _parse_bbox(bbox)
+                fp = _parse_fp(fp)
+                orig_w = 0.0
+                orig_h = 0.0
+                try:
+                    if isinstance(orig_size, (list, tuple)) and len(orig_size) >= 2:
+                        orig_w = float(orig_size[0] or 0)
+                        orig_h = float(orig_size[1] or 0)
+                except Exception:
+                    orig_w = 0.0
+                    orig_h = 0.0
+
+                bbox_norm = False
+                if bbox is not None:
+                    try:
+                        x1, y1, x2, y2 = bbox
+                        bbox_norm = bool(0.0 <= x1 <= 1.0 and 0.0 <= y1 <= 1.0 and 0.0 <= x2 <= 1.0 and 0.0 <= y2 <= 1.0)
+                    except Exception:
+                        bbox_norm = False
+                fp_norm = False
+                if fp is not None:
+                    try:
+                        fx, fy = fp
+                        fp_norm = bool(0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0)
+                    except Exception:
+                        fp_norm = False
+
+                base_w_bbox = base_h_bbox = 0.0
+                if bbox_norm:
+                    base_w_bbox = 1.0
+                    base_h_bbox = 1.0
+                else:
+                    base_w_bbox = float(orig_w or 0.0)
+                    base_h_bbox = float(orig_h or 0.0)
+
+                base_w_fp = base_h_fp = 0.0
+                if fp_norm:
+                    base_w_fp = 1.0
+                    base_h_fp = 1.0
+                else:
+                    base_w_fp = float(orig_w or 0.0)
+                    base_h_fp = float(orig_h or 0.0)
+
+                need_fill_bbox = (not bbox_norm) and (base_w_bbox <= 1.0 or base_h_bbox <= 1.0)
+                need_fill_fp = (not fp_norm) and (base_w_fp <= 1.0 or base_h_fp <= 1.0)
+                if need_fill_bbox or need_fill_fp:
+                    try:
+                        ow = float(pixmap.width())
+                        oh = float(pixmap.height())
+                        if ow > 1 and oh > 1:
+                            if need_fill_bbox:
+                                base_w_bbox = ow
+                                base_h_bbox = oh
+                            if need_fill_fp:
+                                base_w_fp = ow
+                                base_h_fp = oh
+                    except Exception:
+                        pass
+
+                can_draw_bbox = (bbox is not None) and (base_w_bbox > 0.0) and (base_h_bbox > 0.0)
+                can_draw_fp = (fp is not None) and (base_w_fp > 0.0) and (base_h_fp > 0.0)
+                if (can_draw_bbox or can_draw_fp) and scaled_pixmap.width() > 1 and scaled_pixmap.height() > 1:
+                    sx_bbox = float(scaled_pixmap.width()) / float(base_w_bbox) if base_w_bbox > 0.0 else 0.0
+                    sy_bbox = float(scaled_pixmap.height()) / float(base_h_bbox) if base_h_bbox > 0.0 else 0.0
+                    sx_fp = float(scaled_pixmap.width()) / float(base_w_fp) if base_w_fp > 0.0 else 0.0
+                    sy_fp = float(scaled_pixmap.height()) / float(base_h_fp) if base_h_fp > 0.0 else 0.0
+                    cm = ColorManager.instance()
+                    rect_color = cm.qcolor("border.subject_rect", default="#f50f0f")
+                    fp_color = cm.qcolor("border.focus_point", default="#f50f0f")
+                    painter = QPainter(scaled_pixmap)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    try:
+                        pen_w = max(2, int(max(scaled_pixmap.width(), scaled_pixmap.height()) // 250))
+                    except Exception:
+                        pen_w = 2
+                    if bbox is not None:
+                        try:
+                            x1, y1, x2, y2 = bbox
+                            rx = int(round(float(x1) * sx_bbox))
+                            ry = int(round(float(y1) * sy_bbox))
+                            rw = int(round((float(x2) - float(x1)) * sx_bbox))
+                            rh = int(round((float(y2) - float(y1)) * sy_bbox))
+                            pen = painter.pen()
+                            pen.setColor(rect_color)
+                            pen.setWidth(int(pen_w))
+                            painter.setPen(pen)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawRect(QRect(int(rx), int(ry), int(rw), int(rh)))
+                        except Exception:
+                            pass
+                    if fp is not None:
+                        try:
+                            fx, fy = fp
+                            px = int(round(float(fx) * sx_fp))
+                            py = int(round(float(fy) * sy_fp))
+                            r = max(3, int(round(pen_w * 2.2)))
+                            pen = painter.pen()
+                            pen.setColor(fp_color)
+                            pen.setWidth(int(pen_w))
+                            painter.setPen(pen)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawEllipse(px - r, py - r, r * 2, r * 2)
+                            painter.drawLine(px - r * 2, py, px + r * 2, py)
+                            painter.drawLine(px, py - r * 2, px, py + r * 2)
+                        except Exception:
+                            pass
+                    painter.end()
+            except Exception:
+                pass
+
+            try:
+                base_x = int((canvas_w - scaled_pixmap.width()) // 2)
+                base_y = int((canvas_h - scaled_pixmap.height()) // 2)
+            except Exception:
+                base_x = 0
+                base_y = 0
+
+            ox, oy = self._pan_offset
+            try:
+                if scaled_pixmap.width() <= canvas_w:
+                    ox = 0
+                else:
+                    x0 = int(base_x + int(ox))
+                    x0 = int(max(int(canvas_w - scaled_pixmap.width()), min(0, x0)))
+                    ox = int(x0 - base_x)
+                if scaled_pixmap.height() <= canvas_h:
+                    oy = 0
+                else:
+                    y0 = int(base_y + int(oy))
+                    y0 = int(max(int(canvas_h - scaled_pixmap.height()), min(0, y0)))
+                    oy = int(y0 - base_y)
+            except Exception:
+                pass
+            self._pan_offset = (int(ox), int(oy))
+
+            try:
+                composed = QPixmap(canvas_w, canvas_h)
+                try:
+                    cm = ColorManager.instance()
+                    composed.fill(QColor(cm.get("theme.background.primary")))
+                except Exception:
+                    composed.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(composed)
+                painter.drawPixmap(int(base_x + ox), int(base_y + oy), scaled_pixmap)
+                painter.end()
+                self.image_label.setPixmap(composed)
+            except Exception:
+                self.image_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"更新预览图片尺寸失败: {e}")
+            except Exception:
+                pass
+
+    def set_label(self, label):
+        """设置显示的色标"""
+        self.current_label = label
+        self.update_label_icon(label)
+
+    def update_label_icon(self, label):
+        """更新色标按钮图标"""
+        size = 24
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Determine color
+        if label and label in self.LABEL_COLORS and label != 'None' and label != '':
+            color_hex = self.LABEL_COLORS[label]
+            color = QColor(color_hex)
+        else:
+            # Gray for None
+            color = QColor('#B0B0B0')
+            
+        # Draw gradient ball
+        gradient = QRadialGradient(size * 0.3, size * 0.3, size * 0.8)
+        gradient.setColorAt(0, color.lighter(130))
+        gradient.setColorAt(0.5, color)
+        gradient.setColorAt(1, color.darker(110))
+        
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, size, size)
+        
+        # If White, draw a border
+        if label == 'White':
+             border_color = ColorManager.instance().get("popup.border.primary")
+             painter.setPen(QColor(border_color))
+             painter.setBrush(Qt.BrushStyle.NoBrush)
+             painter.drawEllipse(0, 0, size-1, size-1)
+
+        painter.end()
+        
+        self.label_btn.setIcon(QIcon(pixmap))
+
+    def on_label_clicked(self):
+        """点击色标按钮，弹出菜单"""
+        menu = QMenu(self)
+        cm = ColorManager.instance()
+        menu_bg = cm.get("theme.background.light")
+        menu_border = cm.get("popup.border.primary")
+        menu_text = cm.get("theme.text.dark")
+        menu_hover = cm.get("theme.background.dark")
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {menu_bg};
+                border: 1px solid {menu_border};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 36px;
+                border-radius: 2px;
+                color: {menu_text};
+            }}
+            QMenu::item:selected {{
+                background-color: {menu_hover};
+                color: {menu_text};
+            }}
+            QMenu::icon {{
+                padding-left: 10px;
+            }}
+        """)
+        
+        # 1. Clear action
+        clear_action = menu.addAction("无色标")
+        clear_action.setIcon(qta.icon("mdi.circle-outline", color=menu_text))
+        clear_action.triggered.connect(lambda: self.label_changed.emit("")) # Emit empty string for clear
+        
+        menu.addSeparator()
+        
+        # 2. Colors
+        labels = [
+            ("Red", "红色"), ("Orange", "橙色"), ("Yellow", "黄色"), 
+            ("Green", "绿色"), ("Cyan", "青色"), ("Blue", "蓝色"), 
+            ("Purple", "紫色"), ("Pink", "粉色"), ("White", "白色"), 
+            ("Gray", "灰色"), ("Black", "黑色")
+        ]
+        
+        for en_name, cn_name in labels:
+            action = menu.addAction(cn_name)
+            color_hex = self.LABEL_COLORS.get(en_name, "#000000")
+            
+            # Use qtawesome for menu icons for simplicity
+            if en_name == 'White':
+                 action.setIcon(qta.icon("mdi.circle", color=color_hex, color_off=menu_border))
+            else:
+                 action.setIcon(qta.icon("mdi.circle", color=color_hex))
+                 
+            action.triggered.connect(lambda checked=False, l=en_name: self.label_changed.emit(l))
+            
+        # 显示在按钮下方
+        pos = self.label_btn.mapToGlobal(self.label_btn.rect().bottomLeft())
+        # 稍微调整位置
+        pos.setY(pos.y() + 2)
+        menu.exec(pos)
+
+    def on_toggle_clicked(self):
+        """点击折叠/展开按钮"""
+        self.is_expanded = not self.is_expanded
+        
+        if self.is_expanded:
+            # 展开状态
+            try:
+                self.vert_toggle_btn.setVisible(True)
+            except Exception:
+                pass
+            try:
+                for w in (self.zoom_out_btn, self.zoom_slider, self.zoom_in_btn, self.zoom_reset_btn, self.zoom_label):
+                    w.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self.body_widget.setVisible(True)
+            except Exception:
+                pass
+            try:
+                self.image_label.show()
+            except Exception:
+                pass
+            if self.current_original_pixmap:
+                try:
+                    self.bottom_widget.show()
+                except Exception:
+                    pass
+            self.setMinimumWidth(150)
+            self.setMaximumWidth(500)
+            self.main_layout.setContentsMargins(15, 10, 15, 10)
+            self.toggle_btn.setToolTip("折叠预览")
+            
+            # 延迟更新图片，确保布局完成
+            QTimer.singleShot(100, self.update_image_size)
+        else:
+            # 折叠状态
+            try:
+                self.vert_toggle_btn.setVisible(False)
+            except Exception:
+                pass
+            try:
+                for w in (self.zoom_out_btn, self.zoom_slider, self.zoom_in_btn, self.zoom_reset_btn, self.zoom_label):
+                    w.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self.body_widget.setVisible(False)
+            except Exception:
+                pass
+            try:
+                self.image_label.hide()
+            except Exception:
+                pass
+            try:
+                self.bottom_widget.hide()
+            except Exception:
+                pass
+            self.main_layout.setContentsMargins(2, 2, 2, 2)
+            self.setMinimumWidth(34)
+            self.setMaximumWidth(34)
+            self.toggle_btn.setToolTip("展开预览")
+            
+        # 发送信号通知外部调整Splitter
+        self.visibility_changed.emit(self.is_expanded)
+        self._apply_theme_styles()
+
+    def set_expanded(self, expanded):
+        """外部设置展开状态"""
+        if self.is_expanded != expanded:
+            self.on_toggle_clicked()
+
+    def on_fav_toggled(self, checked):
+        self._update_fav_icon()
+        self.fav_toggled.emit(checked)
+
+    def set_favorite(self, is_favorite):
+        self.fav_btn.blockSignals(True)
+        self.fav_btn.setChecked(is_favorite)
+        self._update_fav_icon()
+        self.fav_btn.blockSignals(False)
+
+    def on_rating_changed(self, rating):
+        """评分改变"""
+        self.rating_changed.emit(rating)
+
+    def set_rating(self, rating):
+        """设置评分显示 (不触发信号)"""
+        # 使用 blockSignals 防止循环触发
+        # 这里的 StarRatingWidget.set_rating 已经支持 emit_signal 参数
+        self.star_rating.set_rating(rating, emit_signal=False)
+
+    def set_actions_visible(self, visible):
+        """设置操作按钮（收藏、色标、评分）的可见性"""
+        self.fav_btn.setVisible(visible)
+        self.label_btn.setVisible(visible)
+        self.star_rating.setVisible(visible)
+        
+        # 如果都隐藏了，bottom_widget 本身也应该隐藏或高度减小
+        # 但这里 bottom_widget 是 QHBoxLayout，如果子控件都隐藏，它会自动塌缩吗？
+        # 通常 Layout 不会自动隐藏，除非手动设置
+        # 但如果 is_expanded 为 True，load_image 会调用 bottom_widget.show()
+        # 所以我们这里只是隐藏内部组件，bottom_widget 依然作为容器存在
+        
+        # 强制更新布局
+        self.bottom_widget.updateGeometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_image_size()
