@@ -193,14 +193,69 @@ if __name__ == "__main__":
     tooltip_bg = cm.get("theme.text.light")
     tooltip_text = cm.get("tooltip.text")
     tooltip_border = cm.get("tooltip.border")
-    app.setStyleSheet(f"""
-        QToolTip {{
-            background-color: {tooltip_bg};
-            color: {tooltip_text};
-            border: 1px solid {tooltip_border};
-            font-size: 11px;
-        }}
-    """)
+    def _apply_global_styles():
+        tooltip_bg0 = cm.get("theme.text.light")
+        tooltip_text0 = cm.get("tooltip.text")
+        tooltip_border0 = cm.get("tooltip.border")
+        combo_hover_bg = cm.get("theme.background.dark")
+        combo_selected_bg = cm.get("theme.primary")
+        combo_selected_text = cm.get("theme.text.light")
+        combo_text = cm.get("theme.text.dark")
+        combo_border = cm.get("popup.border.primary")
+        combo_bg = cm.get("theme.background.light")
+        app.setStyleSheet(f"""
+            QToolTip {{
+                background-color: {tooltip_bg0};
+                color: {tooltip_text0};
+                border: 1px solid {tooltip_border0};
+                font-size: 11px;
+            }}
+            QMenu::item:selected {{
+                background-color: {combo_selected_bg};
+                color: {combo_selected_text};
+            }}
+            QAbstractItemView {{
+                outline: none;
+                selection-background-color: {combo_selected_bg};
+                selection-color: {combo_selected_text};
+            }}
+            QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QAbstractItemView::item:hover {{
+                background-color: {combo_hover_bg};
+            }}
+            QAbstractItemView::item:selected {{
+                background-color: {combo_selected_bg};
+                color: {combo_selected_text};
+            }}
+            QComboBox QAbstractItemView {{
+                border: 1px solid {combo_border};
+                background-color: {combo_bg};
+                color: {combo_text};
+                outline: none;
+                selection-background-color: {combo_selected_bg};
+                selection-color: {combo_selected_text};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {combo_hover_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {combo_selected_bg};
+                color: {combo_selected_text};
+            }}
+        """)
+
+    try:
+        ColorManager.instance().register_listener(_apply_global_styles)
+    except Exception:
+        pass
+    _apply_global_styles()
     tooltip_font = app.font()
     tooltip_font.setPointSize(10)
     app.setFont(tooltip_font, "QToolTip")

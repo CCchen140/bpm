@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QStackedWidget, QLabel, 
                              QPushButton, QButtonGroup, QApplication, QStatusBar)
 from PyQt6.QtCore import Qt, QSize, QTimer, QEvent, QPoint, QThreadPool, QRunnable, QObject, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
 
 from ui.image_library_page import ImageLibraryPage
 from ui.settings_page import SettingsPage
@@ -77,6 +78,10 @@ class MainWindow(QMainWindow):
         self.settings_click_timer = QTimer()
         self.settings_click_timer.setInterval(3000) # 3秒重置
         self.settings_click_timer.timeout.connect(self.reset_click_count)
+        self.charts_debug_click_count = 0
+        self.charts_debug_click_timer = QTimer()
+        self.charts_debug_click_timer.setInterval(3000)
+        self.charts_debug_click_timer.timeout.connect(self._reset_charts_debug_click_count)
 
         self.setWindowTitle("栖图")
         self.resize(1560, 920)
@@ -255,6 +260,7 @@ class MainWindow(QMainWindow):
         icon_layout.addWidget(self.btn_filter)
         self._sidebar_buttons.append(self.btn_filter)
         self._sidebar_icon_map.append((self.btn_filter, "ph.presentation-chart-bold", "ph.presentation-chart-fill"))
+        self.btn_filter.installEventFilter(self)
         # 奖章页面按钮
         self.btn_milestone = QPushButton()
         self.btn_milestone.setIcon(qta.icon('ri.medal-line', color=button_color))
@@ -462,12 +468,64 @@ class MainWindow(QMainWindow):
             self.pages.setStyleSheet(f"background-color: {page_side_bg};")
         app = QApplication.instance()
         if app:
+            try:
+                pal = app.palette()
+                pal.setColor(QPalette.ColorRole.Highlight, QColor(cm.get("theme.primary")))
+                pal.setColor(QPalette.ColorRole.HighlightedText, QColor(cm.get("theme.text.light")))
+                app.setPalette(pal)
+            except Exception:
+                pass
+            combo_hover_bg = cm.get("theme.background.dark")
+            combo_selected_bg = cm.get("theme.primary")
+            combo_selected_text = cm.get("theme.text.light")
+            combo_text = cm.get("theme.text.dark")
+            combo_border = cm.get("popup.border.primary")
+            combo_bg = cm.get("theme.background.light")
             app.setStyleSheet(f"""
                 QToolTip {{
                     background-color: {tooltip_bg};
                     color: {tooltip_text};
                     border: 1px solid {tooltip_border};
                     font-size: 11px;
+                }}
+                QMenu::item:selected {{
+                    background-color: {combo_selected_bg};
+                    color: {combo_selected_text};
+                }}
+                QAbstractItemView {{
+                    outline: none;
+                    selection-background-color: {combo_selected_bg};
+                    selection-color: {combo_selected_text};
+                }}
+                QAbstractItemView::item {{
+                    padding: 6px 8px;
+                    border-radius: 4px;
+                }}
+                QAbstractItemView::item:hover {{
+                    background-color: {combo_hover_bg};
+                }}
+                QAbstractItemView::item:selected {{
+                    background-color: {combo_selected_bg};
+                    color: {combo_selected_text};
+                }}
+                QComboBox QAbstractItemView {{
+                    border: 1px solid {combo_border};
+                    background-color: {combo_bg};
+                    color: {combo_text};
+                    outline: none;
+                    selection-background-color: {combo_selected_bg};
+                    selection-color: {combo_selected_text};
+                }}
+                QComboBox QAbstractItemView::item {{
+                    padding: 6px 8px;
+                    border-radius: 4px;
+                }}
+                QComboBox QAbstractItemView::item:hover {{
+                    background-color: {combo_hover_bg};
+                }}
+                QComboBox QAbstractItemView::item:selected {{
+                    background-color: {combo_selected_bg};
+                    color: {combo_selected_text};
                 }}
             """)
         sidebar_bg = cm.get("theme.sidebar")
@@ -670,8 +728,63 @@ class MainWindow(QMainWindow):
             pass
 
     def _ensure_charts_page_loaded(self):
-        self._charts_page_loaded = True
-        self._charts_page_loading = False
+        try:
+            if getattr(self, "_charts_page_loaded", False):
+                return
+            if getattr(self, "_charts_page_loading", False):
+                return
+        except Exception:
+            pass
+
+        self._charts_page_loading = True
+        try:
+            from table.data_charts_page import DataChartsPage
+
+            page = DataChartsPage(self)
+            try:
+                old = self.pages.widget(2)
+            except Exception:
+                old = None
+            try:
+                self.pages.insertWidget(2, page)
+                try:
+                    self.pages.setCurrentWidget(page)
+                except Exception:
+                    try:
+                        self.pages.setCurrentIndex(2)
+                    except Exception:
+                        pass
+                if old is not None:
+                    try:
+                        self.pages.removeWidget(old)
+                    except Exception:
+                        pass
+                    try:
+                        old.deleteLater()
+                    except Exception:
+                        pass
+                self.page_charts = page
+                self._charts_page_loaded = True
+            except Exception as e:
+                try:
+                    NotificationManager.instance().show_toast("数据图表页面加载失败")
+                except Exception:
+                    pass
+                try:
+                    LogManager.instance().warning(f"数据图表页面加载失败: {e}")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                NotificationManager.instance().show_toast("数据图表页面加载失败")
+            except Exception:
+                pass
+            try:
+                LogManager.instance().warning(f"数据图表页面导入失败: {e}")
+            except Exception:
+                pass
+        finally:
+            self._charts_page_loading = False
 
     def _warmup_subject_detector_once(self):
         try:
@@ -866,10 +979,17 @@ class MainWindow(QMainWindow):
             self._last_main_page_index = int(index)
         except Exception:
             self._last_main_page_index = index
-        try:
-            self._ensure_charts_page_loaded()
-        except Exception:
-            pass
+        if int(index) == 2:
+            try:
+                self._ensure_charts_page_loaded()
+            except Exception:
+                pass
+            try:
+                page = getattr(self, "page_charts", None)
+                if page is not None and hasattr(page, "reload_html"):
+                    page.reload_html()
+            except Exception:
+                pass
         if index == 0:
             total, loaded, selected = getattr(self, "_library_stats", (0, 0, 0))
             cache_info = None
@@ -1036,6 +1156,10 @@ class MainWindow(QMainWindow):
         self.settings_click_count = 0
         self.settings_click_timer.stop()
 
+    def _reset_charts_debug_click_count(self):
+        self.charts_debug_click_count = 0
+        self.charts_debug_click_timer.stop()
+
     def open_user_manual(self):
         try:
             if bool(getattr(sys, "frozen", False)):
@@ -1059,6 +1183,36 @@ class MainWindow(QMainWindow):
             NotificationManager.instance().show_warning("错误", f"打开说明书失败: {e}")
 
     def eventFilter(self, obj, event):
+        if obj == self.btn_filter and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.RightButton:
+                try:
+                    if self.charts_debug_click_count == 0:
+                        self.charts_debug_click_timer.start()
+                    self.charts_debug_click_count += 1
+                    if self.charts_debug_click_count >= 6:
+                        self._reset_charts_debug_click_count()
+                        try:
+                            enabled = not bool(self.settings_manager.get("debug/charts_web_debug", False))
+                        except Exception:
+                            enabled = True
+                        try:
+                            self.settings_manager.set("debug/charts_web_debug", bool(enabled))
+                            self.settings_manager.sync()
+                        except Exception:
+                            pass
+                        try:
+                            page = getattr(self, "page_charts", None)
+                            if page is not None and hasattr(page, "set_debug_enabled"):
+                                page.set_debug_enabled(bool(enabled))
+                        except Exception:
+                            pass
+                        try:
+                            NotificationManager.instance().show_toast("数据图表调试已开启" if enabled else "数据图表调试已关闭")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return True
         if obj == self.btn_settings and event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.RightButton:
                 try:

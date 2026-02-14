@@ -155,6 +155,7 @@ class GeoLocationDialog(BasePopupDialog):
         header_bg = cm.get("popup.header.background", "#2C3E50")
         header_text_color = cm.get("popup.header.text", "#FFFFFF")
         primary_color = cm.get("theme.primary", "#2196F3")
+        text_light_color = cm.get("theme.text.light", "#FFFFFF")
 
         self.setWindowTitle("设置地理位置")
         self.setModal(True)
@@ -208,7 +209,19 @@ class GeoLocationDialog(BasePopupDialog):
                 border: 1px solid {border_color};
                 background-color: {popup_bg};
                 selection-background-color: {primary_color};
+                selection-color: {text_light_color};
                 color: {text_color};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {control_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary_color};
+                color: {text_light_color};
             }}
             QComboBox QAbstractItemView QScrollBar:vertical {{
                 background-color: {control_bg};

@@ -36,20 +36,53 @@ class PathManager:
 
     def get_user_data_path(self):
         """Returns the current user data path from settings, or default."""
+        def _ensure_dir(p: Path) -> bool:
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+                return p.exists() and p.is_dir()
+            except Exception:
+                return False
+
         path_str = self._settings.value("UserDataPath")
         if path_str:
-            return Path(path_str)
-        return self.get_default_user_data_path()
+            p = Path(str(path_str))
+            if _ensure_dir(p):
+                return p
+
+        default_p = self.get_default_user_data_path()
+        if _ensure_dir(default_p):
+            try:
+                self._settings.setValue("UserDataPath", str(default_p))
+            except Exception:
+                pass
+            return default_p
+
+        fallback = self.get_project_root() / "data" / "user_data"
+        _ensure_dir(fallback)
+        return fallback
 
     def set_user_data_path(self, path):
         """Sets the user data path."""
         self._settings.setValue("UserDataPath", str(path))
 
     def get_user_setting_dir(self):
-        return self.get_user_data_path() / "setting"
+        p = self.get_user_data_path() / "setting"
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return p
+
+    def get_user_table_setting_dir(self):
+        return self.get_user_setting_dir() / "table"
 
     def get_user_db_dir(self):
-        return self.get_user_data_path() / "db"
+        p = self.get_user_data_path() / "db"
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return p
     
     def get_user_db_path(self):
         return self.get_user_db_dir() / "data_base.db"

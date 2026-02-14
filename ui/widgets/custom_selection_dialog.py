@@ -26,6 +26,7 @@ class CustomSelectionDialog(BasePopupDialog):
         # 边框颜色
         border_color = cm.get("popup.border.primary", "#D0D0D0")
         primary_color = cm.get("theme.primary", "#2196F3")
+        text_light_color = cm.get("theme.text.light", "#FFFFFF")
         self.set_bottom_bar_style(self.get_footer_background(), border_color)
 
         msg_label = QLabel(self.label_text)
@@ -66,8 +67,20 @@ class CustomSelectionDialog(BasePopupDialog):
             QComboBox QAbstractItemView {{
                 border: 1px solid {border_color};
                 selection-background-color: {primary_color};
+                selection-color: {text_light_color};
                 background-color: {control_bg};
                 color: {text_color};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {control_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary_color};
+                color: {text_light_color};
             }}
         """)
         self.content_layout.addWidget(self.combo_box)

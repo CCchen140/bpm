@@ -77,7 +77,19 @@ class ExifReadDialog(BasePopupDialog):
                 border: 1px solid {border_color};
                 background-color: {control_bg};
                 selection-background-color: {primary_color};
+                selection-color: {header_text_color};
                 color: {text_color};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {hover_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary_color};
+                color: {header_text_color};
             }}
         """)
         preset_row.addWidget(self.preset_combo, 1)

@@ -30,6 +30,7 @@ class RemarkDialog(BasePopupDialog):
         primary_color = cm.get("theme.primary", "#2196F3")
         hover_bg = cm.get("settings.shortcut_table.row.hover_background", "#EEF3FA")
         disabled_bg = cm.get("settings.shortcut_table.header.border", "#D0D0D0")
+        text_light_color = cm.get("theme.text.light", "#FFFFFF")
         self.set_bottom_bar_style(self.get_footer_background(), border_color)
 
         header = QLabel("编辑图片备注信息")
@@ -67,7 +68,19 @@ class RemarkDialog(BasePopupDialog):
                 border: 1px solid {border_color};
                 background-color: {control_bg};
                 selection-background-color: {primary_color};
+                selection-color: {text_light_color};
                 color: {text_color};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {hover_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary_color};
+                color: {text_light_color};
             }}
         """)
 

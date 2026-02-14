@@ -170,6 +170,15 @@ class SettingsPage(QWidget):
     def __init__(self):
         super().__init__()
         self.settings_manager = SettingsManager()
+        self._settings_sync_timer = QTimer(self)
+        self._settings_sync_timer.setSingleShot(True)
+        self._settings_sync_timer.setInterval(350)
+        self._settings_sync_timer.timeout.connect(self._sync_settings_now)
+        self._font_apply_timer = QTimer(self)
+        self._font_apply_timer.setSingleShot(True)
+        self._font_apply_timer.setInterval(350)
+        self._font_apply_timer.timeout.connect(self._apply_pending_font_choice)
+        self._pending_font_choice = None
         self._rebuild_thumb_worker = None
         self._rebuild_thumb_overlay = None
         self.shortcut_recorders = {}
@@ -201,6 +210,20 @@ class SettingsPage(QWidget):
         saved_font = self.settings_manager.get("general/font_name", "中等")
         if saved_font:
             self._apply_font_to_application(saved_font)
+
+    def _queue_settings_sync(self):
+        try:
+            if self._settings_sync_timer.isActive():
+                self._settings_sync_timer.stop()
+            self._settings_sync_timer.start()
+        except Exception:
+            pass
+
+    def _sync_settings_now(self):
+        try:
+            self.settings_manager.sync()
+        except Exception:
+            pass
 
     def init_ui(self):
         cm = ColorManager.instance()
@@ -380,7 +403,19 @@ class SettingsPage(QWidget):
                 border: 1px solid {border};
                 background-color: {light_bg};
                 selection-background-color: {primary};
+                selection-color: {text_light};
                 color: {text_dark};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {dark_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary};
+                color: {text_light};
             }}
             QComboBox QAbstractItemView QScrollBar:vertical {{
                 background-color: {light_bg};
@@ -978,7 +1013,7 @@ class SettingsPage(QWidget):
         self.external_open_app_input = QLineEdit()
         self.external_open_app_input.setPlaceholderText("留空使用系统默认关联程序")
         self.external_open_app_input.setText(str(self.settings_manager.get("external/open_image_app", "") or ""))
-        self.external_open_app_input.textChanged.connect(self._on_external_open_app_changed)
+        self.external_open_app_input.editingFinished.connect(lambda: self._on_external_open_app_changed(self.external_open_app_input.text()))
         open_app_row = QHBoxLayout()
         open_app_row.addWidget(self.external_open_app_input, 1)
         open_app_browse = QPushButton("选择")
@@ -989,7 +1024,7 @@ class SettingsPage(QWidget):
         self.external_edit_app_input = QLineEdit()
         self.external_edit_app_input.setPlaceholderText("留空使用系统默认关联程序（可填 Lightroom 等）")
         self.external_edit_app_input.setText(str(self.settings_manager.get("external/edit_image_app", "") or ""))
-        self.external_edit_app_input.textChanged.connect(self._on_external_edit_app_changed)
+        self.external_edit_app_input.editingFinished.connect(lambda: self._on_external_edit_app_changed(self.external_edit_app_input.text()))
         edit_app_row = QHBoxLayout()
         edit_app_row.addWidget(self.external_edit_app_input, 1)
         edit_app_browse = QPushButton("选择")
@@ -1470,7 +1505,7 @@ class SettingsPage(QWidget):
                 self.settings_manager.set(item["current_key"], current_color)
             current_colors[token] = current_color
             default_colors[token] = default_color
-        self.settings_manager.sync()
+        self._queue_settings_sync()
         return current_colors, default_colors
 
     def _read_color_config(self):
@@ -1525,7 +1560,7 @@ class SettingsPage(QWidget):
                 cb()
             except Exception:
                 pass
-        self.settings_manager.sync()
+        self._queue_settings_sync()
         for token, color_hex in token_color_map.items():
             self._update_theme_color_preview(token, color_hex.upper())
 
@@ -1581,7 +1616,7 @@ class SettingsPage(QWidget):
             cm = ColorManager.instance()
             default_color = cm.get(token)
             self.settings_manager.set(item["default_key"], default_color)
-            self.settings_manager.sync()
+            self._queue_settings_sync()
         self._apply_theme_colors({token: default_color})
 
 
@@ -2168,6 +2203,7 @@ class SettingsPage(QWidget):
         combo_border = cm.to_qss_color("popup.border.primary")
         combo_hover_border = cm.to_qss_color("theme.primary")
         combo_primary = cm.to_qss_color("theme.primary")
+        combo_selected_text = cm.to_qss_color("theme.text.light")
         self.shortcut_table.setStyleSheet(f"""
             QTableWidget {{ 
                 border: none; 
@@ -2225,6 +2261,17 @@ class SettingsPage(QWidget):
                 background-color: {combo_bg};
                 selection-background-color: {combo_primary};
                 color: {combo_text};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {row_hover_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {combo_primary};
+                color: {combo_selected_text};
             }}
             QScrollBar:vertical {{
                 background-color: {header_bg};
@@ -2983,14 +3030,14 @@ class SettingsPage(QWidget):
     def _on_external_open_app_changed(self, text: str):
         try:
             self.settings_manager.set("external/open_image_app", str(text or "").strip())
-            self.settings_manager.sync()
+            self._queue_settings_sync()
         except Exception:
             pass
 
     def _on_external_edit_app_changed(self, text: str):
         try:
             self.settings_manager.set("external/edit_image_app", str(text or "").strip())
-            self.settings_manager.sync()
+            self._queue_settings_sync()
         except Exception:
             pass
 
@@ -3021,7 +3068,7 @@ class SettingsPage(QWidget):
     def on_use_config_toggled(self, state):
         checked = state == Qt.CheckState.Checked.value or state == True
         self.settings_manager.set("general/use_config_ini", checked)
-        self.settings_manager.sync()
+        self._queue_settings_sync()
         if checked:
             NotificationManager.instance().show_toast("已启用 config.ini 配置优先")
         else:
@@ -3181,7 +3228,7 @@ class SettingsPage(QWidget):
         try:
             self.settings_manager.set("exif/write_mode", mode)
             self.settings_manager.set("exif/disable_write", mode == "none")
-            self.settings_manager.sync()
+            self._queue_settings_sync()
         except Exception:
             pass
 
@@ -3230,9 +3277,31 @@ class SettingsPage(QWidget):
         self.settings_manager.set("general/font_family", family)
         self.settings_manager.set("general/font_variant", variant)
         self.settings_manager.set("general/font_name", variant)
-        self.settings_manager.sync()
-        self._apply_selected_font(family, variant)
-        NotificationManager.instance().show_toast(f"字体已切换为：{variant}")
+        self._queue_settings_sync()
+        try:
+            self._pending_font_choice = (family, variant)
+            if self._font_apply_timer.isActive():
+                self._font_apply_timer.stop()
+            self._font_apply_timer.start()
+        except Exception:
+            self._pending_font_choice = None
+
+    def _apply_pending_font_choice(self):
+        try:
+            pending = getattr(self, "_pending_font_choice", None)
+        except Exception:
+            pending = None
+        if not pending:
+            return
+        family, variant = pending
+        try:
+            self._apply_selected_font(family, variant)
+        except Exception:
+            return
+        try:
+            NotificationManager.instance().show_toast(f"字体已切换为：{variant}")
+        except Exception:
+            pass
 
     def _apply_selected_font(self, family_name, variant_name):
         entry = self._font_catalog.get(family_name, {})

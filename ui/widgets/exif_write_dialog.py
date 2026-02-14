@@ -82,7 +82,19 @@ class ExifWriteDialog(BasePopupDialog):
                 border: 1px solid {self._border_color};
                 background-color: {self._control_bg};
                 selection-background-color: {self._primary_color};
+                selection-color: {self._header_text_color};
                 color: {self._text_color};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 10px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {self._hover_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {self._primary_color};
+                color: {self._header_text_color};
             }}
         """)
 

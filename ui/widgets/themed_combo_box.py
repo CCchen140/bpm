@@ -14,7 +14,9 @@ class ThemedComboBox(QComboBox):
         cm = ColorManager.instance()
         border = cm.get("popup.border.primary")
         text_dark = cm.get("theme.text.dark")
+        text_light = cm.get("theme.text.light")
         light_bg = cm.get("theme.background.light")
+        dark_bg = cm.get("theme.background.dark")
         primary = cm.get("theme.primary")
         tooltip_bg = cm.get("theme.text.light")
         tooltip_text = cm.get("tooltip.text")
@@ -46,7 +48,19 @@ class ThemedComboBox(QComboBox):
                 border: 1px solid {border};
                 background-color: {light_bg};
                 selection-background-color: {primary};
+                selection-color: {text_light};
                 color: {text_dark};
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {dark_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {primary};
+                color: {text_light};
             }}
             QComboBox QAbstractItemView QScrollBar:vertical {{
                 background-color: {light_bg};

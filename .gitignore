@@ -11,6 +11,7 @@ data/setting/*
 deepseek*
 .vscode/*
 .VSCodeCounter/*
+.cursor/*
 .ruff_cache/*
 cache/logs/*
 cache/pictures/*

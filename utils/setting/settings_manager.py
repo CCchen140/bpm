@@ -143,6 +143,21 @@ class SettingsManager(QObject):
         "debug/focus_virtual_counts_log": {"default": False, "type": bool, "label": "调试：记录对焦虚拟文件夹统计"},
         "debug/focus_save_output": {"default": False, "type": bool, "label": "对焦检测保存调试输出"},
         "debug/focus_save_output_dir": {"default": "", "type": str, "label": "对焦检测调试输出目录"},
+        "debug/charts_web_debug": {"default": False, "type": bool, "label": "数据图表 Web 调试"},
+        "charts/theme": {"default": "follow", "type": str, "label": "数据图表主题"},
+        "charts/display_options_json": {"default": "{}", "type": str, "label": "数据图表显示选项(JSON)"},
+        "charts/gpu_rendering_enabled": {"default": False, "type": bool, "label": "数据图表 GPU 渲染"},
+        "charts/show_title": {"default": True, "type": bool, "label": "数据图表显示标题"},
+        "charts/show_legend": {"default": True, "type": bool, "label": "数据图表显示图例"},
+        "charts/show_grid": {"default": True, "type": bool, "label": "数据图表显示网格"},
+        "charts/enable_animation": {"default": True, "type": bool, "label": "数据图表启用动画"},
+        "charts/pause_refresh_on_mouse_leave": {"default": True, "type": bool, "label": "数据图表离开暂停刷新"},
+        "charts/font_size": {"default": 12, "type": int, "label": "数据图表字号"},
+        "charts/watermark_enabled": {"default": False, "type": bool, "label": "数据图表水印开关"},
+        "charts/watermark_text": {"default": "", "type": str, "label": "数据图表水印文字"},
+        "charts/watermark_font_size": {"default": 22, "type": int, "label": "数据图表水印字号"},
+        "charts/echarts_theme": {"default": "dark", "type": str, "label": "数据图表 ECharts 主题"},
+        "charts/window_style": {"default": "acrylic", "type": str, "label": "数据图表窗口样式"},
         "exif/disable_write": {"default": False, "type": bool, "label": "禁用 EXIF 写入"},
         "exif/write_mode": {"default": "file", "type": str, "label": "EXIF写入方式"},
         "system/hide_subprocess_console": {"default": True, "type": bool, "label": "隐藏外部命令行窗口"},
@@ -194,12 +209,18 @@ class SettingsManager(QObject):
         self.profile = str(profile or "").strip()
         app_name = f"{application}_{profile}" if profile else str(application)
         self.settings = QSettings(organization, app_name)
+        self._use_config_ini = False
+        self._config_sync_lock = threading.Lock()
+        self._config_sync_timer = None
+        self._config_sync_delay_sec = 0.25
+        self._config_sync_pending = False
         try:
             self._migrate_from_legacy_qsettings(organization, application)
         except Exception:
             pass
         self._init_config_file()
         use_config = self.get("general/use_config_ini", False)
+        self._use_config_ini = bool(use_config)
         if use_config:
             self.load_from_config()
 
@@ -352,8 +373,51 @@ class SettingsManager(QObject):
     def set(self, key, value):
         """保存设置值"""
         self.settings.setValue(key, value)
-        self.sync_to_config(key)
+        if str(key or "") == "general/use_config_ini":
+            try:
+                self._use_config_ini = bool(self.get("general/use_config_ini", False))
+            except Exception:
+                self._use_config_ini = bool(value)
+            if self._use_config_ini:
+                self._schedule_sync_to_config()
+        if self._use_config_ini:
+            self._schedule_sync_to_config()
         self.setting_changed.emit(key, value)
+
+    def _schedule_sync_to_config(self):
+        if not self._use_config_ini:
+            return
+        try:
+            delay = float(self._config_sync_delay_sec)
+        except Exception:
+            delay = 0.25
+        with self._config_sync_lock:
+            self._config_sync_pending = True
+            t = self._config_sync_timer
+            if t is not None:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
+            timer = threading.Timer(delay, self._flush_scheduled_sync_to_config)
+            timer.daemon = True
+            self._config_sync_timer = timer
+            try:
+                timer.start()
+            except Exception:
+                self._config_sync_timer = None
+
+    def _flush_scheduled_sync_to_config(self):
+        with self._config_sync_lock:
+            pending = bool(self._config_sync_pending)
+            self._config_sync_pending = False
+            self._config_sync_timer = None
+        if not pending:
+            return
+        try:
+            self.sync_to_config()
+        except Exception:
+            pass
         
     def contains(self, key):
         """检查键是否存在"""
@@ -419,7 +483,7 @@ class SettingsManager(QObject):
             os.makedirs(config_dir, exist_ok=True)
         parser = configparser.ConfigParser()
         parser.optionxform = str
-        if config_path.exists():
+        if key is not None and config_path.exists():
             parser.read(config_path, encoding="utf-8")
 
         def _write_value_to_parser(k):

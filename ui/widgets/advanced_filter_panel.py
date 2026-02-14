@@ -229,6 +229,17 @@ class FilterRow(QWidget):
                 selection-color: {selection_text};
                 outline: none;
             }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px 8px;
+                border-radius: 4px;
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {scrollbar_bg};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: {combo_primary};
+                color: {selection_text};
+            }}
             QComboBox QAbstractItemView QScrollBar:vertical {{
                 background-color: {scrollbar_bg};
                 width: 10px;
