@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import QWidget
 
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QRectF
 from PyQt6.QtGui import QPixmap, QFont, QColor, QPen, QRadialGradient, QBrush, QPainter, QLinearGradient
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from cache.cache_manager import ImageCacheManager
 from utils.system.gpu_utils import GPUScaler

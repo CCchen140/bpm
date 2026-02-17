@@ -9,7 +9,7 @@ from collections import deque, OrderedDict
 import time
 from threading import Thread, Event
 from datetime import datetime
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from ui.common.base_page import BaseImageBrowserPage
 from ui.common.styles import TOOLBAR_BTN_STYLE
@@ -2632,7 +2632,20 @@ class ImportPage(BaseImageBrowserPage):
         if index < len(thumbnails):
             thumb = thumbnails[index]
             if thumb.image_info:
-                self._schedule_preview(thumb.image_info.get('path'))
+                try:
+                    p = None
+                    if isinstance(thumb.image_info, dict):
+                        p = thumb.image_info.get("path") or thumb.image_info.get("file_path")
+                    self._update_info_panel(p)
+                except Exception:
+                    pass
+                try:
+                    p = None
+                    if isinstance(thumb.image_info, dict):
+                        p = thumb.image_info.get("path") or thumb.image_info.get("file_path")
+                    self._schedule_preview(p)
+                except Exception:
+                    self._schedule_preview(thumb.image_info.get('path') if isinstance(thumb.image_info, dict) else None)
                 try:
                     self._print_focus_detect_result(thumb.image_info.get("path"), thumb.image_info)
                 except Exception:
@@ -2649,7 +2662,14 @@ class ImportPage(BaseImageBrowserPage):
         elif index < len(self.image_files):
             img_info = self.image_files[index]
             if isinstance(img_info, dict):
-                self._schedule_preview(img_info.get('path'))
+                try:
+                    self._update_info_panel(img_info.get("path") or img_info.get("file_path"))
+                except Exception:
+                    pass
+                try:
+                    self._schedule_preview(img_info.get("path") or img_info.get("file_path"))
+                except Exception:
+                    self._schedule_preview(img_info.get("path"))
                 try:
                     self._print_focus_detect_result(img_info.get("path"), img_info)
                 except Exception:
@@ -3627,17 +3647,64 @@ class ImportPage(BaseImageBrowserPage):
             p0 = str(image_path or "")
         except Exception:
             p0 = ""
+        p1 = p0.strip()
+        try:
+            s = p1.replace("\r", "").strip()
+            if "路径:" in s:
+                s = s.split("路径:")[-1].strip()
+            if "原图片的路径" in s:
+                s = s.split("原图片的路径")[-1].strip()
+            if s.startswith(":"):
+                s = s[1:].strip()
+            low = s.lower()
+            if low.startswith("file:///"):
+                s = s[8:]
+            elif low.startswith("file://"):
+                s = s[7:]
+            s = s.strip().strip('"').strip("'").strip()
+            p1 = s
+        except Exception:
+            p1 = p1.strip()
+        if not p1:
+            try:
+                selected = self.get_selected_files() or []
+            except Exception:
+                selected = []
+            if len(selected) == 1 and isinstance(selected[0], dict):
+                try:
+                    p1 = str(selected[0].get("path") or selected[0].get("file_path") or "").strip()
+                except Exception:
+                    p1 = ""
+        if not p1:
+            try:
+                idx = int(getattr(self.grid_view, "last_selected_index", -1))
+            except Exception:
+                idx = -1
+            try:
+                thumbs = getattr(self.grid_view, "thumbnails", []) or []
+            except Exception:
+                thumbs = []
+            if 0 <= idx < len(thumbs):
+                try:
+                    info = getattr(thumbs[idx], "image_info", None)
+                except Exception:
+                    info = None
+                if isinstance(info, dict):
+                    try:
+                        p1 = str(info.get("path") or info.get("file_path") or "").strip()
+                    except Exception:
+                        p1 = ""
         try:
             cur = str(getattr(self, "_current_folder_path", "") or "")
         except Exception:
             cur = ""
-        if p0 and bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?")):
+        if p1 and bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?")):
             try:
-                rec = self.db.get_result_by_path(p0, table_name="import_cache") if hasattr(self, "db") else None
+                rec = self.db.get_result_by_path(p1, table_name="import_cache") if hasattr(self, "db") else None
             except Exception:
                 rec = None
             if not isinstance(rec, dict):
-                rec = self._find_image_info_by_path(p0) if hasattr(self, "_find_image_info_by_path") else None
+                rec = self._find_image_info_by_path(p1) if hasattr(self, "_find_image_info_by_path") else None
             if not isinstance(rec, dict):
                 rec = {}
             try:
@@ -3674,10 +3741,10 @@ class ImportPage(BaseImageBrowserPage):
                     pass
 
         try:
-            panel.update_info(image_path, ctx)
+            panel.update_info(p1, ctx)
         except Exception:
             try:
-                panel.update_info(image_path)
+                panel.update_info(p1)
             except Exception:
                 pass
 
@@ -15642,10 +15709,14 @@ class ImportPage(BaseImageBrowserPage):
             selected = []
         if len(selected) == 1:
             try:
-                p = selected[0].get("path")
+                p = selected[0].get("path") or selected[0].get("file_path")
             except Exception:
                 p = None
             if p and p != getattr(self, "current_preview_path", None):
+                try:
+                    self._update_info_panel(p)
+                except Exception:
+                    pass
                 self._schedule_preview(p)
 
     def _on_show_subject_rect_toggled(self, checked: bool):

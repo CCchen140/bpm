@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton,
                              QLineEdit, QHBoxLayout, QFileDialog, QStackedWidget, QProgressBar, QComboBox, QListWidget, QListWidgetItem, QCheckBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QLinearGradient, QColor, QPalette, QBrush, QPainter
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 import exiftool
 from utils.setting.settings_manager import SettingsManager
 from utils.system.app_info_manager import AppInfoManager
@@ -100,6 +100,7 @@ class IntroPage(QWidget):
         browse_hover_bg = cm.get("theme.primary")
         browse_text = cm.get("theme.text.dark")
         browse_hover_text = cm.get("theme.text.light")
+        combo_bg = cm.get("theme.background.light")
         path_container.setStyleSheet(f"""
             QWidget {{
                 background-color: {path_bg};
@@ -159,6 +160,7 @@ class IntroPage(QWidget):
         browse_hover_bg = cm.get("theme.primary")
         browse_text = cm.get("theme.text.dark")
         browse_hover_text = cm.get("theme.text.light")
+        combo_bg = cm.get("theme.background.light")
         path_container.setStyleSheet(f"""
             QWidget {{
                 background-color: {path_bg};
@@ -219,9 +221,16 @@ class IntroPage(QWidget):
                 padding: 4px 10px;
                 border: 1px solid {path_border};
                 border-radius: 4px;
-                background-color: {browse_bg};
+                background-color: {combo_bg};
                 color: {path_text};
                 font-size: 14px;
+            }}
+            QComboBox QAbstractItemView {{
+                border: 1px solid {path_border};
+                background-color: {combo_bg};
+                selection-background-color: {browse_hover_bg};
+                selection-color: {browse_hover_text};
+                color: {path_text};
             }}
         """)
         
@@ -262,9 +271,16 @@ class IntroPage(QWidget):
                 padding: 6px 10px;
                 border: 1px solid {path_border};
                 border-radius: 4px;
-                background-color: {browse_bg};
+                background-color: {combo_bg};
                 color: {path_text};
                 font-size: 14px;
+            }}
+            QComboBox QAbstractItemView {{
+                border: 1px solid {path_border};
+                background-color: {combo_bg};
+                selection-background-color: {browse_hover_bg};
+                selection-color: {browse_hover_text};
+                color: {path_text};
             }}
         """)
         try:

@@ -3134,6 +3134,36 @@ class BirdLibraryDB:
             finally:
                 conn.close()
 
+    def update_file_path_by_uuid(self, uuid, file_path, table_name='bird_results'):
+        if table_name not in ['bird_results', 'import_cache']:
+            return
+        try:
+            uuid = str(uuid or "")
+        except Exception:
+            uuid = ""
+        if not uuid:
+            return
+        try:
+            file_path_db = self._normalize_file_path_for_db(file_path)
+        except Exception:
+            file_path_db = str(file_path or "")
+        if not file_path_db:
+            return
+        try:
+            file_name = os.path.basename(file_path_db)
+        except Exception:
+            file_name = ""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    f"UPDATE {table_name} SET file_path = ?, file_name = ? WHERE uuid = ?",
+                    (file_path_db, file_name, uuid),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
     def delete_result(self, file_path, table_name='bird_results'):
         """删除指定路径的记录"""
         if table_name not in ['bird_results', 'import_cache']:

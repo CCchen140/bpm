@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLineEdit, QCheckBox, QPushButton, QButtonGroup, QRadioButton, QDateTimeEdit)
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QDateTime
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from utils.tag_manager import TagManager
 from ui.widgets.rating_filter_button import RatingFilterButton
 from ui.widgets.rating_filter_widget import StarRatingWidget

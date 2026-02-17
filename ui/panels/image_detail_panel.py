@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QToolButton, QGraphicsOpacityEffect, QStackedWidget, QSplitter, QApplication, QMenu, QListView, QStyle, QTextBrowser)
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QTimer, QThread, QEvent, QRectF
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QColor, QPainter, QAction, QTransform, QPainterPath, QBrush, QPen, QRadialGradient, QImageReader, QShortcut
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from utils.file.file import load_image, load_raw_full, raw_exts
 from utils.file.fingerprint import get_unique_id

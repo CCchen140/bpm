@@ -20,7 +20,7 @@ from ui.utils.shortcut_manager import ShortcutManager
 from ui.utils.flow_layout import FlowLayout
 from ui.widgets.shortcut_recorder import ShortcutRecorder
 from ui.utils.color_manager import ColorManager
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from utils.log_manager import LogManager
 
 class ModernSpinBox(QWidget):

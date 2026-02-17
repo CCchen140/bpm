@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QRect, QEvent
 from PyQt6.QtGui import QPixmap, QImage, QColor, QPainter, QRadialGradient, QBrush, QIcon, QImageReader
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 import os
 import cv2
 import numpy as np

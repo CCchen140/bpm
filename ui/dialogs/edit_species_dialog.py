@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QStringListModel, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QCheckBox, QCompleter
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from core.classifier.bird_biological_classifier import BirdBiologicalClassifier
 from core.detectors.bird_focus_detector import BirdFocusDetector

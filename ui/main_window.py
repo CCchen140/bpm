@@ -13,8 +13,9 @@ from ui.utils.status_manager import StatusManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.app_icon import get_app_icon
 from ui.import_page import ImportPage
+from ui.web.image_grid_page import ImageGridWebPage
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 import os
 import sys
 import psutil
@@ -121,8 +122,9 @@ class MainWindow(QMainWindow):
                 color: {status_text};
                 font-size: 11px;
             }}
-            QLabel {{
+            QStatusBar QLabel {{
                 padding: 0 5px;
+                color: {status_text};
             }}
         """)
         central_layout.addWidget(self.status_bar)
@@ -273,6 +275,32 @@ class MainWindow(QMainWindow):
         icon_layout.addWidget(self.btn_milestone)
         self._sidebar_buttons.append(self.btn_milestone)
         self._sidebar_icon_map.append((self.btn_milestone, "ri.medal-line", "ri.medal-fill"))
+        
+        # 图库 Web 版按钮（放在奖章按钮后面）
+        self.btn_library_web = QPushButton()
+        # 尝试多个图标，使用第一个可用的
+        icon_names = ['mdi6.web', 'mdi.web', 'fa5s.globe', 'mdi6.earth', 'fa5s.desktop']
+        icon_set = False
+        for icon_name in icon_names:
+            try:
+                self.btn_library_web.setIcon(qta.icon(icon_name, color=button_color))
+                icon_set = True
+                break
+            except Exception:
+                continue
+        if not icon_set:
+            # 如果所有图标都失败，使用文字
+            self.btn_library_web.setText("W")
+        self.btn_library_web.setIconSize(QSize(28, 28))
+        self.btn_library_web.setFixedSize(50, 50)
+        self.btn_library_web.setToolTip("图库 Web 版")
+        self.btn_library_web.setCheckable(True)
+        self.btn_library_web.setStyleSheet(sidebar_btn_style)
+        self.sidebar_btn_group.addButton(self.btn_library_web, 6)
+        icon_layout.addWidget(self.btn_library_web)
+        self._sidebar_buttons.append(self.btn_library_web)
+        self._sidebar_icon_map.append((self.btn_library_web, "mdi6.web", "mdi6.web"))
+        
         icon_layout.addStretch()
         self.btn_manual = QPushButton()
         self.btn_manual.setIcon(qta.icon('fa6s.book', color=button_color))
@@ -360,6 +388,10 @@ class MainWindow(QMainWindow):
         # 关于页面
         self.page_info = InfoPage()
         self.pages.addWidget(self.page_info)
+        
+        # 图库 Web 版本
+        self.page_library_web = ImageGridWebPage()
+        self.pages.addWidget(self.page_library_web)
         
         # 连接按钮组到页面切换
         self.sidebar_btn_group.idClicked.connect(self.pages.setCurrentIndex)
@@ -456,8 +488,9 @@ class MainWindow(QMainWindow):
                     color: {status_text};
                     font-size: 11px;
                 }}
-                QLabel {{
+                QStatusBar QLabel {{
                     padding: 0 5px;
+                    color: {status_text};
                 }}
             """)
         if hasattr(self, "content_container"):

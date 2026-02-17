@@ -8,11 +8,20 @@ import threading
 import time
 
 import rawpy
-import torch
 import cv2
 import numpy as np
 import exifread
-from ultralytics import YOLO
+
+try:
+    import torch
+    from ultralytics import YOLO
+    _TORCH_YOLO_AVAILABLE = True
+    _TORCH_IMPORT_ERROR: Exception | None = None
+except Exception as _e:
+    torch = None  # type: ignore[assignment]
+    YOLO = None  # type: ignore[assignment]
+    _TORCH_YOLO_AVAILABLE = False
+    _TORCH_IMPORT_ERROR = _e
 
 import utils.file.file as FileUtils
 from utils.system.gpu_utils import GPUScaler
@@ -123,6 +132,10 @@ class BirdFocusDetector:
         save_output: bool = True,
         print_focus_point: bool = True,
     ):
+        if not _TORCH_YOLO_AVAILABLE or YOLO is None:
+            msg = "缺少依赖：PyTorch/Ultralytics YOLO 未正确安装或无法加载"
+            raise RuntimeError(msg if _TORCH_IMPORT_ERROR is None else f"{msg} ({_TORCH_IMPORT_ERROR})")
+
         self.model_path = model_path
         self.device = self._select_device()
         self.model = YOLO(model_path, verbose=False)
@@ -162,7 +175,7 @@ class BirdFocusDetector:
     @staticmethod
     def _select_device():
         try:
-            if torch.cuda.is_available():
+            if torch is not None and hasattr(torch, "cuda") and torch.cuda.is_available():
                 return "cuda"
         except Exception:
             pass

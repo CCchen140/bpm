@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTreeWidgetItem, QTreeWidgetItemIterator, QMenu, 
                              QAbstractItemView, QHeaderView, QSpacerItem, QSizePolicy)
 from PyQt6.QtCore import Qt, QSize, QPoint, pyqtSignal, QTimer, QEvent, QModelIndex
-import qtawesome as qta
+from PyQt6.QtGui import QShortcut, QPainter, QPen, QColor, QIcon, QPixmap
+from PyQt6.QtSvg import QSvgRenderer
 try:
     from pypinyin import lazy_pinyin
 except ImportError:
@@ -16,7 +17,74 @@ from ui.utils.notification_manager import NotificationManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.shortcut_manager import ShortcutManager
 from utils.log_manager import LogManager
-from PyQt6.QtGui import QShortcut, QPainter, QPen, QColor
+
+
+# 图标映射表：将qtawesome图标名映射到本地SVG图标
+ICON_MAP = {
+    'mdi6.chevron-left': '左',
+    'mdi6.chevron-right': '右',
+    'mdi6.magnify': '搜索',
+    'mdi6.sort-alphabetical-ascending': '排序',
+    'mdi6.harddisk': '固态硬盘',
+    'mdi6.folder': '文件夹-关',
+    'mdi6.loading': '加载',
+    'mdi6.folder-plus': '文件夹-添加',
+    'mdi6.rename-box': '编辑',  # 使用编辑图标代替重命名
+    'mdi6.folder-remove': '删除',
+    'mdi6.trash-can-outline': '删除',
+    'mdi6.folder-open': '文件夹-开',
+}
+
+
+def load_svg_icon(icon_name, color=None, style='line'):
+    """
+    加载SVG图标
+    :param icon_name: 图标名称（可以是qtawesome名称或中文名称）
+    :param color: 图标颜色（十六进制字符串，如'#ffffff'）
+    :param style: 'line' 或 'fill'
+    :return: QIcon对象
+    """
+    # 如果是qtawesome图标名，转换为本地图标名
+    if icon_name in ICON_MAP:
+        icon_name = ICON_MAP[icon_name]
+    
+    base_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'icon', style)
+    
+    # 尝试查找匹配的图标文件
+    icon_path = None
+    if os.path.exists(base_path):
+        for filename in os.listdir(base_path):
+            if filename.endswith('.svg') and icon_name in filename:
+                icon_path = os.path.join(base_path, filename)
+                break
+    
+    if not icon_path or not os.path.exists(icon_path):
+        # 如果找不到图标，返回空图标
+        return QIcon()
+    
+    # 读取SVG内容
+    with open(icon_path, 'r', encoding='utf-8') as f:
+        svg_content = f.read()
+    
+    # 如果指定了颜色，替换SVG中的颜色
+    if color:
+        # 移除颜色字符串中的#号
+        if color.startswith('#'):
+            color = color[1:]
+        # 替换常见的颜色属性
+        import re
+        svg_content = re.sub(r'fill="[^"]*"', f'fill="#{color}"', svg_content)
+        svg_content = re.sub(r'stroke="[^"]*"', f'stroke="#{color}"', svg_content)
+    
+    # 创建QIcon
+    renderer = QSvgRenderer(svg_content.encode('utf-8'))
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    
+    return QIcon(pixmap)
 
 class _DropSplitOverlay(QWidget):
     def __init__(self, parent=None):
@@ -622,28 +690,28 @@ class FolderPanel(QWidget):
             """)
         if self.toggle_btn:
             icon_name = self.toggle_btn.property("icon_name") or "mdi6.chevron-left"
-            self.toggle_btn.setIcon(qta.icon(icon_name, color=toolbar_icon_color, options=[{'scale_factor': 1.1}]))
+            self.toggle_btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
             self.style_tool_btn(self.toggle_btn, primary)
         if self.search_btn:
             icon_name = self.search_btn.property("icon_name") or "mdi6.magnify"
-            self.search_btn.setIcon(qta.icon(icon_name, color=toolbar_icon_color, options=[{'scale_factor': 1.1}]))
+            self.search_btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
             self.style_tool_btn(self.search_btn, primary)
         if self.sort_btn:
             icon_name = self.sort_btn.property("icon_name") or "mdi6.sort-alphabetical-ascending"
-            self.sort_btn.setIcon(qta.icon(icon_name, color=toolbar_icon_color, options=[{'scale_factor': 1.1}]))
+            self.sort_btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
             self.style_tool_btn(self.sort_btn, primary)
         for btn in self.tool_buttons:
             if not isinstance(btn, QPushButton):
                 continue
             icon_name = btn.property("icon_name")
             if icon_name:
-                btn.setIcon(qta.icon(icon_name, color=toolbar_icon_color, options=[{'scale_factor': 1.1}]))
+                btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
             self.style_tool_btn(btn, primary)
         if self.folder_tree:
             root = self.folder_tree.invisibleRootItem()
-            root_icon = qta.icon("mdi6.harddisk", color=text_dark)
-            folder_icon = qta.icon("mdi6.folder", color=primary)
-            loading_icon = qta.icon("mdi6.loading", color=tree_icon_color)
+            root_icon = load_svg_icon("mdi6.harddisk", color=text_dark)
+            folder_icon = load_svg_icon("mdi6.folder", color=primary)
+            loading_icon = load_svg_icon("mdi6.loading", color=tree_icon_color)
             for i in range(root.childCount()):
                 top = root.child(i)
                 top.setIcon(0, root_icon)
@@ -677,7 +745,7 @@ class FolderPanel(QWidget):
         icon_color = ColorManager.instance().get("theme.text.dark")
         self.toggle_btn = QPushButton()
         self.toggle_btn.setProperty("icon_name", "mdi6.chevron-left")
-        self.toggle_btn.setIcon(qta.icon('mdi6.chevron-left', color=icon_color, options=[{'scale_factor': 1.1}]))
+        self.toggle_btn.setIcon(load_svg_icon('mdi6.chevron-left', color=icon_color))
         self.toggle_btn.setIconSize(QSize(18, 18))
         self.toggle_btn.setFixedSize(24, 24)
         self.toggle_btn.setToolTip("折叠文件夹")
@@ -754,7 +822,7 @@ class FolderPanel(QWidget):
         self.search_btn = QPushButton()
         icon_color = ColorManager.instance().get("theme.text.dark")
         self.search_btn.setProperty("icon_name", "mdi6.magnify")
-        self.search_btn.setIcon(qta.icon('mdi6.magnify', color=icon_color, options=[{'scale_factor': 1.1}]))
+        self.search_btn.setIcon(load_svg_icon('mdi6.magnify', color=icon_color))
         self.search_btn.setIconSize(QSize(18, 18))
         self.search_btn.setFixedSize(24, 24)
         self.search_btn.setToolTip("搜索文件夹")
@@ -773,7 +841,7 @@ class FolderPanel(QWidget):
         self.sort_btn = QPushButton()
         icon_color = ColorManager.instance().get("theme.text.dark")
         self.sort_btn.setProperty("icon_name", "mdi6.sort-alphabetical-ascending")
-        self.sort_btn.setIcon(qta.icon('mdi6.sort-alphabetical-ascending', color=icon_color, options=[{'scale_factor': 1.1}]))
+        self.sort_btn.setIcon(load_svg_icon('mdi6.sort-alphabetical-ascending', color=icon_color))
         self.sort_btn.setIconSize(QSize(18, 18))
         self.sort_btn.setFixedSize(24, 24)
         self.sort_btn.setToolTip("排序")
@@ -1197,7 +1265,7 @@ class FolderPanel(QWidget):
         
         root_item = QTreeWidgetItem(self.folder_tree, [root_path])
         icon_color = ColorManager.instance().get("theme.text.dark")
-        root_item.setIcon(0, qta.icon('mdi6.harddisk', color=icon_color))
+        root_item.setIcon(0, load_svg_icon('mdi6.harddisk', color=icon_color))
         root_item.setData(0, Qt.ItemDataRole.UserRole, root_path)
         
         if self.show_db_stats:
@@ -1232,7 +1300,7 @@ class FolderPanel(QWidget):
             try:
                 placeholder = QTreeWidgetItem(root_item, ["加载中..."])
                 loading_icon_color = ColorManager.instance().get("theme.text.light")
-                placeholder.setIcon(0, qta.icon('mdi6.loading', color=loading_icon_color))
+                placeholder.setIcon(0, load_svg_icon('mdi6.loading', color=loading_icon_color))
                 placeholder.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
             except Exception:
                 pass
@@ -1276,7 +1344,7 @@ class FolderPanel(QWidget):
         for order_name in sorted(tree.keys()):
             o_node = tree.get(order_name) or {}
             o_item = QTreeWidgetItem(root_item, [str(order_name)])
-            o_item.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+            o_item.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
             o_item.setData(0, Qt.ItemDataRole.UserRole, f"virtual://taxonomy?order={order_name}")
             if self.show_db_stats:
                 o_item.setText(0, f"{order_name} (物种: {int(o_node.get('species_count') or 0)}, 图片: {int(o_node.get('image_count') or 0)})")
@@ -1284,7 +1352,7 @@ class FolderPanel(QWidget):
             for family_name in sorted(families.keys()):
                 f_node = families.get(family_name) or {}
                 f_item = QTreeWidgetItem(o_item, [str(family_name)])
-                f_item.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+                f_item.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
                 f_item.setData(0, Qt.ItemDataRole.UserRole, f"virtual://taxonomy?order={order_name}&family={family_name}")
                 if self.show_db_stats:
                     f_item.setText(0, f"{family_name} (物种: {int(f_node.get('species_count') or 0)}, 图片: {int(f_node.get('image_count') or 0)})")
@@ -1292,7 +1360,7 @@ class FolderPanel(QWidget):
                 for genus_name in sorted(genera.keys()):
                     g_node = genera.get(genus_name) or {}
                     g_item = QTreeWidgetItem(f_item, [str(genus_name)])
-                    g_item.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+                    g_item.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
                     g_item.setData(0, Qt.ItemDataRole.UserRole, f"virtual://taxonomy?order={order_name}&family={family_name}&genus={genus_name}")
                     if self.show_db_stats:
                         g_item.setText(0, f"{genus_name} (物种: {int(g_node.get('species_count') or 0)}, 图片: {int(g_node.get('image_count') or 0)})")
@@ -1300,14 +1368,14 @@ class FolderPanel(QWidget):
                     for species_name in sorted(species.keys()):
                         s_node = species.get(species_name) or {}
                         s_item = QTreeWidgetItem(g_item, [str(species_name)])
-                        s_item.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+                        s_item.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
                         s_item.setData(0, Qt.ItemDataRole.UserRole, f"virtual://taxonomy?order={order_name}&family={family_name}&genus={genus_name}&species={species_name}")
                         if self.show_db_stats:
                             s_item.setText(0, f"{species_name} (图片: {int(s_node.get('image_count') or 0)})")
 
         unclassified_count = int(stats.get("unclassified_image_count") or 0)
         un_item = QTreeWidgetItem(root_item, ["未分类"])
-        un_item.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+        un_item.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
         un_item.setData(0, Qt.ItemDataRole.UserRole, "virtual://taxonomy/unclassified")
         if self.show_db_stats:
             un_item.setText(0, f"未分类 (图片: {unclassified_count})")
@@ -1336,7 +1404,7 @@ class FolderPanel(QWidget):
             if self.show_db_stats:
                 label = f"{rel} (图片: {cnt})"
             child = QTreeWidgetItem(un_item, [label])
-            child.setIcon(0, qta.icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
+            child.setIcon(0, load_svg_icon('mdi6.folder', color=ColorManager.instance().get("theme.primary")))
             enc = folder_abs
             if quote:
                 try:
@@ -1455,7 +1523,7 @@ class FolderPanel(QWidget):
 
                     try:
                         folder_icon_color = ColorManager.instance().get("theme.primary")
-                        moved.setIcon(0, qta.icon('mdi6.folder', color=folder_icon_color))
+                        moved.setIcon(0, load_svg_icon('mdi6.folder', color=folder_icon_color))
                         if old_path:
                             moved.setText(0, os.path.basename(str(old_path)) or str(old_path))
                             try:
@@ -1757,7 +1825,7 @@ class FolderPanel(QWidget):
                             
                     child_item = QTreeWidgetItem(parent_item, [entry])
                     folder_icon_color = ColorManager.instance().get("theme.primary")
-                    child_item.setIcon(0, qta.icon('mdi6.folder', color=folder_icon_color))
+                    child_item.setIcon(0, load_svg_icon('mdi6.folder', color=folder_icon_color))
                     child_item.setData(0, Qt.ItemDataRole.UserRole, full_path)
                     child_item.setText(1, self._get_sort_key(entry))
                     
@@ -1770,7 +1838,7 @@ class FolderPanel(QWidget):
                         try:
                             placeholder = QTreeWidgetItem(child_item, ["加载中..."])
                             loading_icon_color = ColorManager.instance().get("theme.text.light")
-                            placeholder.setIcon(0, qta.icon('mdi6.loading', color=loading_icon_color))
+                            placeholder.setIcon(0, load_svg_icon('mdi6.loading', color=loading_icon_color))
                             placeholder.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
                         except PermissionError:
                             pass
@@ -2047,7 +2115,7 @@ class FolderPanel(QWidget):
             item.setToolTip(folder_path)
             try:
                 icon_color = ColorManager.instance().get("theme.primary")
-                item.setIcon(qta.icon("mdi6.folder", color=icon_color))
+                item.setIcon(load_svg_icon("mdi6.folder", color=icon_color))
             except Exception:
                 pass
             self.search_results.addItem(item)
@@ -2610,33 +2678,33 @@ class FolderPanel(QWidget):
         is_root_item = item.parent() is None
 
         # New Folder
-        new_folder_action = menu.addAction(qta.icon('mdi6.folder-plus', color='#555'), "新建文件夹")
+        new_folder_action = menu.addAction(load_svg_icon('mdi6.folder-plus', color='#555'), "新建文件夹")
         new_folder_action.triggered.connect(self.create_new_folder)
         
         menu.addSeparator()
 
         if item.parent():
-            rename_action = menu.addAction(qta.icon('mdi6.rename-box', color='#555'), "重命名")
+            rename_action = menu.addAction(load_svg_icon('mdi6.rename-box', color='#555'), "重命名")
             rename_action.triggered.connect(lambda: self.rename_folder(item))
             
         if is_import_context:
             if is_root_item:
                 try:
-                    remove_action = menu.addAction(qta.icon('mdi6.folder-remove', color='#555'), "移除文件夹")
+                    remove_action = menu.addAction(load_svg_icon('mdi6.folder-remove', color='#555'), "移除文件夹")
                 except Exception:
                     remove_action = menu.addAction("移除文件夹")
                 remove_action.triggered.connect(lambda: self.remove_folder_from_tree(item))
-            delete_action = menu.addAction(qta.icon('mdi6.trash-can-outline', color='#e74c3c'), "删除文件夹")
+            delete_action = menu.addAction(load_svg_icon('mdi6.trash-can-outline', color='#e74c3c'), "删除文件夹")
             delete_action.triggered.connect(lambda: self.delete_folder_item(item, allow_root_delete=True))
             menu.addSeparator()
         else:
             if item.parent():
-                delete_action = menu.addAction(qta.icon('mdi6.trash-can-outline', color='#e74c3c'), "删除")
+                delete_action = menu.addAction(load_svg_icon('mdi6.trash-can-outline', color='#e74c3c'), "删除")
                 delete_action.triggered.connect(self.delete_folder)
                 menu.addSeparator()
 
         if os.path.exists(path):
-            open_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "在文件管理器中打开")
+            open_action = menu.addAction(load_svg_icon('mdi6.folder-open', color='#555'), "在文件管理器中打开")
             open_action.triggered.connect(lambda: self.open_in_explorer(path))
 
         menu.exec(self.folder_tree.viewport().mapToGlobal(position))
@@ -2719,7 +2787,7 @@ class FolderPanel(QWidget):
                     # 手动添加子节点，避免完全重载
                     child_item = QTreeWidgetItem(target_parent_item, [new_name])
                     icon_color = ColorManager.instance().get("theme.primary")
-                    child_item.setIcon(0, qta.icon("mdi6.folder", color=icon_color))
+                    child_item.setIcon(0, load_svg_icon("mdi6.folder", color=icon_color))
                     child_item.setData(0, Qt.ItemDataRole.UserRole, new_path)
                     child_item.setText(1, self._get_sort_key(new_name))
                     target_parent_item.setExpanded(True)
@@ -3096,7 +3164,7 @@ class FolderPanel(QWidget):
             
             icon_color = ColorManager.instance().get("theme.text.dark")
             self.toggle_btn.setProperty("icon_name", "mdi6.chevron-left")
-            self.toggle_btn.setIcon(qta.icon('mdi6.chevron-left', color=icon_color, options=[{'scale_factor': 1.1}]))
+            self.toggle_btn.setIcon(load_svg_icon('mdi6.chevron-left', color=icon_color))
             self.toggle_btn.setToolTip("折叠文件夹")
         else:
             self.folder_tree.hide()
@@ -3154,7 +3222,7 @@ class FolderPanel(QWidget):
             
             icon_color = ColorManager.instance().get("theme.text.dark")
             self.toggle_btn.setProperty("icon_name", "mdi6.chevron-right")
-            self.toggle_btn.setIcon(qta.icon('mdi6.chevron-right', color=icon_color, options=[{'scale_factor': 1.1}]))
+            self.toggle_btn.setIcon(load_svg_icon('mdi6.chevron-right', color=icon_color))
             self.toggle_btn.setToolTip("展开文件夹")
         
         # Invalidate layout to apply spacer changes

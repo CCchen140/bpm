@@ -1,6 +1,5 @@
-pip install pypinyin geopy GPUtil psutil -i https://mirrors.aliyun.com/pypi/simple
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install ultralytics opencv-python rawpy exifread PyExifTool pyinstaller ultralytics PyQt6 PyQt6-WebEngine -i https://mirrors.aliyun.com/pypi/simple
-pip install qtawesome
-pip install -i https://mirrors.aliyun.com/pypi/simple PyQt6-WebEngine
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install qtawesome pypinyin geopy GPUtil psutil ultralytics opencv-python rawpy exifread PyExifTool pyinstaller ultralytics PyQt6 PyQt6-WebEngine -i https://mirrors.aliyun.com/pypi/simple
 HKEY_CURRENT_USER\Software\BirdPictureManager\BirdManager_packaged
+pip install ultralytics -i https://mirrors.aliyun.com/pypi/simple

@@ -2,7 +2,7 @@ import json
 import os
 import uuid
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from PyQt6.QtCore import QPoint, QPointF, QRect, QThreadPool, QRunnable, QTimer, Qt, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (

@@ -34,36 +34,25 @@ def build_app_icon(primary_color: str = "#2196F3") -> QIcon:
     return ico
 
 
-def build_qtawesome_icon(primary_color: str = "#2196F3") -> QIcon | None:
+def build_svg_icon(primary_color: str = "#2196F3") -> QIcon | None:
     try:
-        import qtawesome as qta
+        from ui.utils.icon_loader import icon
     except Exception:
         return None
 
     try:
-        base_icon = qta.icon("ph.bird-fill", color=str(primary_color or "#2196F3"))
+        # 使用鸟图标
+        base_icon = icon("鸟", color=str(primary_color or "#2196F3"), style='fill')
     except Exception:
         base_icon = None
-    if base_icon is None:
+    if base_icon is None or base_icon.isNull():
         return None
 
-    ico = QIcon()
-    added = 0
-    for s in (16, 24, 32, 48, 64, 128, 256):
-        try:
-            pm = base_icon.pixmap(int(s), int(s))
-            if pm is not None and (not pm.isNull()):
-                ico.addPixmap(pm)
-                added += 1
-        except Exception:
-            continue
-    if added <= 0:
-        return None
-    return ico
+    return base_icon
 
 
 def get_app_icon(primary_color: str = "#2196F3") -> QIcon:
-    ico = build_qtawesome_icon(primary_color)
+    ico = build_svg_icon(primary_color)
     if ico is not None and not ico.isNull():
         return ico
     return build_app_icon(primary_color)

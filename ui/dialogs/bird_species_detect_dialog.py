@@ -9,7 +9,7 @@ try:
     import cv2
 except Exception:
     cv2 = None
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 import json
 from PyQt6.QtCore import Qt, QRectF, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QImage, QPen, QPixmap

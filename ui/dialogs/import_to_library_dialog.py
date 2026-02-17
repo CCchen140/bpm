@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QGraphicsRectItem,
     QCheckBox,
 )
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 try:
     from pypinyin import lazy_pinyin
@@ -2467,16 +2467,40 @@ class ImportToLibraryDialog(BasePopupDialog):
             db_rows = []
             try:
                 exif_worker = ExifHandleWorker.get_instance()
+                def _same_path(a: str, b: str) -> bool:
+                    if not a or not b:
+                        return False
+                    try:
+                        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+                    except Exception:
+                        return str(a) == str(b)
                 for src, dst in self._preview_map.items():
                     if not src or not dst:
                         continue
                     dst_dir = os.path.dirname(dst)
                     os.makedirs(dst_dir, exist_ok=True)
+                    existing_rec = None
+                    src_fast_id = ""
+                    try:
+                        src_fast_id = str(get_fast_id(src) or "").strip()
+                    except Exception:
+                        src_fast_id = ""
+                    if src_fast_id:
+                        try:
+                            fast_map = self._db.get_results_by_fast_ids([src_fast_id], table_name="bird_results") or {}
+                            rec = fast_map.get(src_fast_id)
+                            if isinstance(rec, dict) and _same_path(str(rec.get("file_path") or ""), str(src)):
+                                existing_rec = rec
+                        except Exception:
+                            existing_rec = None
                     shutil.move(src, dst)
                     moved.append((src, dst))
 
                     try:
-                        uuid = get_unique_id()
+                        if isinstance(existing_rec, dict) and existing_rec.get("uuid"):
+                            uuid = str(existing_rec.get("uuid") or "").strip()
+                        else:
+                            uuid = get_unique_id()
                     except Exception:
                         uuid = ""
 
@@ -2486,6 +2510,12 @@ class ImportToLibraryDialog(BasePopupDialog):
                         fast_id = None
                     if fast_id is None:
                         fast_id = ""
+
+                    if isinstance(existing_rec, dict) and uuid and dst:
+                        try:
+                            self._db.update_file_path_by_uuid(uuid, dst, table_name="bird_results")
+                        except Exception:
+                            pass
 
                     shot_time = ""
                     try:

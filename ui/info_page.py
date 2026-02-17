@@ -4,7 +4,7 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal, QEvent
 from PyQt6.QtGui import QFont, QColor, QPixmap, QGuiApplication, QPainter, QFontDatabase
 import os
 import base64
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from utils.system.id_utils import get_software_id
 from utils.setting.settings_manager import SettingsManager
 from utils.system.app_info_manager import AppInfoManager

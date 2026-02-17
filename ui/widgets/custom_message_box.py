@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 from PyQt6.QtCore import Qt
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.widgets.base_popup_dialog import BasePopupDialog
 from ui.utils.color_manager import ColorManager
 

@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QEvent, QSize, QTimer
 from PyQt6.QtGui import QCursor, QPixmap
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.widgets.image_thumbnail import ImageThumbnail
 from ui.zoomable_scroll_area import ZoomableScrollArea
 from ui.utils.shortcut_manager import ShortcutManager

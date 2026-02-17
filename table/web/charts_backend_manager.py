@@ -87,6 +87,7 @@ class ChartsBackendManager:
             "watermark_font_size": 22,
             "echarts_theme": "dark",
             "window_style": "acrylic",
+            "ignore_empty_dates": False,
         }
         self._gpu_rendering_enabled: bool = False
         self._load_preferences()
@@ -125,6 +126,7 @@ class ChartsBackendManager:
             "watermark_font_size": ("charts/watermark_font_size", 22),
             "echarts_theme": ("charts/echarts_theme", "dark"),
             "window_style": ("charts/window_style", "acrylic"),
+            "ignore_empty_dates": ("charts/ignore_empty_dates", False),
         }
 
     def _has_any_display_options_in_settings(self, sm) -> bool:
@@ -403,8 +405,8 @@ class ChartsBackendManager:
         options = dict(config.get("options") or {})
 
         try:
-            if t == "bar" and str(options.get("bar_x_kind") or "").strip():
-                return self._payload_bar_custom(table_name, options)
+            if t in ("bar", "line", "timelineLine") and str(options.get("bar_x_kind") or "").strip():
+                return self._payload_bar_custom(table_name, options, chart_type=t)
             if t in ("bar", "line", "timelineLine", "bar3D"):
                 return self._payload_xy(t, table_name, options)
             if t == "pie":
@@ -502,7 +504,7 @@ class ChartsBackendManager:
             "meta": {"y_agg": y_agg, "smooth": smooth},
         }
 
-    def _payload_bar_custom(self, table_name: str, options: dict) -> dict:
+    def _payload_bar_custom(self, table_name: str, options: dict, chart_type: str = "bar") -> dict:
         if not self._data or not self._data.is_ready():
             return {"kind": "empty", "message": "数据库不可用"}
         kind = str(options.get("bar_x_kind") or "time")
@@ -513,6 +515,9 @@ class ChartsBackendManager:
         if y_kind == "new_species":
             y_expr = "COUNT(DISTINCT species_cls)"
             series_name = "加新次数"
+        elif y_kind == "species_count":
+            y_expr = "COUNT(DISTINCT species_cls)"
+            series_name = "鸟种数"
 
         exclude = set()
         if kind == "time":
@@ -586,6 +591,8 @@ class ChartsBackendManager:
                 extra_params.append(end + (" 23:59:59" if len(end) == 10 else ""))
             if y_kind == "new_species":
                 extra.append("species_cls IS NOT NULL AND species_cls != ''")
+            elif y_kind == "species_count":
+                extra.append("species_cls IS NOT NULL AND species_cls != ''")
 
             all_where = []
             if where_expr:
@@ -595,16 +602,120 @@ class ChartsBackendManager:
             final_where = " AND ".join(all_where)
             final_params = list(params or []) + list(extra_params or [])
             rows = self._data.query_group_agg(table_name, group_expr, y_expr, final_where, final_params, order_by="x ASC", limit=2000).rows or []
-            xs = [str(r.get("x") or "") for r in rows if str(r.get("x") or "")]
-            ys = [_safe_float(r.get("y"), 0.0) for r in rows if str(r.get("x") or "")]
+            m: Dict[str, float] = {}
+            for r in rows:
+                x = str(r.get("x") or "")
+                if not x:
+                    continue
+                m[x] = _safe_float(r.get("y"), 0.0)
+            ignore_empty_dates = bool(self._display_options.get("ignore_empty_dates", False))
+            if ignore_empty_dates:
+                xs = [str(r.get("x") or "") for r in rows if str(r.get("x") or "")]
+                if not xs:
+                    return {"kind": "empty", "message": "暂无数据"}
+                ys = [m.get(x, 0.0) for x in xs]
+                return {"kind": "xy", "chart_type": str(chart_type or "bar"), "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "unit": unit, "step": step, "bar_y_kind": y_kind}}
+
+            def _parse_dt(v: str):
+                if not v:
+                    return None
+                s = str(v).strip()
+                if not s:
+                    return None
+                try:
+                    if len(s) == 10:
+                        import datetime
+
+                        return datetime.datetime.strptime(s, "%Y-%m-%d")
+                    import datetime
+
+                    return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    try:
+                        import datetime
+
+                        return datetime.datetime.fromisoformat(s)
+                    except Exception:
+                        return None
+
+            start_dt = _parse_dt(start)
+            end_dt = _parse_dt(end)
+            try:
+                if end_dt and isinstance(end, str) and len(end) == 10:
+                    import datetime
+
+                    end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            except Exception:
+                pass
+            if not end_dt and end_now:
+                try:
+                    import datetime
+
+                    end_dt = datetime.datetime.now()
+                except Exception:
+                    end_dt = None
+            if not start_dt or not end_dt:
+                try:
+                    if m:
+                        xs_sorted = sorted(m.keys())
+                        if not start_dt and xs_sorted:
+                            start_dt = _parse_dt(xs_sorted[0])
+                        if not end_dt and xs_sorted:
+                            end_dt = _parse_dt(xs_sorted[-1])
+                except Exception:
+                    pass
+            if not start_dt or not end_dt:
+                return {"kind": "empty", "message": "暂无数据"}
+            if start_dt > end_dt:
+                start_dt, end_dt = end_dt, start_dt
+
+            xs: List[str] = []
+            if unit == "month":
+                s_idx = start_dt.year * 12 + start_dt.month - 1
+                e_idx = end_dt.year * 12 + end_dt.month - 1
+                s_bucket = int(s_idx // step) * step
+                e_bucket = int(e_idx // step) * step
+                idx = s_bucket
+                while idx <= e_bucket:
+                    yv = int(idx // 12)
+                    mv = int(idx % 12) + 1
+                    xs.append(f"{yv:04d}-{mv:02d}-01")
+                    idx += step
+            elif unit == "year":
+                s_bucket = int(start_dt.year // step) * step
+                e_bucket = int(end_dt.year // step) * step
+                yv = s_bucket
+                while yv <= e_bucket:
+                    xs.append(f"{yv:04d}-01-01")
+                    yv += step
+            else:
+                try:
+                    import calendar
+                    import datetime
+
+                    seconds = 86400 * step
+                    s_ts = int(calendar.timegm(start_dt.timetuple()))
+                    e_ts = int(calendar.timegm(end_dt.timetuple()))
+                    s_bucket = int(s_ts // seconds) * seconds
+                    e_bucket = int(e_ts // seconds) * seconds
+                    cur = s_bucket
+                    while cur <= e_bucket:
+                        xs.append(datetime.datetime.utcfromtimestamp(cur).strftime("%Y-%m-%d"))
+                        cur += seconds
+                except Exception:
+                    xs = []
+
             if not xs:
                 return {"kind": "empty", "message": "暂无数据"}
-            return {"kind": "xy", "chart_type": "bar", "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "unit": unit, "step": step, "bar_y_kind": y_kind}}
+            ys = [m.get(x, 0.0) for x in xs]
+            return {"kind": "xy", "chart_type": str(chart_type or "bar"), "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "unit": unit, "step": step, "bar_y_kind": y_kind}}
 
         if kind == "rating":
             group_expr = "rating"
             extra.append("rating >= 1 AND rating <= 5")
             if y_kind == "new_species":
+                extra.append("species_cls IS NOT NULL AND species_cls != ''")
+            elif y_kind == "species_count":
                 extra.append("species_cls IS NOT NULL AND species_cls != ''")
             all_where = []
             if where_expr:
@@ -623,11 +734,13 @@ class ChartsBackendManager:
                 m[k] = _safe_float(r.get("y"), 0.0)
             xs = ["1", "2", "3", "4", "5"]
             ys = [m.get(x, 0.0) for x in xs]
-            return {"kind": "xy", "chart_type": "bar", "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "bar_y_kind": y_kind}}
+            return {"kind": "xy", "chart_type": str(chart_type or "bar"), "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "bar_y_kind": y_kind}}
 
         if kind == "label":
             group_expr = "CASE WHEN label IS NULL OR label = '' THEN 'None' ELSE label END"
             if y_kind == "new_species":
+                extra.append("species_cls IS NOT NULL AND species_cls != ''")
+            elif y_kind == "species_count":
                 extra.append("species_cls IS NOT NULL AND species_cls != ''")
             all_where = [f"({where_expr})"] if where_expr else []
             if extra:
@@ -646,7 +759,7 @@ class ChartsBackendManager:
             if not xs:
                 return {"kind": "empty", "message": "暂无数据"}
             ys = [m.get(x, 0.0) for x in xs]
-            return {"kind": "xy", "chart_type": "bar", "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "bar_y_kind": y_kind}}
+            return {"kind": "xy", "chart_type": str(chart_type or "bar"), "x": xs, "series": [{"name": series_name, "data": ys}], "meta": {"bar_x_kind": kind, "bar_y_kind": y_kind}}
 
         if kind == "location":
             return {"kind": "empty", "message": "地点统计暂未实现(仅提供 UI)"}

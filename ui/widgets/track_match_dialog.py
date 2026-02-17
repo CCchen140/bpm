@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, pyqtSlot, QThread, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (

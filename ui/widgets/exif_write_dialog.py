@@ -7,7 +7,7 @@ import os
 import json
 
 from ui.common.styles import SCROLL_AREA_STYLE
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.utils.color_manager import ColorManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
 

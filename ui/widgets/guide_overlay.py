@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
 from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 class GuideTooltip(QWidget):
     """引导提示窗口"""

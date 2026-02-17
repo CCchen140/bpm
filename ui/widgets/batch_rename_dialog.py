@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QWidget, QLineEdit, QSpinBox, 
                              QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox)
 from PyQt6.QtCore import Qt
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.widgets.custom_input_dialog import CustomInputDialog
 from ui.utils.color_manager import ColorManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
@@ -107,6 +107,7 @@ class BatchRenameDialog(BasePopupDialog):
                     border-radius: 3px;
                     padding: 4px 8px;
                     font-size: 12px;
+                    color: {text_color};
                 }}
                 QPushButton:hover {{
                     background-color: {hover_bg};
@@ -121,19 +122,57 @@ class BatchRenameDialog(BasePopupDialog):
         
         # 序号设置
         index_layout = QHBoxLayout()
-        index_layout.addWidget(QLabel("起始序号:"))
+        start_label = QLabel("起始序号:")
+        start_label.setStyleSheet(f"color: {text_color};")
+        index_layout.addWidget(start_label)
         self.start_index_spin = QSpinBox()
         self.start_index_spin.setRange(0, 999999)
         self.start_index_spin.setValue(self.start_index)
+        self.start_index_spin.setStyleSheet(f"""
+            QSpinBox {{
+                padding: 4px 6px;
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                background-color: {control_bg};
+                color: {text_color};
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 14px;
+                border-left: 1px solid {border_color};
+                background-color: {control_bg};
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background-color: {hover_bg};
+            }}
+        """)
         self.start_index_spin.valueChanged.connect(self.update_preview)
         index_layout.addWidget(self.start_index_spin)
         
         index_layout.addSpacing(20)
         
-        index_layout.addWidget(QLabel("序号位数:"))
+        width_label = QLabel("序号位数:")
+        width_label.setStyleSheet(f"color: {text_color};")
+        index_layout.addWidget(width_label)
         self.index_width_spin = QSpinBox()
         self.index_width_spin.setRange(1, 10)
         self.index_width_spin.setValue(self.index_width)
+        self.index_width_spin.setStyleSheet(f"""
+            QSpinBox {{
+                padding: 4px 6px;
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                background-color: {control_bg};
+                color: {text_color};
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 14px;
+                border-left: 1px solid {border_color};
+                background-color: {control_bg};
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background-color: {hover_bg};
+            }}
+        """)
         self.index_width_spin.valueChanged.connect(self.update_preview)
         index_layout.addWidget(self.index_width_spin)
         
@@ -168,6 +207,7 @@ class BatchRenameDialog(BasePopupDialog):
                 border: none;
                 border-bottom: 1px solid {table_header_border};
                 border-right: 1px solid {table_header_border};
+                color: {text_color};
             }}
             QScrollBar:vertical {{
                 background-color: {scrollbar_bg};

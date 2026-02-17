@@ -1,4 +1,4 @@
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLineEdit, 
                              QPushButton, QLabel, QScrollArea, QWidget, QFrame, 
                              QLayout, QSizePolicy)

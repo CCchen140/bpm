@@ -21,7 +21,7 @@ try:
 except ImportError:
     lazy_pinyin = None
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from ui.widgets.rating_filter_button import RatingFilterButton
 from ui.widgets.rating_filter_widget import StarRatingWidget, StarMenuAction

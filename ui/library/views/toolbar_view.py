@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlider, QFrame, QStyledItemDelegate, QToolButton, QMenu, QInputDialog)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QRect
 from PyQt6.QtGui import QPainter, QAction
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.common.base_toolbar import BaseToolbar
 from ui.common.styles import TOOLBAR_BTN_STYLE
 from ui.utils.color_manager import ColorManager

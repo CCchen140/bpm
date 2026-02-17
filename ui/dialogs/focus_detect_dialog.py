@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QScrollArea,
 )
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 from ui.widgets.base_popup_dialog import BasePopupDialog
 from ui.utils.color_manager import ColorManager

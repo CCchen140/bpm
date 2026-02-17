@@ -158,6 +158,7 @@ class SettingsManager(QObject):
         "charts/watermark_font_size": {"default": 22, "type": int, "label": "数据图表水印字号"},
         "charts/echarts_theme": {"default": "dark", "type": str, "label": "数据图表 ECharts 主题"},
         "charts/window_style": {"default": "acrylic", "type": str, "label": "数据图表窗口样式"},
+        "charts/ignore_empty_dates": {"default": False, "type": bool, "label": "数据图表忽略无图片日期"},
         "exif/disable_write": {"default": False, "type": bool, "label": "禁用 EXIF 写入"},
         "exif/write_mode": {"default": "file", "type": str, "label": "EXIF写入方式"},
         "system/hide_subprocess_console": {"default": True, "type": bool, "label": "隐藏外部命令行窗口"},

@@ -628,8 +628,8 @@ def build_html() -> str:
     #fBarTimeStartShow, #fBarTimeEndShow{
       user-select:none;
       -webkit-user-select:none;
-      pointer-events:none;
       caret-color:transparent;
+      cursor:pointer;
     }
     .barInlineRow .select,
     .barInlineRow input.select{
@@ -1016,6 +1016,7 @@ def build_html() -> str:
           <select class="select" id="fBarYKind">
             <option value="count" selected>图片数量</option>
             <option value="new_species">加新次数</option>
+            <option value="species_count">鸟种数</option>
           </select>
         </div>
         <div class="field full" data-scope="bar" id="barTimeRangeWrap">
@@ -1159,6 +1160,9 @@ def build_html() -> str:
           <div class="toggleRow"><div class="k">鼠标离开停止刷新</div><label class="bp-toggle"><input type="checkbox" id="cbPauseRefresh" /><span class="ui"></span></label></div>
         </div>
         <div class="field full">
+          <div class="toggleRow"><div class="k">忽略无图片日期</div><label class="bp-toggle"><input type="checkbox" id="cbIgnoreEmptyDates" /><span class="ui"></span></label></div>
+        </div>
+        <div class="field full">
           <div class="toggleRow"><div class="k">水印</div><label class="bp-toggle"><input type="checkbox" id="cbWatermark" /><span class="ui"></span></label></div>
         </div>
         <div class="field full">
@@ -1299,6 +1303,7 @@ def build_html() -> str:
         show_legend: !!$("cbLegend").checked,
         enable_animation: !!$("cbAnim").checked,
         pause_refresh_on_mouse_leave: !!$("cbPauseRefresh").checked,
+        ignore_empty_dates: !!$("cbIgnoreEmptyDates").checked,
         echarts_theme: String(currentTheme || "dark"),
         window_style: String(windowStyle || "acrylic"),
         font_size: Math.max(10, Math.min(22, fontSize)),
@@ -1446,7 +1451,8 @@ def build_html() -> str:
       }catch(e){}
       try{ syncAddFields(); }catch(e){}
       const opt = c.options || {};
-      const scope = pickTypeScope(String(c.type || ""));
+      const scope = pickTypeScopeByOptions(String(c.type || ""), opt);
+      try{ syncAddFields(scope); }catch(e){}
       if(scope === "bar"){
         try{ barEnsureInit(); }catch(e){}
         try{ barLoadFromOptions(opt); }catch(e){}
@@ -1913,7 +1919,7 @@ def build_html() -> str:
       try{ lab.setAttribute("data-on", inp.checked ? "1" : "0"); }catch(e){}
     }
     function syncAllToggleVisuals(){
-      ["cbTitle","cbLegend","cbAnim","cbPauseRefresh","cbWatermark","cbGpu"].forEach(id => {
+      ["cbTitle","cbLegend","cbAnim","cbPauseRefresh","cbIgnoreEmptyDates","cbWatermark","cbGpu"].forEach(id => {
         try{ syncToggleVisualById(id); }catch(e){}
       });
     }
@@ -2009,15 +2015,26 @@ def build_html() -> str:
 
     function pickTypeScope(t){
       if(t === "bar") return "bar";
-      const xy = ["line","timelineLine","bar3D"];
+      if(t === "line") return "bar";
+      const xy = ["timelineLine","bar3D"];
       if(xy.includes(t)) return "xy";
       if(t === "pie") return "pie";
       if(t === "scatter") return "scatter";
       return "none";
     }
-    function syncAddFields(){
+    function pickTypeScopeByOptions(t, opt){
+      const type = String(t || "");
+      const options = (opt && typeof opt === "object") ? opt : {};
+      if(type === "line"){
+        if(String(options.bar_x_kind || "").trim()) return "bar";
+        if(String(options.x_field || "").trim()) return "xy";
+        return "bar";
+      }
+      return pickTypeScope(type);
+    }
+    function syncAddFields(scopeOverride){
       const t = $("fType").value || "";
-      const scope = pickTypeScope(t);
+      const scope = scopeOverride ? String(scopeOverride || "") : pickTypeScope(t);
       document.querySelectorAll("[data-scope]").forEach(el => {
         el.style.display = (el.getAttribute("data-scope") === scope) ? "" : "none";
       });
@@ -2064,6 +2081,18 @@ def build_html() -> str:
       }catch(e){}
       try{
         $("btnBarPickTime").addEventListener("click", () => { barOpenTimePicker(); });
+        try{
+          const a = $("fBarTimeStartShow");
+          if(a){
+            a.addEventListener("click", () => { barOpenTimePicker(); });
+            a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); barOpenTimePicker(); } });
+          }
+          const b = $("fBarTimeEndShow");
+          if(b){
+            b.addEventListener("click", () => { barOpenTimePicker(); });
+            b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); barOpenTimePicker(); } });
+          }
+        }catch(e){}
         $("btnApplyBarTime").addEventListener("click", () => { barApplyTimePicker(); });
         $("btnBarQuickNow").addEventListener("click", () => { barSetQuickRange("now"); });
         $("btnBarQuickToday").addEventListener("click", () => { barSetQuickRange("today"); });
@@ -2908,14 +2937,14 @@ def build_html() -> str:
           lg.textStyle = lg.textStyle || {};
           if(lg.textStyle.color === undefined) lg.textStyle.color = u.textColor;
           if(lg.textStyle.fontSize === undefined) lg.textStyle.fontSize = 11;
-          if(lg.top === undefined) lg.top = 38;
+          if(lg.top === undefined) lg.top = 30;
         }
       }
       if(opt.grid && typeof opt.grid === "object"){
-        if(opt.grid.left === undefined) opt.grid.left = 60;
-        if(opt.grid.right === undefined) opt.grid.right = 30;
-        if(opt.grid.top === undefined) opt.grid.top = 78;
-        if(opt.grid.bottom === undefined) opt.grid.bottom = 50;
+        if(opt.grid.left === undefined) opt.grid.left = 46;
+        if(opt.grid.right === undefined) opt.grid.right = 18;
+        if(opt.grid.top === undefined) opt.grid.top = 58;
+        if(opt.grid.bottom === undefined) opt.grid.bottom = 36;
       }
       if(Array.isArray(opt.series)){
         opt.series.forEach(function(s){
@@ -3828,11 +3857,43 @@ def build_html() -> str:
             };
           }
         }catch(e){}
+        let finalSeries = series;
+        try{
+          const isBar = !(ct === "line" || ct === "timelineLine");
+          if(isBar){
+            const count = Array.isArray(xs) ? xs.length : 0;
+            xAxis.axisLabel = xAxis.axisLabel || {};
+            if(xAxis.axisLabel.interval === undefined) xAxis.axisLabel.interval = 0;
+            let rotate = 0;
+            if(count > 28){ rotate = 45; }
+            else if(count > 16){ rotate = 30; }
+            xAxis.axisLabel.rotate = rotate;
+            xAxis.axisLabel.hideOverlap = false;
+            xAxis.axisTick = xAxis.axisTick || {};
+            xAxis.axisTick.alignWithLabel = true;
+            if(!opt.grid || typeof opt.grid !== "object"){ opt.grid = {}; }
+            if(opt.grid.containLabel === undefined) opt.grid.containLabel = true;
+            if(opt.grid.left === undefined) opt.grid.left = 42;
+            if(opt.grid.right === undefined) opt.grid.right = 12;
+            if(opt.grid.top === undefined) opt.grid.top = 58;
+            if(opt.grid.bottom === undefined) opt.grid.bottom = rotate ? 52 : 34;
+            let w = 0;
+            try{
+              const inst = chartViews.get(chartId);
+              if(inst && inst.getWidth){ w = Number(inst.getWidth() || 0); }
+            }catch(e){}
+            if(w > 0 && count > 0){
+              const per = Math.max(2, Math.floor((w - 80) / count));
+              const bw = Math.max(2, Math.min(36, per - 2));
+              finalSeries = series.map(s => Object.assign({}, s, {barWidth: bw, barMaxWidth: Math.max(2, Math.min(36, bw))}));
+            }
+          }
+        }catch(e){}
         setChartOption(
           chartId,
           c.name,
           stabilizeOption(
-            Object.assign(opt, {tooltip:{trigger:"axis"}, xAxis: xAxis, yAxis:{type:"value"}, series: series}),
+            Object.assign(opt, {tooltip:{trigger:"axis"}, xAxis: xAxis, yAxis:{type:"value"}, series: finalSeries}),
             (ct === "line" || ct === "timelineLine") ? "line" : "bar"
           )
         );
@@ -4143,6 +4204,7 @@ def build_html() -> str:
       $("cbLegend").checked = !(opt.show_legend === false);
       $("cbAnim").checked = !(opt.enable_animation === false);
       try{ $("cbPauseRefresh").checked = !!opt.pause_refresh_on_mouse_leave; }catch(e){}
+      try{ $("cbIgnoreEmptyDates").checked = !!opt.ignore_empty_dates; }catch(e){}
       $("cbGpu").checked = !!state.gpu_rendering_enabled;
       try{
         watermarkText = String(opt.watermark_text || "").trim();
@@ -4237,7 +4299,13 @@ def build_html() -> str:
       }
       const name = ($("fName").value || "").trim() || "未命名图表";
       const type = $("fType").value || "bar";
-      const scope = pickTypeScope(type);
+      let scope = pickTypeScope(type);
+      try{
+        if(editingChartId){
+          const prev = chartsById.get(String(editingChartId || ""));
+          if(prev) scope = pickTypeScopeByOptions(type, prev.options || {});
+        }
+      }catch(e){}
       let options = {};
       if(scope === "bar"){
         try{ barEnsureInit(); }catch(e){}
@@ -4392,6 +4460,16 @@ def build_html() -> str:
           for(const cid of chartsById.keys()){
             try{ syncChartRefreshState(cid); }catch(e){}
           }
+          schedulePreferencesSave();
+        }catch(e){}
+      });
+      on("cbIgnoreEmptyDates", "change", () => {
+        try{
+          try{ syncToggleVisualById("cbIgnoreEmptyDates"); }catch(e){}
+          const v = !!$("cbIgnoreEmptyDates").checked;
+          if(state && state.display_options){ state.display_options.ignore_empty_dates = v; }
+          setStatus("忽略无图片日期: " + (v ? "开" : "关"));
+          requestRerenderAllCharts("日期补零切换");
           schedulePreferencesSave();
         }catch(e){}
       });

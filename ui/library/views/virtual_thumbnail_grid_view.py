@@ -3,7 +3,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QRect, QAbstrac
 from PyQt6.QtGui import QPainter, QColor, QFont, QCursor, QFontMetrics, QPen, QMouseEvent
 from PyQt6.QtWidgets import QStyledItemDelegate
 from PyQt6.QtCore import QItemSelectionModel
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 import json
 
 from ui.utils.shortcut_manager import ShortcutManager

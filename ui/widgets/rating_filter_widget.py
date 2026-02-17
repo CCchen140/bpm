@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QVBoxLayout, QWi
 from PyQt6.QtCore import pyqtSignal, QEvent, QSize, Qt
 
 from PyQt6.QtGui import QIcon, QPainter, QColor, QCursor
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 class StarMenuWidget(QWidget):
     clicked = pyqtSignal()

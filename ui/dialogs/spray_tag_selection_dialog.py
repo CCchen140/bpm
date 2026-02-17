@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QPushButton, QLabel, QScrollArea, QWidget, QCheckBox, 
                              QLayout, QSizePolicy, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, QPoint
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.utils.color_manager import ColorManager
 from utils.tag_manager import TagManager
 from ui.dialogs.tag_manager_dialog import TagWidget

@@ -9,7 +9,7 @@ from utils.sql.data_base import BirdLibraryDB
 from utils.exif.exif_utils import ExifHandleWorker, EXIF_TAG
 from ui.utils.geo_manager import GeoInfoManager
 from ui.utils.color_manager import ColorManager
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 
 class FocusDistanceLoaderThread(QThread):
     focus_distance_ready = pyqtSignal(int, str, str)  # request_id, path, focus_distance
@@ -137,9 +137,9 @@ class InfoPanel(QWidget):
         
         header = self.info_tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setStretchLastSection(True)
-        self.info_tree.setWordWrap(True)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+        self.info_tree.setWordWrap(False)
         self.info_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.info_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
@@ -434,9 +434,30 @@ class InfoPanel(QWidget):
 
     def update_info(self, image_path, context=None):
         """更新信息树内容"""
-        if not image_path or not os.path.exists(image_path):
+        if not image_path:
             self._clear_info()
             return
+        try:
+            p = str(image_path).replace("\r", "").strip()
+        except Exception:
+            p = ""
+        try:
+            if "路径:" in p:
+                p = p.split("路径:")[-1].strip()
+            if "原图片的路径" in p:
+                p = p.split("原图片的路径")[-1].strip()
+            low = p.lower()
+            if low.startswith("file:///"):
+                p = p[8:]
+                if len(p) >= 3 and p[0] == "/" and p[2] == ":":
+                    p = p[1:]
+            elif low.startswith("file://"):
+                p = p[7:]
+            p = p.strip().strip('"').strip("'").strip()
+            p = os.path.normpath(p)
+        except Exception:
+            pass
+        image_path = p or image_path
         
         self._current_image_path = image_path
         self._focus_distance_request_id += 1
@@ -631,7 +652,10 @@ class InfoPanel(QWidget):
         except Exception:
             pass
             
-        self.info_remark_items['description'].setText(1, description_value)
+        try:
+            self.info_remark_items['description'].setText(1, description_value)
+        except Exception:
+            pass
         try:
             self.info_remark_items['tags'].setToolTip(1, tags_value)
         except Exception:

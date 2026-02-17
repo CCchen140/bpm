@@ -1,7 +1,7 @@
 import os
 import json
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QHBoxLayout,

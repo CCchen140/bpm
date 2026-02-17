@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QLabel, QPushButton)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from ui.utils.color_manager import ColorManager
 
 class CustomTitleBar(QWidget):

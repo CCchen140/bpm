@@ -5,7 +5,7 @@ from datetime import datetime
 from threading import Thread
 from typing import Any
 
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 from PyQt6.QtCore import Qt, QTimer, QStringListModel, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -1332,12 +1332,62 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                     except Exception:
                         return int(default)
 
+                library_root = ""
+                try:
+                    library_root = str(self._get_library_root() or "").strip()
+                except Exception:
+                    library_root = ""
+
+                def _is_under_root(path: str, root: str) -> bool:
+                    if not path or not root:
+                        return False
+                    try:
+                        p = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+                        r = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+                        return os.path.commonpath([p, r]) == r
+                    except Exception:
+                        try:
+                            return os.path.normcase(os.path.normpath(path)).startswith(os.path.normcase(os.path.normpath(root)))
+                        except Exception:
+                            return False
+
+                def _same_path(a: str, b: str) -> bool:
+                    if not a or not b:
+                        return False
+                    try:
+                        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+                    except Exception:
+                        return str(a) == str(b)
+
                 for src, dst in (self._preview_map or {}).items():
                     if not src or not dst:
                         continue
+                    try:
+                        if os.path.normcase(os.path.normpath(str(src))) == os.path.normcase(os.path.normpath(str(dst))):
+                            continue
+                    except Exception:
+                        if str(src) == str(dst):
+                            continue
                     folder = os.path.dirname(dst)
                     os.makedirs(folder, exist_ok=True)
-                    shutil.copy2(src, dst)
+                    existing_rec = None
+                    src_fast_id = ""
+                    try:
+                        src_fast_id = str(get_fast_id(src) or "").strip()
+                    except Exception:
+                        src_fast_id = ""
+                    if src_fast_id:
+                        try:
+                            fast_map = self._db.get_results_by_fast_ids([src_fast_id], table_name="bird_results") or {}
+                            rec = fast_map.get(src_fast_id)
+                            if isinstance(rec, dict) and _same_path(str(rec.get("file_path") or ""), str(src)):
+                                existing_rec = rec
+                        except Exception:
+                            existing_rec = None
+                    if _is_under_root(src, library_root):
+                        shutil.move(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
                     imported += 1
 
                     meta_cls = {}
@@ -1355,8 +1405,8 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                         except Exception:
                             exif_meta = {}
 
-                    src_rec = None
-                    if src_db_map:
+                    src_rec = existing_rec
+                    if src_rec is None and src_db_map:
                         try:
                             src_rec = src_db_map.get(str(src))
                         except Exception:
@@ -1387,6 +1437,12 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                         fast_id = str(get_fast_id(dst) or "").strip()
                     except Exception:
                         fast_id = ""
+
+                    if isinstance(existing_rec, dict) and uuid and dst:
+                        try:
+                            self._db.update_file_path_by_uuid(uuid, dst, table_name="bird_results")
+                        except Exception:
+                            pass
 
                     try:
                         tags_to_write = {}
@@ -1679,23 +1735,6 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                 try:
                     if db_rows:
                         self._db.save_results_batch(db_rows, table_name="bird_results")
-                    try:
-                        if bool(getattr(self, "_is_virtual_mode", False)):
-                            for src, dst in (self._preview_map or {}).items():
-                                if not src or not dst:
-                                    continue
-                                try:
-                                    if os.path.normcase(os.path.normpath(str(src))) == os.path.normcase(os.path.normpath(str(dst))):
-                                        continue
-                                except Exception:
-                                    if str(src) == str(dst):
-                                        continue
-                                try:
-                                    self._db.delete_result(str(src), table_name="bird_results")
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
                 except Exception as e:
                     ok = False
                     err = str(e)

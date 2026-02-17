@@ -16,7 +16,7 @@ from PyQt6.QtGui import QValidator
 import json
 import os
 import time
-import qtawesome as qta
+from ui.utils.icon_loader import qta
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebChannel import QWebChannel
