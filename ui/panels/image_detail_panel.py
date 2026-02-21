@@ -1063,6 +1063,13 @@ class ImageDetailPanel(QWidget):
         except Exception:
             self._detail_toggle_subject_rect_shortcut = None
         try:
+            if not hasattr(self, "_detail_delete_shortcut") or self._detail_delete_shortcut is None:
+                self._detail_delete_shortcut = QShortcut("Ctrl+D", self)
+                self._detail_delete_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                self._detail_delete_shortcut.activated.connect(self._on_delete_clicked)
+        except Exception:
+            self._detail_delete_shortcut = None
+        try:
             self._update_detail_shortcut_keys()
             ShortcutManager.instance().shortcuts_changed.connect(self._update_detail_shortcut_keys)
         except Exception:
@@ -1823,6 +1830,133 @@ class ImageDetailPanel(QWidget):
             self._update_stash_ui()
         except Exception:
             pass
+
+    def _on_delete_clicked(self):
+        """删除按钮点击处理"""
+        try:
+            if self.image_list and 0 <= int(self.current_index) < len(self.image_list):
+                it = self.image_list[int(self.current_index)]
+                if isinstance(it, dict):
+                    image_path = it.get("path")
+                else:
+                    image_path = None
+            else:
+                image_path = None
+        except Exception:
+            image_path = None
+        
+        if not image_path:
+            return
+        
+        try:
+            from ui.utils.notification_manager import NotificationManager
+            confirmed = NotificationManager.instance().ask_confirmation(
+                "确认删除",
+                f"确定要删除这张图片吗？\n\n{os.path.basename(image_path)}\n\n此操作会将文件移到回收站。"
+            )
+            if not confirmed:
+                return
+            
+            # 删除文件 - 尝试移到回收站
+            deleted = False
+            try:
+                # 尝试使用send2trash
+                import send2trash
+                send2trash.send2trash(image_path)
+                deleted = True
+            except ImportError:
+                # send2trash未安装，使用Windows API
+                try:
+                    import ctypes
+                    from ctypes import windll, c_wchar_p, c_uint
+                    
+                    # 使用SHFileOperation将文件移到回收站
+                    class SHFILEOPSTRUCT(ctypes.Structure):
+                        _fields_ = [
+                            ("hwnd", ctypes.c_void_p),
+                            ("wFunc", c_uint),
+                            ("pFrom", c_wchar_p),
+                            ("pTo", c_wchar_p),
+                            ("fFlags", ctypes.c_uint16),
+                            ("fAnyOperationsAborted", ctypes.c_int),
+                            ("hNameMappings", ctypes.c_void_p),
+                            ("lpszProgressTitle", c_wchar_p)
+                        ]
+                    
+                    FO_DELETE = 0x0003
+                    FOF_ALLOWUNDO = 0x0040
+                    FOF_NOCONFIRMATION = 0x0010
+                    FOF_SILENT = 0x0004
+                    
+                    pFrom = image_path + '\0'
+                    
+                    fileop = SHFILEOPSTRUCT()
+                    fileop.hwnd = None
+                    fileop.wFunc = FO_DELETE
+                    fileop.pFrom = pFrom
+                    fileop.pTo = None
+                    fileop.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+                    fileop.fAnyOperationsAborted = 0
+                    fileop.hNameMappings = None
+                    fileop.lpszProgressTitle = None
+                    
+                    result = windll.shell32.SHFileOperationW(ctypes.byref(fileop))
+                    if result == 0:
+                        deleted = True
+                    else:
+                        # Windows API失败，直接删除
+                        os.remove(image_path)
+                        deleted = True
+                except Exception:
+                    # Windows API失败，直接删除
+                    os.remove(image_path)
+                    deleted = True
+            except Exception:
+                # send2trash失败，直接删除
+                try:
+                    os.remove(image_path)
+                    deleted = True
+                except Exception:
+                    pass
+            
+            if not deleted:
+                NotificationManager.instance().show_error("删除失败", "无法删除文件")
+                return
+            
+            # 从数据库中删除记录
+            try:
+                self.db.delete_image_by_path(image_path, table_name=self._db_table_name)
+            except Exception:
+                pass
+            
+            # 从图片列表中移除
+            try:
+                self.image_list.pop(self.current_index)
+            except Exception:
+                pass
+            
+            # 如果列表为空，关闭详情面板
+            if not self.image_list:
+                NotificationManager.instance().show_toast("图片已删除")
+                self.back_requested.emit()
+                return
+            
+            # 调整当前索引
+            if self.current_index >= len(self.image_list):
+                self.current_index = len(self.image_list) - 1
+            
+            # 加载下一张图片
+            self.load_current_image()
+            self.update_thumbnail_selection()
+            
+            NotificationManager.instance().show_toast("图片已删除")
+            
+        except Exception as e:
+            try:
+                from ui.utils.notification_manager import NotificationManager
+                NotificationManager.instance().show_error("删除失败", f"删除图片时出错：{str(e)}")
+            except Exception:
+                pass
 
     # 移除原有的 init_info_bar
     # def init_info_bar(self): ...
@@ -3906,6 +4040,22 @@ class ImageDetailPanel(QWidget):
             self._apply_toolbar_toggle_button_style(self.btn_zoom_to_focus, active=bool(self.btn_zoom_to_focus.isChecked()))
         except Exception:
             pass
+
+        # 删除按钮
+        self.btn_delete = QPushButton()
+        self.btn_delete.setIcon(qta.icon('mdi6.trash-can-outline', color='#e74c3c'))
+        self.btn_delete.setIconSize(QSize(24, 24))
+        self.btn_delete.setFixedSize(36, 36)
+        self.btn_delete.setToolTip("删除 (Ctrl+D)")
+        self.btn_delete.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_delete.setStyleSheet(f"""
+            QPushButton {{ background-color: transparent; border: none; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: #ffcccc; }}
+            QPushButton:pressed {{ background-color: #ff9999; }}
+            QToolTip {{ color: {tooltip_text}; background-color: {tooltip_bg}; border: 1px solid {tooltip_border}; }}
+        """)
+        self.btn_delete.clicked.connect(self._on_delete_clicked)
+        layout.addWidget(self.btn_delete)
 
         if self._show_stash_controls:
             self.btn_stash = QPushButton()
@@ -6539,27 +6689,31 @@ class ImageDetailPanel(QWidget):
                 pass
 
         new_fav = 0 if current_fav == 1 else 1
-        
+
         # 更新数据库
         try:
-            self.db.update_favorite_batch([path], new_fav)
+            # 根据表名选择正确的更新方法
+            if getattr(self, "_db_table_name", "bird_results") == "import_cache":
+                self.db.update_user_field_batch_for_table([path], "is_favorite", new_fav, table_name="import_cache")
+            else:
+                self.db.update_favorite_batch([path], new_fav)
             if img_info:
                 img_info['favorite'] = new_fav # 更新内存
                 img_info['is_favorite'] = new_fav
-            
+
             # 更新界面
             self.update_fav_rating_status()
-            
+
             # 更新底部缩略图
             self._update_thumbnail_by_path(path)
-            
+
             # 如果在对比模式，更新对应的 Overlay
             if self.compare_mode:
                 if hasattr(self, 'overlay_left') and self.overlay_left and self.overlay_left.path == path:
                     self._update_overlay_data(path, self.overlay_left, self.info_overlay_left)
                 if hasattr(self, 'overlay_right') and self.overlay_right and self.overlay_right.path == path:
                     self._update_overlay_data(path, self.overlay_right, self.info_overlay_right)
-            
+
             # 发送信号
             self.favorite_changed.emit(path, new_fav == 1)
             try:
@@ -6589,16 +6743,20 @@ class ImageDetailPanel(QWidget):
         
         # 更新数据库
         try:
-            self.db.update_rating_batch([path], rating)
+            # 根据表名选择正确的更新方法
+            if getattr(self, "_db_table_name", "bird_results") == "import_cache":
+                self.db.update_user_field_batch_for_table([path], "rating", rating, table_name="import_cache")
+            else:
+                self.db.update_rating_batch([path], rating)
             if img_info:
                 img_info['rating'] = rating # 更新内存
-            
+
             # 更新界面
             self.update_fav_rating_status()
-            
+
             # 更新底部缩略图
             self._update_thumbnail_by_path(path)
-            
+
             # 如果在对比模式，更新对应的 Overlay
             if self.compare_mode:
                 if hasattr(self, 'overlay_left') and self.overlay_left and self.overlay_left.path == path:

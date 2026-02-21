@@ -449,10 +449,11 @@ class TaxonomyLoadWorker(QThread):
     finished = pyqtSignal(str, object)
     failed = pyqtSignal(str, str)
 
-    def __init__(self, taxonomy_uri: str, db: BirdLibraryDB):
+    def __init__(self, taxonomy_uri: str, db: BirdLibraryDB, root_path: str = ""):
         super().__init__()
         self.taxonomy_uri = str(taxonomy_uri or "")
         self.db = db
+        self.root_path = str(root_path or "")
         self.is_cancelled = False
 
     def run(self):
@@ -471,9 +472,9 @@ class TaxonomyLoadWorker(QThread):
                         d = unquote(d)
                     except Exception:
                         pass
-                    rows = self.db.query_unclassified_images_in_folder(d, table_name="bird_results")
+                    rows = self.db.query_unclassified_images_in_folder(d, table_name="bird_results", root_path=self.root_path)
                 else:
-                    rows = self.db.query_images_by_taxonomy(unclassified=True, table_name="bird_results")
+                    rows = self.db.query_images_by_taxonomy(unclassified=True, table_name="bird_results", root_path=self.root_path)
             else:
                 parsed = urlparse(uri.replace("virtual://taxonomy", "http://taxonomy", 1))
                 qs = parse_qs(parsed.query or "")
@@ -488,6 +489,7 @@ class TaxonomyLoadWorker(QThread):
                     species_cls=species_cls or None,
                     unclassified=False,
                     table_name="bird_results",
+                    root_path=self.root_path,
                 )
         except Exception as e:
             self.failed.emit(uri, f"读取数据库失败: {e}")
@@ -2335,6 +2337,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                                           # Also update preview stats
                                           try:
                                               title = s or g or f or o or "分类"
+                                              try:
+                                                  root_dir = str(self.settings_manager.get("general/root_path", "") or "")
+                                              except Exception:
+                                                  root_dir = ""
                                               stats = self.db.get_taxonomy_node_stats(
                                                   order_cls=o or None,
                                                   family_cls=f or None,
@@ -2342,6 +2348,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                                                   species_cls=s or None,
                                                   unclassified=False,
                                                   table_name="bird_results",
+                                                  root_path=root_dir,
                                               )
                                               self.preview_panel.show_folder_stats(title, stats)
                                           except:
@@ -2765,33 +2772,34 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
     def on_thumbnail_context_menu(self, index, position):
         """处理缩略图右键菜单"""
-        thumbnails = self.grid_view.thumbnails
-        if index >= len(thumbnails):
-            return
-            
-        thumb = thumbnails[index]
-        if not thumb.image_info:
-            return
+        try:
+            thumbnails = self.grid_view.thumbnails
+            if index >= len(thumbnails):
+                return
+                
+            thumb = thumbnails[index]
+            if not thumb.image_info:
+                return
 
-        # 如果右键点击的图标未被选中，则单选该图标
-        if not thumb.selected:
-            if getattr(self.grid_view, "is_virtualized", False):
-                self.grid_view.select_thumbnail(index, scroll_to=False)
-            else:
-                for i, t in enumerate(thumbnails):
-                    t.set_selected(i == index)
-            self.last_selected_index = index
-        image_info = thumb.image_info
-        image_path = image_info['path']
-        # 创建右键菜单
-        menu = QMenu(self)
-        cm = ColorManager.instance()
-        menu_bg = cm.get("theme.background.light")
-        menu_border = cm.get("popup.border.primary")
-        menu_text = cm.get("theme.text.dark")
-        menu_hover = cm.get("theme.background.dark")
-        menu_disabled = cm.get("theme.text.light")
-        menu.setStyleSheet(f"""
+            # 如果右键点击的图标未被选中，则单选该图标
+            if not thumb.selected:
+                if getattr(self.grid_view, "is_virtualized", False):
+                    self.grid_view.select_thumbnail(index, scroll_to=False)
+                else:
+                    for i, t in enumerate(thumbnails):
+                        t.set_selected(i == index)
+                self.last_selected_index = index
+            image_info = thumb.image_info
+            image_path = image_info['path']
+            # 创建右键菜单
+            menu = QMenu(self)
+            cm = ColorManager.instance()
+            menu_bg = cm.get("theme.background.light")
+            menu_border = cm.get("popup.border.primary")
+            menu_text = cm.get("theme.text.dark")
+            menu_hover = cm.get("theme.background.dark")
+            menu_disabled = cm.get("theme.text.light")
+            menu.setStyleSheet(f"""
             QMenu {{
                 background-color: {menu_bg};
                 border: 1px solid {menu_border};
@@ -2814,145 +2822,206 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 background-color: {menu_border};
                 margin: 2px 4px;
             }}
-        """)
+            """)
 
-        # 打开
-        open_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "打开")
-        open_action.triggered.connect(lambda: self.open_image(image_path))
-        # 在文件管理器中打开文件夹
-        show_in_folder_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "在文件管理器中打开")
-        show_in_folder_action.triggered.connect(lambda: self.folder_panel.open_in_explorer(os.path.dirname(image_path)))
+            # 打开
+            open_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "打开")
+            open_action.triggered.connect(lambda: self.open_image(image_path))
+            # 在文件管理器中打开文件夹
+            show_in_folder_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "在文件管理器中打开")
+            show_in_folder_action.triggered.connect(lambda: self.folder_panel.open_in_explorer(os.path.dirname(image_path)))
 
-        # 复制
-        copy_action = menu.addAction(qta.icon('mdi6.content-copy', color='#555'), "复制")
-        copy_action.triggered.connect(lambda: self.copy_image(image_path))
-        # 复制路径
-        copy_path_action = menu.addAction(qta.icon('mdi6.link-variant', color='#555'), "复制路径")
-        copy_path_action.triggered.connect(lambda: self.copy_image_path(image_path))
-        menu.addSeparator()
+            # 复制
+            copy_action = menu.addAction(qta.icon('mdi6.content-copy', color='#555'), "复制")
+            copy_action.triggered.connect(lambda: self.copy_image(image_path))
+            # 复制路径
+            copy_path_action = menu.addAction(qta.icon('mdi6.link-variant', color='#555'), "复制路径")
+            copy_path_action.triggered.connect(lambda: self.copy_image_path(image_path))
+            menu.addSeparator()
 
-        # 收藏/取消收藏
-        is_fav = bool(image_info.get('is_favorite', 0))
-        if is_fav:
-            fav_action = menu.addAction(qta.icon('mdi6.heart-outline', color='#555'), "取消收藏")
-            fav_action.triggered.connect(lambda: self.toggle_favorite_selection(False))
-        else:
-            fav_action = menu.addAction(qta.icon('mdi6.heart', color='#e74c3c'), "收藏")
-            fav_action.triggered.connect(lambda: self.toggle_favorite_selection(True))
-        
-        # 评分菜单
-        rating_menu = menu.addMenu(qta.icon('fa5s.star', color='#FFCC00'), "评分")
-        current_rating = image_info.get('rating', 0)
-        
-        # 0星 (清除评分)
-        r0_action = rating_menu.addAction("0星 (清除)")
-        if current_rating == 0:
-            r0_action.setIcon(qta.icon('mdi6.check', color='#4caf50'))
-        r0_action.triggered.connect(lambda: self.set_rating_selection(0))
-        
-        rating_menu.addSeparator()
-        
-        # 1-5星
-        for r in range(1, 6):
-            r_action = StarMenuAction(r, rating_menu)
-            r_action.triggered_rating.connect(lambda val: self.set_rating_selection(val))
-            rating_menu.addAction(r_action)
-
-        # 色标菜单
-        label_menu = menu.addMenu(qta.icon('mdi.circle', color='#2196F3'), "设置色标")
-        
-        # 定义颜色列表
-        labels = [
-            ("Red", "红色", "#FF3B30"),
-            ("Yellow", "黄色", "#FFCC00"),
-            ("Green", "绿色", "#5CB85C"), # Updated: Less saturated Green
-            ("Blue", "蓝色", "#007AFF"),
-            ("Purple", "紫色", "#AF52DE"),
-            ("White", "白色", "#FFFFFF"),
-            ("Orange", "橙色", "#FF9500"),
-            ("Pink", "粉色", "#F06292"), # Updated: Less saturated Pink
-            ("Cyan", "青色", "#5AC8FA"),
-            ("Gray", "灰色", "#8E8E93"),
-            ("Black", "黑色", "#48484A"),
-        ]
-        
-        # 清除色标
-        clear_label_action = label_menu.addAction("无色标 (清除)")
-        clear_label_action.setIcon(qta.icon('mdi.close', color='#757575'))
-        clear_label_action.triggered.connect(lambda: self.set_label_selection(""))
-        
-        label_menu.addSeparator()
-        
-        for en_name, cn_name, color_hex in labels:
-            action = label_menu.addAction(cn_name)
-            # 针对白色图标特殊处理，添加灰色边框效果
-            if en_name == "White":
-                 # 使用 stack icon 模拟边框
-                 icon = qta.icon('mdi.circle', color=color_hex, color_off='#A0A0A0')
-                 action.setIcon(icon)
-            else:
-                 action.setIcon(qta.icon('mdi.circle', color=color_hex))
-            action.triggered.connect(lambda checked=False, l=en_name: self.set_label_selection(l))
-
-        # 地理位置
-        location_action = menu.addAction(qta.icon('mdi6.map-marker-outline', color='#555'), "设置地理位置")
-        location_action.triggered.connect(self.show_geolocation_dialog)
-
-        track_match_action = menu.addAction(qta.icon('mdi6.transit-connection-variant', color='#555'), "轨迹匹配")
-        track_match_action.triggered.connect(self.show_track_match_dialog)
-
-        # 添加标签
-        add_tag_action = menu.addAction(qta.icon('ph.tag-simple-fill', color='#555'), "添加标签")
-        add_tag_action.triggered.connect(self.open_tag_manager)
-
-        # 备注
-        remark_action = menu.addAction(qta.icon('mdi6.comment-text-outline', color='#555'), "编辑备注")
-        remark_action.triggered.connect(lambda: self.edit_remark(image_path))
-        
-        edit_species_action = menu.addAction(qta.icon('mdi6.target', color='#555'), "鸟种检测")
-        edit_species_action.triggered.connect(self.edit_species_for_selection)
-        menu.addSeparator()
-
-        # 重命名
-        rename_action = menu.addAction(qta.icon('mdi6.rename-box', color='#555'), "重命名")
-        rename_action.triggered.connect(lambda: self.rename_image(index, image_path))
-        # 删除
-        delete_action = menu.addAction(qta.icon('mdi6.trash-can-outline', color='#e74c3c'), "删除")
-        def _delete_clicked():
-            selected = self.get_selected_files()
             try:
-                selected_paths = {self._normalize_path_key(f.get("path")) for f in (selected or []) if isinstance(f, dict) and f.get("path")}
+                if bool(getattr(self.grid_view, "is_virtualized", False)):
+                    try:
+                        selected_paths = self.get_selected_paths() or [str(image_path)]
+                    except Exception:
+                        selected_paths = [str(image_path)]
+                    watermark_action = menu.addAction(qta.icon("mdi6.watermark", color="#555"), "添加水印")
+                    watermark_action.triggered.connect(lambda: self.open_watermark_dialog(selected_paths))
+                    menu.addSeparator()
             except Exception:
-                selected_paths = set()
-            if len(selected_paths) > 1 and self._normalize_path_key(image_path) in selected_paths:
-                self.on_delete_clicked()
+                pass
+
+            # 收藏/取消收藏
+            is_fav = bool(image_info.get('is_favorite', 0))
+            if is_fav:
+                fav_action = menu.addAction(qta.icon('mdi6.heart-outline', color='#555'), "取消收藏")
+                fav_action.triggered.connect(lambda: self.toggle_favorite_selection(False))
             else:
-                self.delete_image(index, image_path)
-        delete_action.triggered.connect(_delete_clicked)
-        
-        menu.addSeparator()
+                fav_action = menu.addAction(qta.icon('mdi6.heart', color='#e74c3c'), "收藏")
+                fav_action.triggered.connect(lambda: self.toggle_favorite_selection(True))
+            
+            # 评分菜单
+            rating_menu = menu.addMenu(qta.icon('fa5s.star', color='#FFCC00'), "评分")
+            current_rating = image_info.get('rating', 0)
+            
+            # 0星 (清除评分)
+            r0_action = rating_menu.addAction("0星 (清除)")
+            if current_rating == 0:
+                r0_action.setIcon(qta.icon('mdi6.check', color='#4caf50'))
+            r0_action.triggered.connect(lambda: self.set_rating_selection(0))
+            
+            rating_menu.addSeparator()
+            
+            # 1-5星
+            for r in range(1, 6):
+                r_action = StarMenuAction(r, rating_menu)
+                r_action.triggered_rating.connect(lambda val: self.set_rating_selection(val))
+                rating_menu.addAction(r_action)
 
-        
-        menu.addSeparator()
-        # Exif 操作
-        exif_write_action = menu.addAction(qta.icon('mdi6.file-document-edit', color='#555'), "写入Exif信息")
-        exif_write_action.triggered.connect(lambda: self.show_exif_write_dialog(image_path))
-        exif_read_action = menu.addAction(qta.icon('mdi6.file-search', color='#555'), "读取Exif信息")
-        exif_read_action.triggered.connect(lambda: self.show_exif_read_dialog(image_path))
-        menu.addSeparator()
+            # 色标菜单
+            label_menu = menu.addMenu(qta.icon('mdi.circle', color='#2196F3'), "设置色标")
+            
+            # 定义颜色列表
+            labels = [
+                ("Red", "红色", "#FF3B30"),
+                ("Yellow", "黄色", "#FFCC00"),
+                ("Green", "绿色", "#5CB85C"), # Updated: Less saturated Green
+                ("Blue", "蓝色", "#007AFF"),
+                ("Purple", "紫色", "#AF52DE"),
+                ("White", "白色", "#FFFFFF"),
+                ("Orange", "橙色", "#FF9500"),
+                ("Pink", "粉色", "#F06292"), # Updated: Less saturated Pink
+                ("Cyan", "青色", "#5AC8FA"),
+                ("Gray", "灰色", "#8E8E93"),
+                ("Black", "黑色", "#48484A"),
+            ]
+            
+            # 清除色标
+            clear_label_action = label_menu.addAction("无色标 (清除)")
+            clear_label_action.setIcon(qta.icon('mdi.close', color='#757575'))
+            clear_label_action.triggered.connect(lambda: self.set_label_selection(""))
+            
+            label_menu.addSeparator()
+            
+            for en_name, cn_name, color_hex in labels:
+                action = label_menu.addAction(cn_name)
+                # 针对白色图标特殊处理，添加灰色边框效果
+                if en_name == "White":
+                     # 使用叠加图标模拟边框效果
+                     icon = qta.icon('mdi.circle-outline', 'mdi.circle', color=['#A0A0A0', color_hex])
+                     action.setIcon(icon)
+                else:
+                     action.setIcon(qta.icon('mdi.circle', color=color_hex))
+                action.triggered.connect(lambda checked=False, l=en_name: self.set_label_selection(l))
 
-        # 属性
-        properties_action = menu.addAction(qta.icon('mdi6.information', color='#555'), "属性")
-        properties_action.triggered.connect(lambda: self.show_image_properties(image_path))
-        
-        menu.addSeparator()
-        
-        # 刷新缩略图
-        refresh_action = menu.addAction(qta.icon('mdi6.refresh', color='#555'), "刷新缩略图")
-        refresh_action.triggered.connect(lambda: self.refresh_thumbnail(image_path))
-        
-        # 显示菜单
-        menu.exec(position)
+            # 地理位置
+            location_action = menu.addAction(qta.icon('mdi6.map-marker-outline', color='#555'), "设置地理位置")
+            location_action.triggered.connect(self.show_geolocation_dialog)
+
+            track_match_action = menu.addAction(qta.icon('mdi6.transit-connection-variant', color='#555'), "轨迹匹配")
+            track_match_action.triggered.connect(self.show_track_match_dialog)
+
+            # 添加标签
+            add_tag_action = menu.addAction(qta.icon('ph.tag-simple-fill', color='#555'), "添加标签")
+            add_tag_action.triggered.connect(self.open_tag_manager)
+
+            # 备注
+            remark_action = menu.addAction(qta.icon('mdi6.comment-text-outline', color='#555'), "编辑备注")
+            remark_action.triggered.connect(lambda: self.edit_remark(image_path))
+            
+            edit_species_action = menu.addAction(qta.icon('mdi6.target', color='#555'), "鸟种检测")
+            edit_species_action.triggered.connect(self.edit_species_for_selection)
+            menu.addSeparator()
+
+            # 重命名
+            rename_action = menu.addAction(qta.icon('mdi6.rename-box', color='#555'), "重命名")
+            rename_action.triggered.connect(lambda: self.rename_image(index, image_path))
+            # 删除
+            delete_action = menu.addAction(qta.icon('mdi6.trash-can-outline', color='#e74c3c'), "删除")
+            def _delete_clicked():
+                selected = self.get_selected_files()
+                try:
+                    selected_paths = {self._normalize_path_key(f.get("path")) for f in (selected or []) if isinstance(f, dict) and f.get("path")}
+                except Exception:
+                    selected_paths = set()
+                if len(selected_paths) > 1 and self._normalize_path_key(image_path) in selected_paths:
+                    self.on_delete_clicked()
+                else:
+                    self.delete_image(index, image_path)
+            delete_action.triggered.connect(_delete_clicked)
+            
+            menu.addSeparator()
+
+            
+            menu.addSeparator()
+            # Exif 操作
+            exif_write_action = menu.addAction(qta.icon('mdi6.file-document-edit', color='#555'), "写入Exif信息")
+            exif_write_action.triggered.connect(lambda: self.show_exif_write_dialog(image_path))
+            exif_read_action = menu.addAction(qta.icon('mdi6.file-search', color='#555'), "读取Exif信息")
+            exif_read_action.triggered.connect(lambda: self.show_exif_read_dialog(image_path))
+            menu.addSeparator()
+
+            # 属性
+            properties_action = menu.addAction(qta.icon('mdi6.information', color='#555'), "属性")
+            properties_action.triggered.connect(lambda: self.show_image_properties(image_path))
+            
+            menu.addSeparator()
+            
+            # 刷新缩略图
+            refresh_action = menu.addAction(qta.icon('mdi6.refresh', color='#555'), "刷新缩略图")
+            refresh_action.triggered.connect(lambda: self.refresh_thumbnail(image_path))
+            
+            # 显示菜单
+            try:
+                menu.exec(position)
+            except Exception as e:
+                try:
+                    LogManager.instance().error(f"显示右键菜单失败: {e}")
+                    import traceback
+                    LogManager.instance().error(traceback.format_exc())
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                LogManager.instance().error(f"右键菜单处理失败: {e}")
+                import traceback
+                LogManager.instance().error(traceback.format_exc())
+            except Exception:
+                pass
+
+    def open_watermark_dialog(self, file_paths):
+        if bool(getattr(self, "_watermark_dialog_opening", False)):
+            return
+        self._watermark_dialog_opening = True
+        try:
+            paths = [str(p) for p in (file_paths or []) if p]
+            if not paths:
+                return
+            from ui.dialogs.watermark_dialog import WatermarkDialog
+
+            dlg = WatermarkDialog(parent=self, file_paths=paths)
+            dlg.exec()
+            try:
+                # 仅在用户点击“保存/另存”时才触发缩略图刷新，避免未改动也触发缓存失效
+                did_write = False
+                try:
+                    did_write = dlg.user_clicked_write() if hasattr(dlg, "user_clicked_write") else bool(getattr(dlg, "_user_clicked_write", False))
+                except Exception:
+                    did_write = False
+                if did_write:
+                    changed_paths = []
+                    try:
+                        changed_paths = dlg.get_last_changed_paths() if hasattr(dlg, "get_last_changed_paths") else []
+                    except Exception:
+                        changed_paths = []
+                    for p in (changed_paths or []):
+                        self.refresh_thumbnail(p)
+            except Exception:
+                pass
+        except Exception as e:
+            NotificationManager.instance().show_warning("错误", f"打开水印窗口失败: {e}")
+        finally:
+            self._watermark_dialog_opening = False
 
     def _safe_rmdir_empty(self, path: str, root_limit=None):
         p = str(path or "")
@@ -3206,9 +3275,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
         if not (order and family and genus and species):
             NotificationManager.instance().show_toast("仅支持对“种”节点执行重命名")
             return
+        try:
+            root_dir = str(self.settings_manager.get("general/root_path") or "")
+        except Exception:
+            root_dir = ""
         rows = []
         try:
-            rows = self.db.query_images_by_taxonomy(order_cls=order, family_cls=family, genus_cls=genus, species_cls=species, unclassified=False, table_name="bird_results")
+            rows = self.db.query_images_by_taxonomy(order_cls=order, family_cls=family, genus_cls=genus, species_cls=species, unclassified=False, table_name="bird_results", root_path=root_dir)
         except Exception:
             rows = []
         if not rows:
@@ -3230,7 +3303,6 @@ class ImageLibraryPage(BaseImageBrowserPage):
         new_genus = str(res.get("genus_cls") or "").strip()
         move_files = bool(res.get("move_files"))
 
-        root_dir = str(self.settings_manager.get("general/root_path") or "")
         if move_files and not (root_dir and os.path.isdir(root_dir) and new_order and new_family and new_genus and new_species):
             move_files = False
 
@@ -3325,9 +3397,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
         family = (qs.get("family") or [""])[0] or None
         genus = (qs.get("genus") or [""])[0] or None
         species = (qs.get("species") or [""])[0] or None
+        try:
+            root_dir = str(self.settings_manager.get("general/root_path") or "")
+        except Exception:
+            root_dir = ""
         rows = []
         try:
-            rows = self.db.query_images_by_taxonomy(order_cls=order, family_cls=family, genus_cls=genus, species_cls=species, unclassified=False, table_name="bird_results")
+            rows = self.db.query_images_by_taxonomy(order_cls=order, family_cls=family, genus_cls=genus, species_cls=species, unclassified=False, table_name="bird_results", root_path=root_dir)
         except Exception:
             rows = []
         if not rows:
@@ -3355,7 +3431,6 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             pass
         try:
-            root_dir = str(self.settings_manager.get("general/root_path") or "")
             if hasattr(self, "folder_panel") and self.folder_panel is not None:
                 self.folder_panel.refresh_tree(root_path=root_dir)
         except Exception:
@@ -3757,6 +3832,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 target_key = self._normalize_path_key(image_path)
             except Exception:
                 target_key = str(image_path or "")
+            try:
+                root_dir = str(self.settings_manager.get("general/root_path") or "")
+            except Exception:
+                root_dir = ""
 
             # 1. 删除本地文件 (如果勾选)
             if delete_local and os.path.exists(image_path):
@@ -3773,6 +3852,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                     if os.path.exists(image_path):
                         NotificationManager.instance().show_warning("错误", "删除失败：文件仍存在（可能被占用）")
                         return
+                except Exception:
+                    pass
+                try:
+                    self._safe_rmdir_empty(os.path.dirname(str(image_path or "")), root_limit=root_dir)
                 except Exception:
                     pass
             
@@ -3803,7 +3886,22 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 except Exception:
                     pass
 
-            # 3. 从内存列表中移除 (通过路径匹配)
+            # 3. 删除本地缩略图缓存（内存缓存和磁盘缓存）
+            try:
+                # 删除内存缓存
+                if hasattr(self, "cache_manager") and self.cache_manager:
+                    self.cache_manager.invalidate(image_path)
+            except Exception:
+                pass
+            try:
+                # 删除磁盘缓存
+                from cache.thumbnail_disk_cache import ThumbnailDiskCache
+                disk_cache = ThumbnailDiskCache(self.cache_manager, scope="library")
+                disk_cache.invalidate_file(image_path)
+            except Exception:
+                pass
+
+            # 4. 从内存列表中移除 (通过路径匹配)
             def _keep_img(img):
                 try:
                     if not isinstance(img, dict):
@@ -3831,6 +3929,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
             except Exception:
                 pass
             self.update_thumbnails()
+            try:
+                if hasattr(self, "folder_panel") and self.folder_panel is not None:
+                    self.folder_panel.refresh_tree(root_path=root_dir)
+            except Exception:
+                pass
                 
             NotificationManager.instance().show_toast("删除成功")
         except Exception as e:
@@ -3992,7 +4095,23 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 self.db.delete_results_by_uuids(list(deleted_uuids), table_name="bird_results")
             except Exception:
                 pass
-            
+
+        # 删除本地缩略图缓存（内存缓存和磁盘缓存）
+        if deleted_paths:
+            try:
+                # 删除内存缓存
+                if hasattr(self, "cache_manager") and self.cache_manager:
+                    self.cache_manager.invalidate_many(deleted_paths)
+            except Exception:
+                pass
+            try:
+                # 删除磁盘缓存
+                from cache.thumbnail_disk_cache import ThumbnailDiskCache
+                disk_cache = ThumbnailDiskCache(self.cache_manager, scope="library")
+                disk_cache.invalidate_many(deleted_paths)
+            except Exception:
+                pass
+
          # 从内存列表中移除
         if deleted_paths:
             try:
@@ -5012,11 +5131,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
         base_list = []
         try:
-            rows_full = self.db.query_images_by_taxonomy(unclassified=False, table_name="bird_results")
+            rows_full = self.db.query_images_by_taxonomy(unclassified=False, table_name="bird_results", root_path=str(root_dir or ""))
         except Exception:
             rows_full = []
         try:
-            rows_un = self.db.query_images_by_taxonomy(unclassified=True, table_name="bird_results")
+            rows_un = self.db.query_images_by_taxonomy(unclassified=True, table_name="bird_results", root_path=str(root_dir or ""))
         except Exception:
             rows_un = []
         rows = list(rows_full or []) + list(rows_un or [])
@@ -6872,7 +6991,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 return
             
             # 确保目录存在
-            save_dir = os.path.join(os.getcwd(), "data", "filter")
+            from utils.paths import PathManager
+            pm = PathManager.instance()
+            save_dir = str(pm.get_user_data_path() / "filter")
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
             
@@ -6903,9 +7024,36 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
     def on_load_filter(self):
         """加载过滤条件"""
-        save_dir = os.path.join(os.getcwd(), "data", "filter")
+        from utils.paths import PathManager
+        pm = PathManager.instance()
+        save_dir = str(pm.get_user_data_path() / "filter")
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
+        try:
+            legacy_dir = str(pm.get_app_data_path() / "filter")
+        except Exception:
+            legacy_dir = os.path.join(os.getcwd(), "data", "filter")
+        try:
+            if os.path.isdir(legacy_dir):
+                for name in os.listdir(legacy_dir):
+                    if not str(name).lower().endswith(".bft"):
+                        continue
+                    src = os.path.join(legacy_dir, str(name))
+                    dst = os.path.join(save_dir, str(name))
+                    try:
+                        if os.path.exists(dst):
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        with open(src, "rb") as rf:
+                            data = rf.read()
+                        with open(dst, "wb") as wf:
+                            wf.write(data)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
             
         # 获取所有 .bft 文件
         files = [f for f in os.listdir(save_dir) if f.endswith('.bft')]
@@ -7641,9 +7789,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 try:
                     if depth < 4:
                         uri = str(folder_path)
+                        try:
+                            root_dir = str(self.settings_manager.get("general/root_path", "") or "")
+                        except Exception:
+                            root_dir = ""
                         if uri == "virtual://taxonomy/unclassified":
                             title = "未分类"
-                            stats = self.db.get_taxonomy_node_stats(unclassified=True, table_name="bird_results")
+                            stats = self.db.get_taxonomy_node_stats(unclassified=True, table_name="bird_results", root_path=root_dir)
                         else:
                             parsed = urlparse(uri.replace("virtual://taxonomy", "http://taxonomy", 1))
                             qs = parse_qs(parsed.query or "")
@@ -7659,6 +7811,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                                 species_cls=s or None,
                                 unclassified=False,
                                 table_name="bird_results",
+                                root_path=root_dir,
                             )
                         self.preview_panel.show_folder_stats(title, stats)
                 except Exception:
@@ -7783,7 +7936,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 目前 _update_thumbnails_with_list 会负责清空
         
         self.thumbnail_loader.cancel_all()
-        self._taxonomy_load_worker = TaxonomyLoadWorker(str(taxonomy_uri or ""), self.db)
+        try:
+            root_dir = str(self.settings_manager.get("general/root_path", "") or "")
+        except Exception:
+            root_dir = ""
+        self._taxonomy_load_worker = TaxonomyLoadWorker(str(taxonomy_uri or ""), self.db, root_path=root_dir)
         self._taxonomy_load_worker.finished.connect(self._on_folder_load_finished)
         self._taxonomy_load_worker.failed.connect(self._on_folder_load_failed)
         self._taxonomy_load_worker.start()

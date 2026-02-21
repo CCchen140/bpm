@@ -31,12 +31,12 @@ COMBO_STYLE = """
     QComboBox::drop-down {
         border: none;
         width: 20px;
+        background: transparent;
     }
     QComboBox::down-arrow {
-        image: none;
-        border-left: 4px solid transparent;
-        border-right: 4px solid transparent;
-        border-top: 5px solid #666666;
+        image: url(data/icon/line/箭头下_arrow-down.svg);
+        width: 12px;
+        height: 12px;
         margin-right: 5px;
     }
     QComboBox QAbstractItemView {

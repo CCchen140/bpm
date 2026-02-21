@@ -1,14 +1,16 @@
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QWidget
 from PyQt6.QtCore import Qt, QEvent, QPoint
+from PyQt6.QtGui import QGuiApplication
 from ui.utils.icon_loader import qta
 from ui.utils.color_manager import ColorManager
 
 
 class BasePopupDialog(QDialog):
-    def __init__(self, parent=None, title="", size=None):
+    def __init__(self, parent=None, title="", size=None, translucent_background: bool = True):
         super().__init__(parent)
         self._title = title
         self._size = size
+        self._translucent_background = bool(translucent_background)
         self._dragging = False
         self._drag_offset = QPoint()
         self.container = None
@@ -23,9 +25,24 @@ class BasePopupDialog(QDialog):
 
     def _init_base_ui(self):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, bool(self._translucent_background))
+        except Exception:
+            try:
+                if self._translucent_background:
+                    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            except Exception:
+                pass
         if self._size:
-            self.resize(self._size[0], self._size[1])
+            req_w, req_h = int(self._size[0]), int(self._size[1])
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen:
+                geom = screen.availableGeometry()
+                max_w = max(480, int(geom.width()) - 40)
+                max_h = max(360, int(geom.height()) - 40)
+                req_w = min(req_w, max_w)
+                req_h = min(req_h, max_h)
+            self.resize(req_w, req_h)
 
         cm = ColorManager.instance()
         self._content_bg = cm.get("theme.background.light", "#FFFFFF")
@@ -42,6 +59,11 @@ class BasePopupDialog(QDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
+        if not bool(getattr(self, "_translucent_background", True)):
+            try:
+                self.setStyleSheet(f"background-color: {self._content_bg};")
+            except Exception:
+                pass
 
         self.container = QWidget()
         self.container.setObjectName("container")
@@ -107,6 +129,20 @@ class BasePopupDialog(QDialog):
         self.content_widget.setStyleSheet(f"""
             QWidget#contentWidget {{
                 background-color: {self._content_bg};
+            }}
+            QWidget#contentWidget, 
+            QWidget#contentWidget QLabel, 
+            QWidget#contentWidget QCheckBox, 
+            QWidget#contentWidget QRadioButton, 
+            QWidget#contentWidget QPushButton, 
+            QWidget#contentWidget QLineEdit, 
+            QWidget#contentWidget QComboBox, 
+            QWidget#contentWidget QListWidget, 
+            QWidget#contentWidget QListView, 
+            QWidget#contentWidget QTreeView, 
+            QWidget#contentWidget QSpinBox, 
+            QWidget#contentWidget QProgressBar {{
+                color: {self._text_color};
             }}
             QWidget#contentWidget QLabel {{
                 background: transparent;

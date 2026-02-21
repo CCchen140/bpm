@@ -791,6 +791,68 @@ class BirdLibraryDB:
             return "thumbnail_disk_cache_import"
         return "thumbnail_disk_cache_library"
 
+    def get_all_orders(self):
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT order_cls FROM bird_results WHERE order_cls IS NOT NULL AND TRIM(order_cls) != '' ORDER BY order_cls")
+            rows = cursor.fetchall() or []
+            return [r["order_cls"] for r in rows if r["order_cls"]]
+        finally:
+            conn.close()
+
+    def get_families_by_order(self, order_name: str):
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT family_cls FROM bird_results WHERE order_cls = ? AND family_cls IS NOT NULL AND TRIM(family_cls) != '' ORDER BY family_cls",
+                (str(order_name),),
+            )
+            rows = cursor.fetchall() or []
+            return [r["family_cls"] for r in rows if r["family_cls"]]
+        finally:
+            conn.close()
+
+    def get_genera_by_family(self, family_name: str):
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT genus_cls FROM bird_results WHERE family_cls = ? AND genus_cls IS NOT NULL AND TRIM(genus_cls) != '' ORDER BY genus_cls",
+                (str(family_name),),
+            )
+            rows = cursor.fetchall() or []
+            return [r["genus_cls"] for r in rows if r["genus_cls"]]
+        finally:
+            conn.close()
+
+    def get_species_by_genus(self, genus_name: str):
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT species_cls FROM bird_results WHERE genus_cls = ? AND species_cls IS NOT NULL AND TRIM(species_cls) != '' ORDER BY species_cls",
+                (str(genus_name),),
+            )
+            rows = cursor.fetchall() or []
+            return [r["species_cls"] for r in rows if r["species_cls"]]
+        finally:
+            conn.close()
+
+    def get_image_count_by_species(self, species_name: str) -> int:
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(1) AS c FROM bird_results WHERE species_cls = ?",
+                (str(species_name),),
+            )
+            row = cursor.fetchone()
+            return int(row["c"] if row and row["c"] is not None else 0)
+        finally:
+            conn.close()
+
     def get_thumbnail_disk_cache(self, cache_key, variant, scope="library"):
         if not cache_key or not variant:
             return None
@@ -935,6 +997,48 @@ class BirdLibraryDB:
             finally:
                 conn.close()
         return rows
+
+    def list_thumbnail_disk_cache_by_key(self, cache_key: str, scope="library", limit=200000):
+        if not cache_key:
+            return []
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 200000
+        table = self._get_thumbnail_disk_cache_table(scope)
+        rows = []
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT cache_key, variant, cache_rel_path FROM {table} WHERE cache_key=? LIMIT ?",
+                    (str(cache_key), limit),
+                )
+                for r in cursor.fetchall() or []:
+                    rows.append(
+                        {
+                            "cache_key": r["cache_key"],
+                            "variant": r["variant"],
+                            "cache_rel_path": r["cache_rel_path"],
+                        }
+                    )
+            finally:
+                conn.close()
+        return rows
+
+    def delete_thumbnail_disk_cache_by_key(self, cache_key: str, scope="library"):
+        if not cache_key:
+            return
+        table = self._get_thumbnail_disk_cache_table(scope)
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(f"DELETE FROM {table} WHERE cache_key=?", (str(cache_key),))
+                conn.commit()
+            finally:
+                conn.close()
 
     def _migrate_tables(self, conn):
         """迁移表结构：添加缺失的列"""
@@ -1142,15 +1246,33 @@ class BirdLibraryDB:
             finally:
                 conn.close()
 
-    def get_taxonomy_tree_stats(self, table_name: str = "bird_results"):
+    def get_taxonomy_tree_stats(self, table_name: str = "bird_results", root_path: str | None = None):
         if table_name not in ["bird_results", "import_cache"]:
             table_name = "bird_results"
+        root_slash = ""
+        root_back = ""
+        try:
+            rp = str(root_path or "").strip()
+        except Exception:
+            rp = ""
+        if rp:
+            try:
+                root_slash = rp.replace("\\", "/")
+            except Exception:
+                root_slash = rp
+            try:
+                root_back = rp.replace("/", "\\")
+            except Exception:
+                root_back = rp
+            if root_slash and not root_slash.endswith("/"):
+                root_slash += "/"
+            if root_back and not root_back.endswith("\\"):
+                root_back += "\\"
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    f"""
+                classified_sql = f"""
                     SELECT
                         order_cls AS o,
                         family_cls AS f,
@@ -1162,20 +1284,27 @@ class BirdLibraryDB:
                       AND family_cls IS NOT NULL AND family_cls != ''
                       AND genus_cls IS NOT NULL AND genus_cls != ''
                       AND species_cls IS NOT NULL AND species_cls != ''
-                    GROUP BY order_cls, family_cls, genus_cls, species_cls
-                    """
-                )
+                """
+                classified_params = []
+                if root_slash or root_back:
+                    classified_sql += " AND (file_path LIKE ? OR file_path LIKE ?)"
+                    classified_params.extend([f"{root_slash}%", f"{root_back}%"])
+                classified_sql += " GROUP BY order_cls, family_cls, genus_cls, species_cls"
+                cursor.execute(classified_sql, classified_params)
                 rows = cursor.fetchall() or []
-                cursor.execute(
-                    f"""
+                unclassified_sql = f"""
                     SELECT COUNT(*) AS cnt
                     FROM {table_name}
-                    WHERE order_cls IS NULL OR order_cls = ''
+                    WHERE (order_cls IS NULL OR order_cls = ''
                        OR family_cls IS NULL OR family_cls = ''
                        OR genus_cls IS NULL OR genus_cls = ''
-                       OR species_cls IS NULL OR species_cls = ''
-                    """
-                )
+                       OR species_cls IS NULL OR species_cls = '')
+                """
+                unclassified_params = []
+                if root_slash or root_back:
+                    unclassified_sql += " AND (file_path LIKE ? OR file_path LIKE ?)"
+                    unclassified_params.extend([f"{root_slash}%", f"{root_back}%"])
+                cursor.execute(unclassified_sql, unclassified_params)
                 unclassified = 0
                 try:
                     r = cursor.fetchone()
@@ -1235,7 +1364,7 @@ class BirdLibraryDB:
             finally:
                 conn.close()
 
-    def query_images_by_taxonomy(self, order_cls=None, family_cls=None, genus_cls=None, species_cls=None, unclassified=False, table_name: str = "bird_results", limit=None):
+    def query_images_by_taxonomy(self, order_cls=None, family_cls=None, genus_cls=None, species_cls=None, unclassified=False, table_name: str = "bird_results", limit=None, root_path: str | None = None):
         if table_name not in ["bird_results", "import_cache"]:
             table_name = "bird_results"
         # 移除只读锁，利用 SQLite WAL 并发读特性，避免阻塞 UI
@@ -1244,6 +1373,25 @@ class BirdLibraryDB:
             cursor = conn.cursor()
             wheres = []
             params = []
+            try:
+                rp = str(root_path or "").strip()
+            except Exception:
+                rp = ""
+            if rp:
+                try:
+                    root_slash = rp.replace("\\", "/")
+                except Exception:
+                    root_slash = rp
+                try:
+                    root_back = rp.replace("/", "\\")
+                except Exception:
+                    root_back = rp
+                if root_slash and not root_slash.endswith("/"):
+                    root_slash += "/"
+                if root_back and not root_back.endswith("\\"):
+                    root_back += "\\"
+                wheres.append("(file_path LIKE ? OR file_path LIKE ?)")
+                params.extend([f"{root_slash}%", f"{root_back}%"])
             if unclassified:
                 # [Fix] 优化未分类的判断逻辑，确保所有层级缺失或部分缺失的情况都被涵盖
                 # 之前的逻辑: (O is null) OR (F is null) OR ... 只要有一个为空就算未分类，这没问题
@@ -1301,7 +1449,7 @@ class BirdLibraryDB:
         finally:
             conn.close()
 
-    def get_taxonomy_node_stats(self, order_cls=None, family_cls=None, genus_cls=None, species_cls=None, unclassified=False, table_name: str = "bird_results"):
+    def get_taxonomy_node_stats(self, order_cls=None, family_cls=None, genus_cls=None, species_cls=None, unclassified=False, table_name: str = "bird_results", root_path: str | None = None):
         if table_name not in ["bird_results", "import_cache"]:
             table_name = "bird_results"
         # 移除只读锁，利用 SQLite WAL 并发读特性，避免阻塞 UI
@@ -1310,6 +1458,25 @@ class BirdLibraryDB:
             cursor = conn.cursor()
             wheres = []
             params = []
+            try:
+                rp = str(root_path or "").strip()
+            except Exception:
+                rp = ""
+            if rp:
+                try:
+                    root_slash = rp.replace("\\", "/")
+                except Exception:
+                    root_slash = rp
+                try:
+                    root_back = rp.replace("/", "\\")
+                except Exception:
+                    root_back = rp
+                if root_slash and not root_slash.endswith("/"):
+                    root_slash += "/"
+                if root_back and not root_back.endswith("\\"):
+                    root_back += "\\"
+                wheres.append("(file_path LIKE ? OR file_path LIKE ?)")
+                params.extend([f"{root_slash}%", f"{root_back}%"])
             if unclassified:
                 # [Fix] 优化未分类的判断逻辑
                 wheres.append("""(
@@ -1369,26 +1536,44 @@ class BirdLibraryDB:
         if table_name not in ["bird_results", "import_cache"]:
             table_name = "bird_results"
         root_norm = ""
+        root_slash = ""
+        root_back = ""
         try:
             if root_path:
                 root_norm = os.path.normcase(os.path.normpath(str(root_path)))
         except Exception:
             root_norm = ""
+        if root_norm:
+            try:
+                root_slash = str(root_path).replace("\\", "/")
+            except Exception:
+                root_slash = str(root_path)
+            try:
+                root_back = str(root_path).replace("/", "\\")
+            except Exception:
+                root_back = str(root_path)
+            if root_slash and not root_slash.endswith("/"):
+                root_slash += "/"
+            if root_back and not root_back.endswith("\\"):
+                root_back += "\\"
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    f"""
+                sql = f"""
                     SELECT file_path
                     FROM {table_name}
-                    WHERE order_cls IS NULL OR order_cls = ''
+                    WHERE (order_cls IS NULL OR order_cls = ''
                        OR family_cls IS NULL OR family_cls = ''
                        OR genus_cls IS NULL OR genus_cls = ''
-                       OR species_cls IS NULL OR species_cls = ''
-                    LIMIT {int(sample_limit) if isinstance(sample_limit, int) and sample_limit > 0 else 50000}
-                    """
-                )
+                       OR species_cls IS NULL OR species_cls = '')
+                """
+                params = []
+                if root_slash or root_back:
+                    sql += " AND (file_path LIKE ? OR file_path LIKE ?)"
+                    params.extend([f"{root_slash}%", f"{root_back}%"])
+                sql += f" LIMIT {int(sample_limit) if isinstance(sample_limit, int) and sample_limit > 0 else 50000}"
+                cursor.execute(sql, params)
                 rows = cursor.fetchall() or []
                 groups = {}
                 for r in rows:
@@ -1434,7 +1619,7 @@ class BirdLibraryDB:
             finally:
                 conn.close()
 
-    def query_unclassified_images_in_folder(self, folder_path: str, table_name: str = "bird_results"):
+    def query_unclassified_images_in_folder(self, folder_path: str, table_name: str = "bird_results", root_path: str | None = None):
         if table_name not in ["bird_results", "import_cache"]:
             table_name = "bird_results"
         folder = ""
@@ -1444,6 +1629,18 @@ class BirdLibraryDB:
             folder = str(folder_path or "")
         if not folder:
             return []
+        try:
+            rp = str(root_path or "").strip()
+        except Exception:
+            rp = ""
+        if rp:
+            try:
+                folder_norm = os.path.normcase(os.path.normpath(folder))
+                root_norm = os.path.normcase(os.path.normpath(rp))
+                if not (folder_norm == root_norm or folder_norm.startswith(root_norm + os.sep)):
+                    return []
+            except Exception:
+                pass
         path_slash = folder.replace('\\', '/')
         path_back = folder.replace('/', '\\')
         if not path_slash.endswith('/'):
@@ -1454,6 +1651,17 @@ class BirdLibraryDB:
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
+            try:
+                if rp:
+                    root_slash = rp.replace("\\", "/")
+                    root_back = rp.replace("/", "\\")
+                    if root_slash and not root_slash.endswith("/"):
+                        root_slash += "/"
+                    if root_back and not root_back.endswith("\\"):
+                        root_back += "\\"
+            except Exception:
+                root_slash = ""
+                root_back = ""
             cursor.execute(
                 f"""
                     SELECT
@@ -1463,10 +1671,11 @@ class BirdLibraryDB:
                         fnumber, shutter, iso, focal_length, camera_model, lens_model, tags, location
                     FROM {table_name}
                     WHERE (file_path LIKE ? OR file_path LIKE ?)
+                      {"AND (file_path LIKE ? OR file_path LIKE ?)" if rp else ""}
                       AND (order_cls IS NULL OR order_cls = '' OR family_cls IS NULL OR family_cls = '' OR genus_cls IS NULL OR genus_cls = '' OR species_cls IS NULL OR species_cls = '')
                     ORDER BY created_at DESC
                     """,
-                    (f"{path_slash}%", f"{path_back}%"),
+                    tuple([f"{path_slash}%", f"{path_back}%"] + ([f"{root_slash}%", f"{root_back}%"] if rp else [])),
                 )
             return cursor.fetchall() or []
         except Exception as e:
@@ -2972,6 +3181,47 @@ class BirdLibraryDB:
                 msg = str(e).lower()
                 try:
                     LogManager.instance().debug(f"get result by uuid error: {msg}")
+                except Exception:
+                    pass
+                if "locked" in msg and attempt < 3:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                row = None
+                break
+            finally:
+                try:
+                    if conn:
+                        conn.close()
+                except Exception:
+                    pass
+
+        if row:
+            item = dict(row)
+            item['bbox'] = self._normalize_bbox_json_str(item.get('bbox'))
+            item['focus_point'] = self._normalize_focus_point_json_str(item.get('focus_point'))
+            return item
+        return None
+
+    def get_result_by_fast_id(self, fast_id, table_name='bird_results'):
+        """根据 fast_id 获取单条结果（用于路径可能变化场景）"""
+        if table_name not in ['bird_results', 'import_cache']:
+            return None
+        if not fast_id:
+            return None
+
+        row = None
+        for attempt in range(4):
+            conn = None
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT * FROM {table_name} WHERE fast_id = ? LIMIT 1", (fast_id,))
+                row = cursor.fetchone()
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                try:
+                    LogManager.instance().debug(f"get result by fast_id error: {msg}")
                 except Exception:
                     pass
                 if "locked" in msg and attempt < 3:

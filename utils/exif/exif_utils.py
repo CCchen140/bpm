@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import os
 import sys
 import time
+import shutil
 from enum import Enum
 import json
 import re
@@ -259,40 +260,92 @@ def get_exiftool_path():
     从而返回正确的 exiftool 路径。
     """
     filename = "exiftool.exe" if sys.platform == "win32" else "exiftool"
-    if getattr(sys, 'frozen', False):
+    candidates: list[str] = []
+    try:
+        env_p = str(os.environ.get("BMP_EXIFTOOL_PATH") or os.environ.get("EXIFTOOL_PATH") or "").strip()
+    except Exception:
+        env_p = ""
+    if env_p:
+        candidates.append(env_p)
+
+    is_frozen = bool(getattr(sys, "frozen", False))
+    if is_frozen:
         try:
             exe_dir = os.path.dirname(sys.executable)
         except Exception:
             exe_dir = ""
+        if exe_dir:
+            candidates.extend(
+                [
+                    os.path.join(exe_dir, filename),
+                    os.path.join(exe_dir, "lib", filename),
+                    os.path.join(exe_dir, "libs", filename),
+                    os.path.join(exe_dir, "exiftool_files", filename),
+                ]
+            )
         try:
-            p1 = os.path.join(exe_dir, "lib", filename) if exe_dir else ""
-            if p1 and os.path.exists(p1):
-                return p1
+            base_path = str(getattr(sys, "_MEIPASS", "") or "").strip()
         except Exception:
-            pass
-        try:
-            p1b = os.path.join(exe_dir, "libs", filename) if exe_dir else ""
-            if p1b and os.path.exists(p1b):
-                return p1b
-        except Exception:
-            pass
-        try:
-            base_path = sys._MEIPASS
-            p2 = os.path.join(base_path, filename)
-            if os.path.exists(p2):
-                return p2
-        except Exception:
-            pass
-        return os.path.join(exe_dir, filename) if exe_dir else filename
+            base_path = ""
+        if base_path:
+            candidates.extend(
+                [
+                    os.path.join(base_path, filename),
+                    os.path.join(base_path, "exiftool_files", filename),
+                ]
+            )
     else:
         try:
             base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-            abs_path = os.path.join(base_path, filename)
-            if os.path.exists(abs_path):
-                return abs_path
+        except Exception:
+            base_path = ""
+        if base_path:
+            candidates.extend(
+                [
+                    os.path.join(base_path, filename),
+                    os.path.join(base_path, "exiftool_files", filename),
+                ]
+            )
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = ""
+        if cwd:
+            candidates.append(os.path.join(cwd, filename))
+
+    seen = set()
+    for p in candidates:
+        try:
+            ap = os.path.abspath(str(p))
+        except Exception:
+            ap = str(p)
+        k = ap.lower() if os.name == "nt" else ap
+        if not ap or k in seen:
+            continue
+        seen.add(k)
+        try:
+            if os.path.exists(ap):
+                return ap
+        except Exception:
+            continue
+
+    try:
+        w = shutil.which(filename) or shutil.which("exiftool")
+    except Exception:
+        w = None
+    if w:
+        try:
+            if os.path.exists(w):
+                return w
         except Exception:
             pass
-        return "./exiftool.exe" if sys.platform == "win32" else "./exiftool"
+
+    if candidates:
+        try:
+            return os.path.abspath(str(candidates[0]))
+        except Exception:
+            return str(candidates[0])
+    return filename
 
 def run_exiftool(cmd, *, timeout: float | None = None):
     """
@@ -1437,7 +1490,7 @@ class ExifHandleWorker:
                 out = {}
             return out
 
-    def get_tags_multi(self, file_paths, tags, timeout=10):
+    def get_tags_multi(self, file_paths, tags, timeout=10, force_mode: str | None = None):
         orig_paths = []
         try:
             for p in (file_paths or []):
@@ -1447,7 +1500,9 @@ class ExifHandleWorker:
             orig_paths = []
         if not orig_paths:
             return {}
-        mode = _get_exif_write_mode()
+        mode = str(force_mode or _get_exif_write_mode() or "file").strip().lower()
+        if mode not in ("file", "xmp"):
+            mode = "file"
         paths = []
         path_map = {}
         if mode == "xmp":
@@ -1648,13 +1703,34 @@ class ExifHandleWorker:
         try:
             bmp_tag_names = set()
             file_paths = []
+            # 处理XMP模式路径转换
+            mode = _get_exif_write_mode()
+            processed_chunk = []
             try:
-                file_paths = [p for p, _ in chunk if p]
+                for p, tags in chunk:
+                    if not p:
+                        continue
+                    if mode == "xmp":
+                        xmp_path = _to_sidecar_xmp_path(p)
+                        # 确保XMP文件存在
+                        try:
+                            if xmp_path and not os.path.exists(xmp_path):
+                                os.makedirs(os.path.dirname(xmp_path), exist_ok=True)
+                                with open(xmp_path, "a", encoding="utf-8"):
+                                    pass
+                        except Exception:
+                            continue
+                        processed_chunk.append((xmp_path, tags))
+                        file_paths.append(xmp_path)
+                    else:
+                        processed_chunk.append((p, tags))
+                        file_paths.append(p)
             except Exception:
-                file_paths = []
+                processed_chunk = chunk
+                file_paths = [p for p, _ in chunk if p]
             file_locks = self._acquire_file_locks(file_paths)
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8-sig') as f:
-                for path, tags in chunk:
+                for path, tags in processed_chunk:
                     f.write(f"{path}\n")
                     for tag, value in tags.items():
                         tag = _normalize_xmp_bmp_tag_for_write(tag)

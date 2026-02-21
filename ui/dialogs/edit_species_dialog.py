@@ -229,9 +229,33 @@ class EditSpeciesDialog(QDialog):
             pass
 
     def _on_ok(self):
+        # 在确定前，如果物种名存在但目科属不完整，尝试自动填充
+        species = str(self.species_input.text() or "").strip()
+        order = str(self.order_input.text() or "").strip()
+        family = str(self.family_input.text() or "").strip()
+        genus = str(self.genus_input.text() or "").strip()
+
+        if species and (not order or not family or not genus):
+            try:
+                t = BirdBiologicalClassifier().classify(species)
+                if t is not None:
+                    if not order and t.order_cn:
+                        order = t.order_cn
+                        self.order_input.setText(order)
+                    if not family and t.family_cn:
+                        family = t.family_cn
+                        self.family_input.setText(family)
+                    if not genus and t.genus_cn:
+                        genus = t.genus_cn
+                        self.genus_input.setText(genus)
+            except Exception:
+                pass
+
         if not self._is_taxonomy_complete():
             NotificationManager.instance().show_warning("提示", "请先填写完整的生物学分类（物种/目/科/属）")
             return
+
+        # 重新获取值（可能被自动填充更新了）
         species = str(self.species_input.text() or "").strip()
         order = str(self.order_input.text() or "").strip()
         family = str(self.family_input.text() or "").strip()

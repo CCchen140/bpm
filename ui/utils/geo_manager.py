@@ -761,9 +761,9 @@ class GeoInfoManager(QObject):
             data = response.json()
             if data.get('status') == '1' and data.get('geocodes'):
                 location_str = data['geocodes'][0]['location']
-                lng_gcj02, lat_gcj02 = map(float, location_str.split(','))
-                lng_wgs84, lat_wgs84 = self._gcj02_to_wgs84(lng_gcj02, lat_gcj02)
-                return (lat_wgs84, lng_wgs84, data['geocodes'][0]['formatted_address'])
+                lng, lat = map(float, location_str.split(','))
+                # 直接使用返回的坐标，不再进行 GCJ-02 转换
+                return (lat, lng, data['geocodes'][0]['formatted_address'])
         except Exception:
             pass
         return None
@@ -796,10 +796,10 @@ class GeoInfoManager(QObject):
             data = response.json()
             if data.get('status') == 0 and data.get('result'):
                 location = data['result']['location']
-                lng_gcj02 = location['lng']
-                lat_gcj02 = location['lat']
-                lng_wgs84, lat_wgs84 = self._gcj02_to_wgs84(lng_gcj02, lat_gcj02)
-                return (lat_wgs84, lng_wgs84, query)
+                lng = location['lng']
+                lat = location['lat']
+                # 直接使用返回的坐标，不再进行 GCJ-02 转换
+                return (lat, lng, query)
         except Exception:
             pass
         return None
@@ -835,7 +835,7 @@ class GeoInfoManager(QObject):
         try:
             url = "http://api.tianditu.gov.cn/geocoder"
             params = {"ds": json.dumps({"keyWord": query}, ensure_ascii=False), "tk": key}
-            
+
             # Log request
             try:
                 LogManager.instance().info(f"Tianditu geocode request: url={url} query={query}")
@@ -843,7 +843,7 @@ class GeoInfoManager(QObject):
                 pass
 
             response = requests.get(url, params=params, timeout=10)
-            
+
             # Log response
             try:
                 LogManager.instance().info(f"Tianditu geocode response: status={response.status_code} body={response.text[:1000]}")
@@ -853,10 +853,10 @@ class GeoInfoManager(QObject):
             data = response.json()
             if str(data.get("status")) == "0" and data.get("location"):
                 loc = data.get("location") if isinstance(data.get("location"), dict) else {}
-                lng_gcj02 = float(loc.get("lon"))
-                lat_gcj02 = float(loc.get("lat"))
-                lng_wgs84, lat_wgs84 = self._gcj02_to_wgs84(lng_gcj02, lat_gcj02)
-                return (float(lat_wgs84), float(lng_wgs84), str(query or ""))
+                lng = float(loc.get("lon"))
+                lat = float(loc.get("lat"))
+                # 直接使用返回的坐标，不再进行 GCJ-02 转换
+                return (float(lat), float(lng), str(query or ""))
             else:
                 try:
                     LogManager.instance().warning(f"Tianditu geocode failed: {data}")
@@ -874,9 +874,9 @@ class GeoInfoManager(QObject):
         key = self._get_api_key('gaode')
         if not key: return None
         try:
-            lng_gcj02, lat_gcj02 = self._wgs84_to_gcj02(lng, lat)
+            # 直接使用 WGS84 坐标查询，不再转换为 GCJ-02
             url = "https://restapi.amap.com/v3/geocode/regeo"
-            params = {'key': key, 'location': f"{lng_gcj02},{lat_gcj02}", 'output': 'json'}
+            params = {'key': key, 'location': f"{lng},{lat}", 'output': 'json'}
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
             if data.get('status') == '1' and data.get('regeocode'):
@@ -928,9 +928,9 @@ class GeoInfoManager(QObject):
         key = self._get_api_key('tencent')
         if not key: return None
         try:
-            lng_gcj02, lat_gcj02 = self._wgs84_to_gcj02(lng, lat)
+            # 直接使用 WGS84 坐标查询，不再转换为 GCJ-02
             url = "https://apis.map.qq.com/ws/geocoder/v1/"
-            params = {'key': key, 'location': f"{lat_gcj02},{lng_gcj02}"}
+            params = {'key': key, 'location': f"{lat},{lng}"}
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
             if data.get('status') == 0 and data.get('result'):
@@ -1004,11 +1004,11 @@ class GeoInfoManager(QObject):
         if not key:
             return None
         try:
-            lng_gcj02, lat_gcj02 = self._wgs84_to_gcj02(float(lng), float(lat))
+            # 直接使用 WGS84 坐标查询，不再转换为 GCJ-02
             url = "http://api.tianditu.gov.cn/geocoder"
-            post_str = f"{{'lon':{lng_gcj02},'lat':{lat_gcj02},'ver':1}}"
+            post_str = f"{{'lon':{lng},'lat':{lat},'ver':1}}"
             params = {"postStr": post_str, "type": "geocode", "tk": key}
-            
+
             # Log request
             try:
                 LogManager.instance().info(f"Tianditu reverse geocode request: url={url} lat={lat} lng={lng} params={params}")
@@ -1016,7 +1016,7 @@ class GeoInfoManager(QObject):
                 pass
 
             response = requests.get(url, params=params, timeout=10)
-            
+
             # Log response
             try:
                 LogManager.instance().info(f"Tianditu reverse geocode response: status={response.status_code} body={response.text[:1000]}")

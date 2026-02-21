@@ -262,7 +262,7 @@ class ScanWorker(QThread):
             # 创建临时 config 文件
             from utils.exif.exif_utils import create_temp_config_file
             config_file = create_temp_config_file()
-            common_args = ["-config", config_file]
+            common_args = ["-config", config_file] if config_file else []
 
             # 提前启动缩略图预加载（取前100张）
             if files and (not is_first_run):
@@ -402,7 +402,7 @@ class ScanWorker(QThread):
                                     f.write(f"{path}\n")
                                 arg_file = f.name
 
-                            cmd = [exe, "-config", config_file, "-charset", "filename=utf8", "-json", "-c", "%.6f"]
+                            cmd = [exe] + common_args + ["-charset", "filename=utf8", "-json", "-c", "%.6f"]
                             for tag in tags_to_read:
                                 cmd.append("-" + tag)
                             cmd.extend(["-@", arg_file])

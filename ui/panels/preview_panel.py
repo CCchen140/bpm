@@ -367,7 +367,8 @@ class PreviewPanel(QWidget):
             QPushButton {{
                 background: transparent;
                 border: none;
-                padding: 2px;
+                padding: 0px;
+                margin: 0px;
             }}
             QPushButton:hover {{
                 background-color: {hover_bg};

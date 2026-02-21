@@ -326,6 +326,39 @@ class ThumbnailDiskCache:
         except Exception:
             pass
 
+    def invalidate_file(self, file_path: str):
+        p = str(file_path or "").strip()
+        if not p:
+            return
+        cache_key = self._build_cache_key(p)
+        if not cache_key:
+            return
+        try:
+            rows = self.db.list_thumbnail_disk_cache_by_key(cache_key, scope=self.scope)
+        except Exception:
+            rows = []
+        for r in rows:
+            rel = str((r or {}).get("cache_rel_path") or "")
+            if not rel:
+                continue
+            abs_path = self._abs_path_from_rel(rel)
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+            except Exception:
+                pass
+        try:
+            self.db.delete_thumbnail_disk_cache_by_key(cache_key, scope=self.scope)
+        except Exception:
+            pass
+
+    def invalidate_many(self, file_paths: list[str] | tuple[str, ...]):
+        for p in (file_paths or []):
+            try:
+                self.invalidate_file(str(p or ""))
+            except Exception:
+                pass
+
     def _get_cleanup_limits(self):
         max_bytes = 2 * 1024 * 1024 * 1024
         batch = 500

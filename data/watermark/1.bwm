@@ -1,0 +1,91 @@
+{
+  "states": [
+    {
+      "wm_id": "wm_2_1771394020370927400",
+      "name": "水印2",
+      "kind": "text",
+      "visible": true,
+      "x_norm": 0.26392240599539013,
+      "y_norm": 0.17377838418652175,
+      "w_norm": 0.44890625,
+      "h_norm": 0.07992895204262877,
+      "rotation_deg": 0.0,
+      "keep_aspect": true,
+      "text_mode": "custom",
+      "custom_text": "水印哈哈哈哈哈哈{焦距}",
+      "tag_key": "",
+      "font_family": "AaKuangPaiShouShu",
+      "font_base_size": 79,
+      "font_point_size": 62,
+      "font_bold": true,
+      "font_italic": true,
+      "font_underline": false,
+      "color_rgba": [
+        255,
+        170,
+        0,
+        166
+      ],
+      "image_path": "",
+      "svg_raster_path": ""
+    },
+    {
+      "wm_id": "wm_3_1771394095401669100",
+      "name": "水印3",
+      "kind": "text",
+      "visible": true,
+      "x_norm": 0.4738862748579545,
+      "y_norm": 0.6000342588157721,
+      "w_norm": 0.961318359375,
+      "h_norm": 0.11989342806394317,
+      "rotation_deg": 23.0,
+      "keep_aspect": true,
+      "text_mode": "custom",
+      "custom_text": "{拍摄时间}是一个水印{光圈}",
+      "tag_key": "",
+      "font_family": "AaKuangPaiShouShu",
+      "font_base_size": 180,
+      "font_point_size": 96,
+      "font_bold": false,
+      "font_italic": false,
+      "font_underline": false,
+      "color_rgba": [
+        0,
+        170,
+        255,
+        161
+      ],
+      "image_path": "",
+      "svg_raster_path": ""
+    },
+    {
+      "wm_id": "wm_4_1771394267947422700",
+      "name": "水印4",
+      "kind": "image",
+      "visible": true,
+      "x_norm": 0.16425396999060557,
+      "y_norm": 0.5241403815661294,
+      "w_norm": 0.24,
+      "h_norm": 0.22735346358792186,
+      "rotation_deg": -1.0,
+      "keep_aspect": true,
+      "text_mode": "custom",
+      "custom_text": "水印",
+      "tag_key": "",
+      "font_family": "Source Han Sans CN",
+      "font_base_size": 120,
+      "font_point_size": 120,
+      "font_bold": false,
+      "font_italic": false,
+      "font_underline": false,
+      "color_rgba": [
+        255,
+        255,
+        255,
+        135
+      ],
+      "image_path": "D:/BaiduNetdiskDownload/temp/test/422EA687E02C8F3228CCF82BC9BD1E4F.png",
+      "svg_raster_path": ""
+    }
+  ]
+}

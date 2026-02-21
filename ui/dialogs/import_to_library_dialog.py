@@ -2258,13 +2258,32 @@ class ImportToLibraryDialog(BasePopupDialog):
         is_current = bool(src) and src == str(getattr(self, "_current_path", "") or "")
         if multi and (not st) and (not is_current):
             return {"species": "", "order": "", "family": "", "genus": ""}
-        meta = {
-            "species": str((st.get("species") if st else "") or ((self.species_input.text() or "") if is_current else "")).strip(),
-            "order": str((st.get("order") if st else "") or ((self.order_input.text() or "") if is_current else "")).strip(),
-            "family": str((st.get("family") if st else "") or ((self.family_input.text() or "") if is_current else "")).strip(),
-            "genus": str((st.get("genus") if st else "") or ((self.genus_input.text() or "") if is_current else "")).strip(),
+
+        species = str((st.get("species") if st else "") or ((self.species_input.text() or "") if is_current else "")).strip()
+        order = str((st.get("order") if st else "") or ((self.order_input.text() or "") if is_current else "")).strip()
+        family = str((st.get("family") if st else "") or ((self.family_input.text() or "") if is_current else "")).strip()
+        genus = str((st.get("genus") if st else "") or ((self.genus_input.text() or "") if is_current else "")).strip()
+
+        # 如果物种名存在但目科属不完整，尝试从分类器自动获取
+        if species and (not order or not family or not genus):
+            try:
+                t = BirdBiologicalClassifier().classify(self._normalize_species_text(species))
+                if t is not None:
+                    if not order and t.order_cn:
+                        order = t.order_cn
+                    if not family and t.family_cn:
+                        family = t.family_cn
+                    if not genus and t.genus_cn:
+                        genus = t.genus_cn
+            except Exception:
+                pass
+
+        return {
+            "species": species,
+            "order": order,
+            "family": family,
+            "genus": genus,
         }
-        return meta
 
     def _build_candidate_name(self, file_info: dict, current_index: int, meta: dict[str, str] | None = None) -> tuple[str, int]:
         old_path = str(file_info.get("path") or "")

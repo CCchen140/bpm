@@ -556,8 +556,8 @@ class ChartsBackendManager:
             preset = str(options.get("bar_time_preset") or "").strip().lower()
             start = str(options.get("bar_time_start") or "").strip()
             end = str(options.get("bar_time_end") or "").strip()
-            end_now = bool(options.get("bar_time_end_now", False) or str(options.get("bar_time_end") or "").strip().lower() in ("now", "__now__", "today"))
-            if preset in ("today", "week", "month", "year"):
+            end_now = bool(options.get("bar_time_end_now", False) or str(options.get("bar_time_end") or "").strip().lower() in ("now", "__now__", "today") or preset == "now")
+            if preset in ("today", "week", "month", "year", "now"):
                 try:
                     import datetime
 

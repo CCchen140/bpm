@@ -926,6 +926,54 @@ class ImageCacheManager:
                 except Exception:
                     pass
 
+    def invalidate_many(self, paths):
+        if not paths:
+            return
+        norm_paths = []
+        for p in paths:
+            try:
+                np = self._normalize_path(p)
+            except Exception:
+                np = ""
+            if np:
+                norm_paths.append(np)
+        if not norm_paths:
+            return
+        with self._lock:
+            for cache in [self._species_cache, self._fav_cache, self._cache]:
+                for p in norm_paths:
+                    if p in cache:
+                        try:
+                            del cache[p]
+                        except Exception:
+                            pass
+        if not os.path.exists(self.persistent_cache_file):
+            return
+        try:
+            with open(self.persistent_cache_file, "rb") as f:
+                try:
+                    cache_data = pickle.load(f)
+                except Exception:
+                    cache_data = None
+            if not isinstance(cache_data, dict):
+                return
+            updated = False
+            for p in norm_paths:
+                if p in cache_data:
+                    try:
+                        del cache_data[p]
+                        updated = True
+                    except Exception:
+                        pass
+            if updated:
+                with open(self.persistent_cache_file, "wb") as f:
+                    pickle.dump(cache_data, f)
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"[Cache] Failed to remove from persistent cache: {e}")
+            except Exception:
+                pass
+
     def invalidate_memory_only(self, path):
         """仅使内存缓存失效（不触碰持久化缓存文件）
         

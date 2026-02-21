@@ -1263,15 +1263,24 @@ class VirtualThumbnailGridView(QWidget):
         self.itemDoubleClicked.emit(model_index.row())
 
     def _on_context_menu_requested(self, pos: QPoint):
-        idx = self.list_view.indexAt(pos)
-        global_pos = self.list_view.viewport().mapToGlobal(pos)
-        if self.spray_mode_active:
-            self.sprayCancelRequested.emit()
-            return
-        if idx.isValid():
-            self.contextMenuRequested.emit(idx.row(), global_pos)
-        else:
-            self.backgroundContextMenuRequested.emit(self.mapFromGlobal(global_pos))
+        try:
+            idx = self.list_view.indexAt(pos)
+            global_pos = self.list_view.viewport().mapToGlobal(pos)
+            if self.spray_mode_active:
+                self.sprayCancelRequested.emit()
+                return
+            if idx.isValid():
+                self.contextMenuRequested.emit(idx.row(), global_pos)
+            else:
+                self.backgroundContextMenuRequested.emit(self.mapFromGlobal(global_pos))
+        except Exception as e:
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().error(f"虚拟网格右键菜单请求失败: {e}")
+                import traceback
+                LogManager.instance().error(traceback.format_exc())
+            except Exception:
+                pass
 
     def _notify_item_changed(self, row: int):
         self._model.notify_row_changed(row)

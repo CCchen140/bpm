@@ -1283,8 +1283,8 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
 
                 src_db_map = {}
                 try:
-                    src_table = "import_cache" if bool(getattr(self, "_is_virtual_mode", False)) else "bird_results"
-                    src_db_map = self._db.get_results_by_paths(list((self._preview_map or {}).keys()), table_name=src_table) or {}
+                    # 原图数据始终在 import_cache 表中（导入页面的数据存储位置）
+                    src_db_map = self._db.get_results_by_paths(list((self._preview_map or {}).keys()), table_name="import_cache") or {}
                 except Exception:
                     src_db_map = {}
 
@@ -1413,12 +1413,18 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                             src_rec = None
 
                     uuid = ""
-                    if isinstance(src_rec, dict) and src_rec.get("uuid"):
+                    # 检查原图是否被移动（不在原位置）
+                    src_was_moved = not os.path.exists(str(src))
+                    # 只有在原图被移动时才复用原图的uuid
+                    if src_was_moved and isinstance(src_rec, dict) and src_rec.get("uuid"):
                         try:
                             uuid = str(src_rec.get("uuid") or "").strip()
                         except Exception:
                             uuid = ""
-                    if not uuid:
+                    # 如果是复制（原图仍然存在），生成新的uuid，不读取exif中的uuid
+                    # 避免和原图的uuid冲突
+                    if not uuid and src_was_moved:
+                        # 只有原图被移动时，才尝试从exif读取uuid
                         try:
                             uuid = str(
                                 _first(
@@ -1438,9 +1444,16 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                     except Exception:
                         fast_id = ""
 
+                    # 只有在原图被移动（不在原位置）时才更新数据库记录
+                    # 如果原图被复制（原位置仍然存在），则插入新记录
                     if isinstance(existing_rec, dict) and uuid and dst:
                         try:
-                            self._db.update_file_path_by_uuid(uuid, dst, table_name="bird_results")
+                            # 检查原图是否被移动
+                            src_exists = os.path.exists(str(src))
+                            if not src_exists:
+                                # 原图被移动，更新数据库记录
+                                self._db.update_file_path_by_uuid(uuid, dst, table_name="bird_results")
+                            # 如果原图仍然存在（被复制），则生成新的uuid，插入新记录
                         except Exception:
                             pass
 

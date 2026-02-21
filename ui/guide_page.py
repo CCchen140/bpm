@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, 
                              QLineEdit, QHBoxLayout, QFileDialog, QStackedWidget, QProgressBar, QComboBox, QListWidget, QListWidgetItem, QCheckBox)
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtGui import QPixmap, QLinearGradient, QColor, QPalette, QBrush, QPainter
 from ui.utils.icon_loader import qta
 import exiftool
@@ -75,7 +75,8 @@ class IntroPage(QWidget):
             self.setup_progress_bar(layout)
 
     def set_icon(self, icon_name):
-        icon_color = ColorManager.instance().get("theme.primary")
+        # 引导页的小鸟图标需要与文字颜色保持一致，避免出现“图标很亮但文字偏暗”的割裂感
+        icon_color = ColorManager.instance().get("theme.text.dark")
         icon_pixmap = qta.icon(icon_name, color=icon_color).pixmap(128, 128)
         self.icon_label.setPixmap(icon_pixmap)
 
@@ -149,6 +150,50 @@ class IntroPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "选择数据存储目录", self.path_input.text())
         if folder:
             self.path_input.setText(folder)
+            # 检测是否存在已有数据
+            self._check_existing_data(folder)
+
+    def _check_existing_data(self, folder):
+        """检测目录中是否存在已有数据，如果存在则提示用户"""
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+
+        # 检查数据库文件
+        db_path = os.path.join(folder, "bird_library.db")
+        settings_path = os.path.join(folder, "settings.json")
+
+        has_db = os.path.exists(db_path)
+        has_settings = os.path.exists(settings_path)
+
+        if has_db or has_settings:
+            # 存在已有数据，显示提示
+            msg = "检测到该目录存在已有数据：\n\n"
+            if has_db:
+                msg += f"  • 数据库文件: {db_path}\n"
+            if has_settings:
+                msg += f"  • 设置文件: {settings_path}\n"
+            msg += "\n是否使用之前的数据？\n"
+            msg += "选择\"是\"将直接使用之前的数据，跳过扫描步骤。\n"
+            msg += "选择\"否\"将重新扫描图片库。"
+
+            reply = QMessageBox.question(
+                self,
+                "发现已有数据",
+                msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                # 用户选择使用之前的数据
+                self._use_existing_data = True
+                self._existing_data_path = folder
+                # 更新说明文字
+                self.desc_label.setText("已选择使用之前的数据，将跳过扫描步骤。\n点击\"下一步\"继续。")
+            else:
+                # 用户选择重新扫描
+                self._use_existing_data = False
+                self._existing_data_path = None
 
     def setup_path_selection(self, layout):
         path_container = QWidget()
@@ -216,6 +261,8 @@ class IntroPage(QWidget):
         self.exif_mode_combo.addItem("写入原始文件(推荐)", "file")
         self.exif_mode_combo.addItem("写入同名XMP文件", "xmp")
         self.exif_mode_combo.addItem("不写入任何信息", "none")
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         self.exif_mode_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 4px 10px;
@@ -224,6 +271,17 @@ class IntroPage(QWidget):
                 background-color: {combo_bg};
                 color: {path_text};
                 font-size: 14px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 22px;
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
+                margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{
                 border: 1px solid {path_border};
@@ -274,6 +332,17 @@ class IntroPage(QWidget):
                 background-color: {combo_bg};
                 color: {path_text};
                 font-size: 14px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 22px;
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
+                margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{
                 border: 1px solid {path_border};
@@ -501,6 +570,8 @@ class GuidePage(QWidget):
         self.is_scanning = False # 显式扫描状态标志
         self.waiting_for_finish = False # 标志位：是否正在等待扫描完成以结束引导
         self.mode = "full"
+        self._use_existing_data = False # 是否使用已有数据
+        self._existing_data_path = None # 已有数据的路径
             
         self.init_ui()
         
@@ -832,6 +903,22 @@ class GuidePage(QWidget):
             if not path or not os.path.exists(path):
                 NotificationManager.instance().show_warning("提示", "请先选择有效的图片根目录")
                 return
+            # 检查是否使用已有数据
+            if getattr(self.data_page, '_use_existing_data', False):
+                # 使用已有数据，跳过扫描
+                self._use_existing_data = True
+                self._existing_data_path = self.data_page._existing_data_path
+                # 直接跳到最后一页
+                self.stacked_widget.setCurrentIndex(self.stacked_widget.count() - 1)
+                # 更新最后一页显示
+                if hasattr(self, 'ready_page'):
+                    self.ready_page.update_content(
+                        "准备就绪",
+                        "已加载之前的数据，点击\"开始使用\"继续。",
+                        "mdi6.check-circle-outline"
+                    )
+                    self.ready_page.restore_default_content()
+                return
             # 启动后台扫描
             self.start_background_scan(path)
 
@@ -892,17 +979,19 @@ class GuidePage(QWidget):
 
     def finish_setup(self):
         if self.mode == "full":
-            path = self.intro_page.get_path()
-            if not path:
-                NotificationManager.instance().show_warning("提示", "请先选择根目录")
-                return
-                
-            if not os.path.exists(path):
-                NotificationManager.instance().show_warning("错误", "所选路径不存在")
-                return
-                
-            # 检查是否正在扫描
-            if self.scan_worker and self.scan_worker.isRunning():
+            # 如果使用已有数据，不需要检查图片根目录
+            if not self._use_existing_data:
+                path = self.intro_page.get_path()
+                if not path:
+                    NotificationManager.instance().show_warning("提示", "请先选择根目录")
+                    return
+
+                if not os.path.exists(path):
+                    NotificationManager.instance().show_warning("错误", "所选路径不存在")
+                    return
+
+            # 检查是否正在扫描（仅当不使用已有数据时）
+            if not self._use_existing_data and self.scan_worker and self.scan_worker.isRunning():
                 # 关键：转移 ScanWorker 的所有权，防止 GuidePage 销毁时线程被杀
                 self.scan_worker.setParent(None)
 
@@ -911,26 +1000,40 @@ class GuidePage(QWidget):
     def finish_setup_internal(self):
         """实际执行完成设置的逻辑"""
         if self.mode == "full":
-            path = self.intro_page.get_path()
-            
             # 备份关键配置
             exclude_dirs = self.settings_manager.get("library/scan_exclude_dirs", [])
             exclude_regex = self.settings_manager.get("library/scan_exclude_regex", "")
-            
-            # 在应用新设置前，先清除所有旧配置
-            self.settings_manager.settings.clear()
 
-            # 恢复关键配置
-            if exclude_dirs:
-                self.settings_manager.set("library/scan_exclude_dirs", exclude_dirs)
-            if exclude_regex:
-                self.settings_manager.set("library/scan_exclude_regex", exclude_regex)
+            if self._use_existing_data:
+                # 使用已有数据，不清除配置，直接从设置文件中读取根目录
+                try:
+                    path = self.settings_manager.get("general/root_path", "")
+                except Exception:
+                    path = ""
+                if not path:
+                    # 如果设置中没有根目录，尝试从数据库中推断
+                    NotificationManager.instance().show_warning("提示", "无法确定图片库根目录，请手动选择")
+                    return
+            else:
+                # 新数据，需要清除旧配置
+                path = self.intro_page.get_path()
 
-            # 保存设置
-            self.settings_manager.set("general/root_path", path)
-            self.settings_manager.set("general/first_run", False) # 标记不再是首次运行
-        
+                # 在应用新设置前，先清除所有旧配置
+                self.settings_manager.settings.clear()
+
+                # 恢复关键配置
+                if exclude_dirs:
+                    self.settings_manager.set("library/scan_exclude_dirs", exclude_dirs)
+                if exclude_regex:
+                    self.settings_manager.set("library/scan_exclude_regex", exclude_regex)
+
+                # 保存设置
+                self.settings_manager.set("general/root_path", path)
+
+            # 标记不再是首次运行
+            self.settings_manager.set("general/first_run", False)
+
         self.settings_manager.sync() # 强制写入磁盘
-        
+
         # 发送完成信号
         self.setup_completed.emit()

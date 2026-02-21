@@ -303,10 +303,7 @@ class ToolbarView(BaseToolbar):
             """)
             self.fav_btn.toggled.connect(self._on_fav_btn_toggled)
             self.add_widget(self.fav_btn)
-        
-        if self.config.get('show_fav', True) and (self.config.get('show_rating', True) or self.config.get('show_filter', True)):
-            self.add_separator()
-        
+
         # Rating Group
         if self.config.get('show_rating', True):
             rating_group = QWidget()
