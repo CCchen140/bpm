@@ -1125,9 +1125,17 @@ class ImageThumbnail(QWidget):
 
     def contextMenuEvent(self, event):
         """右键菜单事件"""
-        if self.image_info:
-            # 发送右键菜单信号，传递索引和位置
-            self.contextMenuRequested.emit(self.index, event.globalPos())
+        try:
+            if self.image_info:
+                # 发送右键菜单信号，传递索引和位置
+                self.contextMenuRequested.emit(self.index, event.globalPos())
+        except Exception as e:
+            try:
+                LogManager.instance().error(f"缩略图右键菜单事件失败: {e}")
+                import traceback
+                LogManager.instance().error(traceback.format_exc())
+            except Exception:
+                pass
 
     def paintEvent(self, event):
         t0 = time.perf_counter()

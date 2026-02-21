@@ -1291,15 +1291,19 @@ class ImportPage(BaseImageBrowserPage):
             }}
         """)
         self._startup_mask_label = QLabel("正在加载...", self._startup_mask)
-        self._startup_mask_label.setStyleSheet("""
-            QLabel {
-                color: #333333;
+        try:
+            text_color = cm.get("theme.text.dark")
+        except Exception:
+            text_color = "#333333"
+        self._startup_mask_label.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
                 font-size: 14px;
                 background: transparent;
                 border: none;
                 margin: 0px;
                 padding: 0px;
-            }
+            }}
         """)
         mask_layout = QVBoxLayout(self._startup_mask)
         mask_layout.setContentsMargins(0, 0, 0, 0)
@@ -2769,10 +2773,6 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
                 try:
-                    self.db.update_file_path(old_path, new_path, os.path.basename(new_path), table_name="bird_results")
-                except Exception:
-                    pass
-                try:
                     if hasattr(self, "cache_manager") and self.cache_manager is not None:
                         self.cache_manager.rename_cache(old_path, new_path)
                 except Exception:
@@ -2995,6 +2995,13 @@ class ImportPage(BaseImageBrowserPage):
             self.detail_panel.import_to_library_requested.connect(self.on_detail_import_to_library_requested)
             if hasattr(self.detail_panel, "stash_toggle_requested"):
                 self.detail_panel.stash_toggle_requested.connect(self._on_detail_stash_toggle_requested)
+            # 连接评分、收藏、色标变更信号（虚拟文件模式下需要特殊处理）
+            if hasattr(self.detail_panel, "rating_changed"):
+                self.detail_panel.rating_changed.connect(self._on_detail_rating_changed)
+            if hasattr(self.detail_panel, "favorite_changed"):
+                self.detail_panel.favorite_changed.connect(self._on_detail_favorite_changed)
+            if hasattr(self.detail_panel, "label_changed"):
+                self.detail_panel.label_changed.connect(self._on_detail_label_changed)
         except Exception:
             pass
 
@@ -3209,6 +3216,55 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     selected_files.append({"path": str(p)})
         self._open_import_to_library_dialog_with_selected_files(selected_files)
+
+    def _on_detail_rating_changed(self, path: str, rating: int):
+        """大图模式下评分变更处理（虚拟文件模式）"""
+        if not bool(getattr(self, "is_virtual_mode", False)):
+            return
+        if not path:
+            return
+        try:
+            r = max(0, min(5, int(rating or 0)))
+        except Exception:
+            r = 0
+        self._update_virtual_db_user_field([path], "rating", r)
+        self._update_status_in_memory([path], "rating", r)
+        # 刷新缩略图显示
+        self._refresh_thumbnail_for_path(path)
+
+    def _on_detail_favorite_changed(self, path: str, is_fav: bool):
+        """大图模式下收藏变更处理（虚拟文件模式）"""
+        if not bool(getattr(self, "is_virtual_mode", False)):
+            return
+        if not path:
+            return
+        val = 1 if is_fav else 0
+        self._update_virtual_db_user_field([path], "is_favorite", val)
+        self._update_status_in_memory([path], "is_favorite", val)
+        self._refresh_thumbnail_for_path(path)
+
+    def _on_detail_label_changed(self, path: str, label: str):
+        """大图模式下色标变更处理（虚拟文件模式）"""
+        if not bool(getattr(self, "is_virtual_mode", False)):
+            return
+        if not path:
+            return
+        self._update_virtual_db_user_field([path], "label", str(label or ""))
+        self._update_status_in_memory([path], "label", str(label or ""))
+        self._refresh_thumbnail_for_path(path)
+
+    def _refresh_thumbnail_for_path(self, path: str):
+        """刷新指定路径的缩略图显示"""
+        if not path:
+            return
+        try:
+            # 使用 grid_view 的刷新方法刷新特定缩略图
+            if hasattr(self.grid_view, "refresh_specific_thumbnails"):
+                self.grid_view.refresh_specific_thumbnails([path])
+            elif hasattr(self.grid_view, "refresh_visible_thumbnails"):
+                self.grid_view.refresh_visible_thumbnails()
+        except Exception:
+            pass
 
     def _open_import_to_library_dialog_with_selected_files(self, selected_files):
         if not selected_files:
@@ -7016,7 +7072,9 @@ class ImportPage(BaseImageBrowserPage):
                 NotificationManager.instance().show_warning("错误", "方案名称包含非法字符")
                 return
 
-            save_dir = os.path.join(os.getcwd(), "data", "filter")
+            from utils.paths import PathManager
+            pm = PathManager.instance()
+            save_dir = str(pm.get_user_data_path() / "filter")
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
 
@@ -7041,9 +7099,36 @@ class ImportPage(BaseImageBrowserPage):
         if filter_panel is None:
             return
 
-        save_dir = os.path.join(os.getcwd(), "data", "filter")
+        from utils.paths import PathManager
+        pm = PathManager.instance()
+        save_dir = str(pm.get_user_data_path() / "filter")
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
+        try:
+            legacy_dir = str(pm.get_app_data_path() / "filter")
+        except Exception:
+            legacy_dir = os.path.join(os.getcwd(), "data", "filter")
+        try:
+            if os.path.isdir(legacy_dir):
+                for name in os.listdir(legacy_dir):
+                    if not str(name).lower().endswith(".bft"):
+                        continue
+                    src = os.path.join(legacy_dir, str(name))
+                    dst = os.path.join(save_dir, str(name))
+                    try:
+                        if os.path.exists(dst):
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        with open(src, "rb") as rf:
+                            data = rf.read()
+                        with open(dst, "wb") as wf:
+                            wf.write(data)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         files = [f for f in os.listdir(save_dir) if f.endswith(".bft")]
         if not files:
             NotificationManager.instance().show_toast("没有找到已保存的搜索方案")
@@ -11982,8 +12067,17 @@ class ImportPage(BaseImageBrowserPage):
                         continue
                 return False
 
-            for src in (done_paths or []):
+            total_files = len(done_paths or [])
+            for idx, src in enumerate(done_paths or []):
                 src = str(src or "")
+                # 更新进度条
+                try:
+                    self._focus_progress_done = idx
+                    self._focus_progress_total = total_files
+                    if idx % 10 == 0:  # 每10个文件更新一次UI
+                        QTimer.singleShot(0, self._refresh_focus_progress_ui)
+                except Exception:
+                    pass
                 if not src:
                     continue
                 try:
@@ -12228,13 +12322,25 @@ class ImportPage(BaseImageBrowserPage):
             action = str((options or {}).get("post_action") or "").strip().lower()
         except Exception:
             action = ""
-        if action in ("copy", "move", "copy_by_status", "move_by_status"):
+        if action in ("copy", "move", "copy_by_status", "move_by_status", "copy_by_status_to_source", "move_by_status_to_source"):
             try:
-                op = "复制" if action in ("copy", "copy_by_status") else "剪切"
+                op = "复制" if action in ("copy", "copy_by_status", "copy_by_status_to_source") else "剪切"
                 dest_root = str((options or {}).get("post_dir") or "").strip()
             except Exception:
                 op = "处理"
                 dest_root = ""
+            # 更新进度条为后处理阶段
+            try:
+                self._focus_progress_operation = f"正在{op}文件"
+                self._focus_progress_done = 0
+                self._focus_progress_total = len(paths or [])
+                if getattr(self, "_focus_progress_timer", None) is not None and not self._focus_progress_timer.isActive():
+                    self._focus_progress_timer.start()
+                if getattr(self, "_focus_db_poll_timer", None) is not None and not self._focus_db_poll_timer.isActive():
+                    self._focus_db_poll_timer.start()
+                QTimer.singleShot(0, self._refresh_focus_progress_ui)
+            except Exception:
+                pass
             try:
                 if getattr(self, "loading_overlay", None) is not None and hasattr(self.loading_overlay, "show_loading"):
                     QTimer.singleShot(
@@ -14382,6 +14488,13 @@ class ImportPage(BaseImageBrowserPage):
 
             menu.addSeparator()
 
+            try:
+                selected_paths = self.get_selected_paths() or [str(image_path)]
+            except Exception:
+                selected_paths = [str(image_path)]
+            watermark_action = menu.addAction(qta.icon("mdi6.watermark", color="#555"), "添加水印")
+            watermark_action.triggered.connect(lambda: self.open_watermark_dialog(selected_paths))
+
             is_fav = bool(int(image_info.get("is_favorite") or image_info.get("favorite") or 0) == 1)
             if is_fav:
                 fav_action = menu.addAction(qta.icon('mdi6.heart-outline', color='#555'), "取消收藏")
@@ -14454,6 +14567,40 @@ class ImportPage(BaseImageBrowserPage):
             menu.exec(position)
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开右键菜单失败: {e}")
+
+    def open_watermark_dialog(self, file_paths):
+        if bool(getattr(self, "_watermark_dialog_opening", False)):
+            return
+        self._watermark_dialog_opening = True
+        try:
+            paths = [str(p) for p in (file_paths or []) if p]
+            if not paths:
+                return
+            from ui.dialogs.watermark_dialog import WatermarkDialog
+
+            dlg = WatermarkDialog(parent=self, file_paths=paths)
+            dlg.exec()
+            try:
+                # 仅在用户点击“保存/另存”时才触发缩略图刷新，避免未改动也触发缓存失效
+                did_write = False
+                try:
+                    did_write = dlg.user_clicked_write() if hasattr(dlg, "user_clicked_write") else bool(getattr(dlg, "_user_clicked_write", False))
+                except Exception:
+                    did_write = False
+                if did_write:
+                    changed_paths = []
+                    try:
+                        changed_paths = dlg.get_last_changed_paths() if hasattr(dlg, "get_last_changed_paths") else []
+                    except Exception:
+                        changed_paths = []
+                    for p in (changed_paths or []):
+                        self.refresh_thumbnail(p)
+            except Exception:
+                pass
+        except Exception as e:
+            NotificationManager.instance().show_warning("错误", f"打开水印窗口失败: {e}")
+        finally:
+            self._watermark_dialog_opening = False
 
     def on_thumbnail_context_menu(self, index, position):
         """处理缩略图右键菜单（真实文件模式）"""
@@ -14541,10 +14688,7 @@ class ImportPage(BaseImageBrowserPage):
         if not selected_files:
             NotificationManager.instance().show_warning("提示", "请先选择图片")
             return
-        try:
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-        except Exception:
-            table_name = "bird_results"
+        table_name = "import_cache"
         try:
             self._auto_match_species_from_folder_names(selected_files, table_name=table_name)
         except Exception:
@@ -14642,7 +14786,7 @@ class ImportPage(BaseImageBrowserPage):
             "genus_cls": genus_cn,
         }
 
-    def _auto_match_species_from_folder_names(self, selected_files, *, table_name: str):
+    def _auto_match_species_from_folder_names(self, selected_files, *, table_name: str, write_db: bool = True):
         updates = []
         for f in (selected_files or []):
             if not isinstance(f, dict):
@@ -14674,10 +14818,11 @@ class ImportPage(BaseImageBrowserPage):
             )
         if not updates:
             return
-        try:
-            self.db.update_taxonomy_batch_for_table(updates, table_name=table_name)
-        except Exception:
-            pass
+        if write_db:
+            try:
+                self.db.update_taxonomy_batch_for_table(updates, table_name=table_name)
+            except Exception:
+                pass
         try:
             for u in (updates or []):
                 p = u.get("path")
@@ -14825,8 +14970,7 @@ class ImportPage(BaseImageBrowserPage):
                 NotificationManager.instance().show_warning("提示", "请先选择图片")
                 return
             from ui.widgets.geolocation_dialog import GeoLocationDialog
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-            dialog = GeoLocationDialog(self, selected_count=selected_count, file_paths=selected_paths, table_name=table_name)
+            dialog = GeoLocationDialog(self, selected_count=selected_count, file_paths=selected_paths, table_name="import_cache")
             dialog.exec()
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开地理位置窗口失败: {e}")
@@ -14840,8 +14984,7 @@ class ImportPage(BaseImageBrowserPage):
                 NotificationManager.instance().show_warning("提示", "请先选择图片")
                 return
             from ui.widgets.track_match_dialog import TrackMatchDialog
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-            dialog = TrackMatchDialog(self, file_paths=selected_paths, table_name=table_name)
+            dialog = TrackMatchDialog(self, file_paths=selected_paths, table_name="import_cache")
             dialog.exec()
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开轨迹匹配窗口失败: {e}")
@@ -14853,11 +14996,7 @@ class ImportPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("提示", "请先选择图片")
             return
         try:
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-        except Exception:
-            table_name = "bird_results"
-        try:
-            self._auto_match_species_from_folder_names(selected_files, table_name=table_name)
+            self._auto_match_species_from_folder_names(selected_files, table_name="import_cache", write_db=False)
         except Exception:
             pass
         try:
@@ -14940,8 +15079,7 @@ class ImportPage(BaseImageBrowserPage):
             return
         try:
             from ui.dialogs.tag_manager_dialog import TagManagerDialog
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-            dialog = TagManagerDialog(self.db, selected_paths, self, table_name=table_name)
+            dialog = TagManagerDialog(self.db, selected_paths, self, table_name="import_cache")
             dialog.tags_updated.connect(self.on_tags_updated)
             dialog.exec()
         except Exception as e:
@@ -14954,10 +15092,7 @@ class ImportPage(BaseImageBrowserPage):
     def _perform_tags_update(self, file_paths, tags_str):
         """执行标签写入（数据库 + 元数据）"""
         try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                self.db.update_tags_batch_for_table(file_paths, tags_str, table_name="import_cache")
-            else:
-                self.db.update_tags_batch(file_paths, tags_str)
+            self.db.update_tags_batch_for_table(file_paths, tags_str, table_name="import_cache")
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"更新标签失败: {e}")
             return
@@ -14989,8 +15124,7 @@ class ImportPage(BaseImageBrowserPage):
         """编辑图片备注"""
         try:
             current_remark = ""
-            table_name = "import_cache" if bool(getattr(self, "is_virtual_mode", False)) else "bird_results"
-            record = self.db.get_result_by_path(image_path, table_name=table_name)
+            record = self.db.get_result_by_path(image_path, table_name="import_cache")
             if record:
                 d = record.get("description")
                 if d:
@@ -15002,7 +15136,7 @@ class ImportPage(BaseImageBrowserPage):
                 return
             new_remark = dialog.get_remark()
 
-            self.db.update_description(image_path, new_remark, table_name=table_name)
+            self.db.update_description(image_path, new_remark, table_name="import_cache")
 
             try:
                 target_key = self._normalize_path_key(image_path)
@@ -15035,6 +15169,46 @@ class ImportPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("错误", f"更新备注失败: {e}")
 
     def delete_selected_images(self):
+        def _safe_rmdir_empty(path: str, root_limit: str | None = None):
+            p = str(path or "")
+            if not p:
+                return
+            try:
+                root_norm = os.path.normcase(os.path.normpath(str(root_limit))) if root_limit else ""
+            except Exception:
+                root_norm = ""
+            cur = p
+            for _ in range(6):
+                if not cur:
+                    break
+                try:
+                    if not os.path.isdir(cur):
+                        break
+                except Exception:
+                    break
+                try:
+                    if os.listdir(cur):
+                        break
+                except Exception:
+                    break
+                try:
+                    os.rmdir(cur)
+                except Exception:
+                    break
+                try:
+                    parent = os.path.dirname(cur)
+                except Exception:
+                    break
+                if not parent or parent == cur:
+                    break
+                if root_norm:
+                    try:
+                        if not os.path.normcase(os.path.normpath(parent)).startswith(root_norm):
+                            break
+                    except Exception:
+                        break
+                cur = parent
+
         if bool(getattr(self, "is_virtual_mode", False)):
             selected_files = self.get_selected_files()
             if not selected_files:
@@ -15063,6 +15237,10 @@ class ImportPage(BaseImageBrowserPage):
                 return
             
             deleted_paths = []
+            try:
+                root_limit = str(self.settings_manager.get("import/last_folder", "") or "")
+            except Exception:
+                root_limit = ""
             for f in (selected_files or []):
                 p = f.get("path")
                 if not p:
@@ -15083,6 +15261,10 @@ class ImportPage(BaseImageBrowserPage):
                                         delete_with_sidecar(p, prefer_trash=False)
                                     except Exception:
                                         pass
+                                try:
+                                    _safe_rmdir_empty(os.path.dirname(str(p or "")), root_limit=root_limit)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                             
@@ -15143,6 +15325,21 @@ class ImportPage(BaseImageBrowserPage):
                 QTimer.singleShot(0, self._start_build_focus_detect_virtual_folders)
             except Exception:
                 pass
+            try:
+                fp = getattr(self, "folder_panel", None)
+                tree = getattr(fp, "folder_tree", None) if fp is not None else None
+                if fp is not None and tree is not None:
+                    root = tree.invisibleRootItem()
+                    for i in range(root.childCount()):
+                        it = root.child(i)
+                        rp = it.data(0, Qt.ItemDataRole.UserRole)
+                        if rp:
+                            try:
+                                fp.refresh_root(str(rp))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             return
 
         """删除选中的图片文件（真实文件模式）"""
@@ -15154,6 +15351,10 @@ class ImportPage(BaseImageBrowserPage):
             return
 
         deleted_paths = []
+        try:
+            root_limit = str(self.settings_manager.get("import/last_folder", "") or "")
+        except Exception:
+            root_limit = ""
         for f in selected_files:
             p = f.get("path")
             if not p:
@@ -15162,6 +15363,10 @@ class ImportPage(BaseImageBrowserPage):
                 if os.path.exists(p):
                     from utils.file.file_utils import delete_with_sidecar
                     delete_with_sidecar(p, prefer_trash=False)
+                    try:
+                        _safe_rmdir_empty(os.path.dirname(str(p or "")), root_limit=root_limit)
+                    except Exception:
+                        pass
                 deleted_paths.append(p)
             except Exception:
                 pass
@@ -15186,6 +15391,21 @@ class ImportPage(BaseImageBrowserPage):
             folder = self.settings_manager.get("import/last_folder", "") or ""
             if folder and os.path.exists(folder):
                 self.load_images(folder, recursive=False)
+        except Exception:
+            pass
+        try:
+            fp = getattr(self, "folder_panel", None)
+            tree = getattr(fp, "folder_tree", None) if fp is not None else None
+            if fp is not None and tree is not None:
+                root = tree.invisibleRootItem()
+                for i in range(root.childCount()):
+                    it = root.child(i)
+                    rp = it.data(0, Qt.ItemDataRole.UserRole)
+                    if rp:
+                        try:
+                            fp.refresh_root(str(rp))
+                        except Exception:
+                            pass
         except Exception:
             pass
 

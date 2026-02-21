@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollArea, QWidget, QFormLayout, QComboBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 import os
 import json
 
@@ -10,6 +10,7 @@ from ui.common.styles import SCROLL_AREA_STYLE
 from ui.utils.icon_loader import qta
 from ui.utils.color_manager import ColorManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
+from utils.paths import PathManager
 
 
 class ExifWriteDialog(BasePopupDialog):
@@ -21,10 +22,48 @@ class ExifWriteDialog(BasePopupDialog):
             self.file_paths = [self.image_path]
 
         self.entries = []
-        self.presets_dir = os.path.join(os.getcwd(), "data", "exif_presets")
+        pm = PathManager.instance()
+        self.presets_dir = str(pm.get_user_data_path() / "exif_presets")
+        self._migrate_legacy_presets(str(pm.get_app_data_path() / "exif_presets"))
         self.init_ui()
         self.load_presets()
 
+    def _migrate_legacy_presets(self, legacy_dir: str):
+        try:
+            src_dir = str(legacy_dir or "")
+        except Exception:
+            src_dir = ""
+        if not src_dir:
+            return
+        try:
+            if not os.path.isdir(src_dir):
+                return
+        except Exception:
+            return
+        try:
+            os.makedirs(self.presets_dir, exist_ok=True)
+        except Exception:
+            return
+        try:
+            for name in os.listdir(src_dir):
+                if not str(name).lower().endswith(".json"):
+                    continue
+                src = os.path.join(src_dir, str(name))
+                dst = os.path.join(self.presets_dir, str(name))
+                try:
+                    if os.path.exists(dst):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    with open(src, "rb") as rf:
+                        data = rf.read()
+                    with open(dst, "wb") as wf:
+                        wf.write(data)
+                except Exception:
+                    pass
+        except Exception:
+            return
     def init_ui(self):
         self.setWindowTitle("写入Exif信息")
         self.setModal(True)
@@ -55,6 +94,8 @@ class ExifWriteDialog(BasePopupDialog):
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         self.preset_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 6px 10px;
@@ -70,12 +111,12 @@ class ExifWriteDialog(BasePopupDialog):
             QComboBox::drop-down {{
                 border: none;
                 width: 20px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {self._text_color};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{

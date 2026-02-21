@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QInputDialog,
 )
-from PyQt6.QtCore import Qt, QObject, pyqtSlot, QRunnable, QThreadPool, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QObject, pyqtSlot, QRunnable, QThreadPool, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import QValidator
 
 
@@ -181,6 +181,8 @@ class GeoLocationDialog(BasePopupDialog):
             }}
         """
 
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         combo_style = f"""
             QComboBox {{
                 padding: 6px 10px;
@@ -197,12 +199,12 @@ class GeoLocationDialog(BasePopupDialog):
             QComboBox::drop-down {{
                 border: none;
                 width: 20px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {text_color};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{

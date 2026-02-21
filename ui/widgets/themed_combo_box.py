@@ -1,4 +1,6 @@
+import os
 from PyQt6.QtWidgets import QComboBox
+from PyQt6.QtCore import QUrl
 from ui.utils.color_manager import ColorManager
 
 
@@ -21,6 +23,8 @@ class ThemedComboBox(QComboBox):
         tooltip_bg = cm.get("theme.text.light")
         tooltip_text = cm.get("tooltip.text")
         tooltip_border = cm.get("tooltip.border")
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         self.setStyleSheet(f"""
             QComboBox {{
                 padding: {self._padding};
@@ -36,12 +40,12 @@ class ThemedComboBox(QComboBox):
             QComboBox::drop-down {{
                 border: none;
                 width: 22px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {text_dark};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{

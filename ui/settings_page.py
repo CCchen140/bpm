@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QFileDialog, QGroupBox, 
                              QFormLayout, QMessageBox, QSpinBox, QCheckBox,
                              QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-                             QComboBox, QColorDialog, QScrollArea, QApplication)
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QProcess, QObject, QEvent
+                             QComboBox, QScrollArea, QApplication)
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer, QProcess, QObject, QEvent, QUrl
 from PyQt6.QtGui import QColor, QPalette
 from utils.setting.settings_manager import SettingsManager
 from utils.sql.data_base import get_default_db_path
@@ -20,6 +20,7 @@ from ui.utils.shortcut_manager import ShortcutManager
 from ui.utils.flow_layout import FlowLayout
 from ui.widgets.shortcut_recorder import ShortcutRecorder
 from ui.utils.color_manager import ColorManager
+from ui.widgets.themed_color_dialog import ThemedColorDialog
 from ui.utils.icon_loader import qta
 from utils.log_manager import LogManager
 
@@ -352,6 +353,8 @@ class SettingsPage(QWidget):
         light_bg = cm.get("theme.background.light")
         dark_bg = cm.get("theme.background.dark")
         primary = cm.get("theme.primary")
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(page_bg))
         self.setPalette(palette)
@@ -391,12 +394,12 @@ class SettingsPage(QWidget):
             QComboBox::drop-down {{
                 border: none;
                 width: 22px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {text_dark};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{
@@ -1601,8 +1604,13 @@ class SettingsPage(QWidget):
         if not item:
             return
         current_color = self.settings_manager.get(item["current_key"], cm.get(token))
-        qcolor = QColorDialog.getColor(QColor(current_color), self, "选择主题色")
-        if not qcolor.isValid():
+        try:
+            qc0 = QColor(str(current_color or ""))
+            init_rgba = [int(qc0.red()), int(qc0.green()), int(qc0.blue()), 255]
+        except Exception:
+            init_rgba = [33, 150, 243, 255]
+        qcolor = ThemedColorDialog.get_color(self, "选择主题色", init_rgba, show_alpha=False)
+        if qcolor is None or not isinstance(qcolor, QColor) or not qcolor.isValid():
             return
         self._apply_theme_colors({token: qcolor.name().upper()})
 
@@ -2204,6 +2212,8 @@ class SettingsPage(QWidget):
         combo_hover_border = cm.to_qss_color("theme.primary")
         combo_primary = cm.to_qss_color("theme.primary")
         combo_selected_text = cm.to_qss_color("theme.text.light")
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         self.shortcut_table.setStyleSheet(f"""
             QTableWidget {{ 
                 border: none; 
@@ -2248,12 +2258,12 @@ class SettingsPage(QWidget):
             QComboBox::drop-down {{
                 border: none;
                 width: 20px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {combo_text};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 5px;
             }}
             QComboBox QAbstractItemView {{

@@ -35,20 +35,25 @@ def build_app_icon(primary_color: str = "#2196F3") -> QIcon:
 
 
 def build_svg_icon(primary_color: str = "#2196F3") -> QIcon | None:
+    """尝试从.ico文件加载图标"""
     try:
-        from ui.utils.icon_loader import icon
+        import os
+        # 查找.ico文件
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        ico_paths = [
+            os.path.join(base_dir, 'build', 'ph.bird-fill.ico'),
+            os.path.join(base_dir, 'build', 'test.ico'),
+        ]
+        
+        for ico_path in ico_paths:
+            if os.path.exists(ico_path):
+                icon = QIcon(ico_path)
+                if not icon.isNull():
+                    return icon
     except Exception:
-        return None
-
-    try:
-        # 使用鸟图标
-        base_icon = icon("鸟", color=str(primary_color or "#2196F3"), style='fill')
-    except Exception:
-        base_icon = None
-    if base_icon is None or base_icon.isNull():
-        return None
-
-    return base_icon
+        pass
+    
+    return None
 
 
 def get_app_icon(primary_color: str = "#2196F3") -> QIcon:

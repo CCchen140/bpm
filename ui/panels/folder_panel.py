@@ -16,6 +16,7 @@ from ui.widgets.custom_input_dialog import CustomInputDialog
 from ui.utils.notification_manager import NotificationManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.shortcut_manager import ShortcutManager
+from ui.utils.icon_loader import qta
 from utils.log_manager import LogManager
 
 
@@ -38,53 +39,14 @@ ICON_MAP = {
 
 def load_svg_icon(icon_name, color=None, style='line'):
     """
-    加载SVG图标
-    :param icon_name: 图标名称（可以是qtawesome名称或中文名称）
+    加载SVG图标（使用qtawesome）
+    :param icon_name: 图标名称（qtawesome格式，如'mdi6.magnify'）
     :param color: 图标颜色（十六进制字符串，如'#ffffff'）
-    :param style: 'line' 或 'fill'
+    :param style: 'line' 或 'fill'（暂未使用，保留兼容性）
     :return: QIcon对象
     """
-    # 如果是qtawesome图标名，转换为本地图标名
-    if icon_name in ICON_MAP:
-        icon_name = ICON_MAP[icon_name]
-    
-    base_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'icon', style)
-    
-    # 尝试查找匹配的图标文件
-    icon_path = None
-    if os.path.exists(base_path):
-        for filename in os.listdir(base_path):
-            if filename.endswith('.svg') and icon_name in filename:
-                icon_path = os.path.join(base_path, filename)
-                break
-    
-    if not icon_path or not os.path.exists(icon_path):
-        # 如果找不到图标，返回空图标
-        return QIcon()
-    
-    # 读取SVG内容
-    with open(icon_path, 'r', encoding='utf-8') as f:
-        svg_content = f.read()
-    
-    # 如果指定了颜色，替换SVG中的颜色
-    if color:
-        # 移除颜色字符串中的#号
-        if color.startswith('#'):
-            color = color[1:]
-        # 替换常见的颜色属性
-        import re
-        svg_content = re.sub(r'fill="[^"]*"', f'fill="#{color}"', svg_content)
-        svg_content = re.sub(r'stroke="[^"]*"', f'stroke="#{color}"', svg_content)
-    
-    # 创建QIcon
-    renderer = QSvgRenderer(svg_content.encode('utf-8'))
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
-    
-    return QIcon(pixmap)
+    # 直接使用qta.icon
+    return qta.icon(icon_name, color=color)
 
 class _DropSplitOverlay(QWidget):
     def __init__(self, parent=None):
@@ -1317,7 +1279,11 @@ class FolderPanel(QWidget):
 
         stats = {"tree": {}, "unclassified_image_count": 0}
         try:
-            stats = self.db.get_taxonomy_tree_stats(table_name="bird_results") or stats
+            root_path = str(self.settings_manager.get("general/root_path", "") or "")
+        except Exception:
+            root_path = ""
+        try:
+            stats = self.db.get_taxonomy_tree_stats(table_name="bird_results", root_path=root_path) or stats
         except Exception:
             stats = {"tree": {}, "unclassified_image_count": 0}
 
@@ -1379,10 +1345,6 @@ class FolderPanel(QWidget):
         un_item.setData(0, Qt.ItemDataRole.UserRole, "virtual://taxonomy/unclassified")
         if self.show_db_stats:
             un_item.setText(0, f"未分类 (图片: {unclassified_count})")
-        try:
-            root_path = str(self.settings_manager.get("general/root_path", "") or "")
-        except Exception:
-            root_path = ""
         try:
             groups = self.db.get_unclassified_folder_groups(root_path=root_path, table_name="bird_results") or []
         except Exception:
@@ -2007,9 +1969,10 @@ class FolderPanel(QWidget):
                     found = True
                     break
             
-            self.folder_tree.setCurrentItem(current_item)
-            current_item.setSelected(True)
-            self.folder_tree.scrollToItem(current_item)
+            if found:
+                self.folder_tree.setCurrentItem(current_item)
+                current_item.setSelected(True)
+                self.folder_tree.scrollToItem(current_item)
 
         except Exception as e:
             try:

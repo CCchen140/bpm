@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QStackedWidget, QLabel, 
                              QPushButton, QButtonGroup, QApplication, QStatusBar)
-from PyQt6.QtCore import Qt, QSize, QTimer, QEvent, QPoint, QThreadPool, QRunnable, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, QEvent, QPoint, QThreadPool, QRunnable, QObject, pyqtSignal, QUrl
 from PyQt6.QtGui import QColor, QPalette
 
 from ui.image_library_page import ImageLibraryPage
@@ -13,7 +13,7 @@ from ui.utils.status_manager import StatusManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.app_icon import get_app_icon
 from ui.import_page import ImportPage
-from ui.web.image_grid_page import ImageGridWebPage
+from ui.web.image_library_web_page import ImageLibraryWebPage
 
 from ui.utils.icon_loader import qta
 import os
@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         self._sidebar_buttons.append(self.btn_milestone)
         self._sidebar_icon_map.append((self.btn_milestone, "ri.medal-line", "ri.medal-fill"))
         
-        # 图库 Web 版按钮（放在奖章按钮后面）
+        # 图库 Web 版按钮（放在奖章按钮后面）- 暂时隐藏
         self.btn_library_web = QPushButton()
         # 尝试多个图标，使用第一个可用的
         icon_names = ['mdi6.web', 'mdi.web', 'fa5s.globe', 'mdi6.earth', 'fa5s.desktop']
@@ -300,6 +300,8 @@ class MainWindow(QMainWindow):
         icon_layout.addWidget(self.btn_library_web)
         self._sidebar_buttons.append(self.btn_library_web)
         self._sidebar_icon_map.append((self.btn_library_web, "mdi6.web", "mdi6.web"))
+        # 暂时隐藏 Web 版按钮
+        self.btn_library_web.hide()
         
         icon_layout.addStretch()
         self.btn_manual = QPushButton()
@@ -390,7 +392,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.page_info)
         
         # 图库 Web 版本
-        self.page_library_web = ImageGridWebPage()
+        self.page_library_web = ImageLibraryWebPage()
         self.pages.addWidget(self.page_library_web)
         
         # 连接按钮组到页面切换
@@ -514,6 +516,8 @@ class MainWindow(QMainWindow):
             combo_text = cm.get("theme.text.dark")
             combo_border = cm.get("popup.border.primary")
             combo_bg = cm.get("theme.background.light")
+            arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+            arrow_url = QUrl.fromLocalFile(arrow_path).toString()
             app.setStyleSheet(f"""
                 QToolTip {{
                     background-color: {tooltip_bg};
@@ -540,6 +544,23 @@ class MainWindow(QMainWindow):
                 QAbstractItemView::item:selected {{
                     background-color: {combo_selected_bg};
                     color: {combo_selected_text};
+                }}
+                QComboBox {{
+                    border: 1px solid {combo_border};
+                    background-color: {combo_bg};
+                    color: {combo_text};
+                    padding: 4px 8px;
+                }}
+                QComboBox::drop-down {{
+                    border: none;
+                    width: 22px;
+                    background: transparent;
+                }}
+                QComboBox::down-arrow {{
+                    image: url({arrow_url});
+                    width: 12px;
+                    height: 12px;
+                    margin-right: 6px;
                 }}
                 QComboBox QAbstractItemView {{
                     border: 1px solid {combo_border};
@@ -607,11 +628,13 @@ class MainWindow(QMainWindow):
                 is_on = False
             icon_name = icon_on if is_on else icon_off
             icon_color = icon_color_on if is_on else icon_color_off
+            # 根据状态选择图标样式：选中时用fill，未选中时用line
+            icon_style = 'fill' if is_on else 'line'
             try:
-                btn.setIcon(qta.icon(icon_name, color=icon_color))
+                btn.setIcon(qta.icon(icon_name, color=icon_color, style=icon_style))
             except Exception:
                 try:
-                    btn.setIcon(qta.icon("mdi6.chart-box", color=icon_color))
+                    btn.setIcon(qta.icon("mdi6.chart-box", color=icon_color, style=icon_style))
                 except Exception:
                     pass
 
@@ -1241,6 +1264,14 @@ class MainWindow(QMainWindow):
                             pass
                         try:
                             NotificationManager.instance().show_toast("数据图表调试已开启" if enabled else "数据图表调试已关闭")
+                        except Exception:
+                            pass
+                        # 根据debug模式显示/隐藏Web版按钮
+                        try:
+                            if enabled:
+                                self.btn_library_web.show()
+                            else:
+                                self.btn_library_web.hide()
                         except Exception:
                             pass
                 except Exception:

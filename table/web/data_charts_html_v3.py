@@ -2084,13 +2084,43 @@ def build_html() -> str:
         try{
           const a = $("fBarTimeStartShow");
           if(a){
-            a.addEventListener("click", () => { barOpenTimePicker(); });
-            a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); barOpenTimePicker(); } });
+            a.addEventListener("click", (ev) => {
+              const t = ev && ev.target ? ev.target : a;
+              openDatePop(t, String(barTimeStart || ""), (v) => {
+                try{
+                  barTimeStart = String(v || "");
+                  if(barTimePreset){
+                    barTimePreset = "";
+                    try{ barSyncTimePickerPresetUI(); }catch(e){}
+                  }
+                  if(barTimeEndNow){
+                    barTimeEndNow = false;
+                  }
+                  barSyncTimeRangeUI();
+                }catch(e){}
+              });
+            });
+            a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); a.click(); } });
           }
           const b = $("fBarTimeEndShow");
           if(b){
-            b.addEventListener("click", () => { barOpenTimePicker(); });
-            b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); barOpenTimePicker(); } });
+            b.addEventListener("click", (ev) => {
+              const t = ev && ev.target ? ev.target : b;
+              openDatePop(t, String(barTimeEnd || ""), (v) => {
+                try{
+                  barTimeEnd = String(v || "");
+                  if(barTimePreset){
+                    barTimePreset = "";
+                    try{ barSyncTimePickerPresetUI(); }catch(e){}
+                  }
+                  if(barTimeEndNow){
+                    barTimeEndNow = false;
+                  }
+                  barSyncTimeRangeUI();
+                }catch(e){}
+              });
+            });
+            b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); b.click(); } });
           }
         }catch(e){}
         $("btnApplyBarTime").addEventListener("click", () => { barApplyTimePicker(); });
@@ -2104,6 +2134,9 @@ def build_html() -> str:
             if(barTimePreset){
               barTimePreset = "";
               try{ barSyncTimePickerPresetUI(); }catch(e){}
+            }
+            if(barTimeEndNow){
+              barTimeEndNow = false;
             }
           }catch(e){}
         });
@@ -2133,10 +2166,15 @@ def build_html() -> str:
       const now = new Date();
       if(k === "now"){
         try{
-          barTimePreset = "";
-          barTimeEndNow = !barTimeEndNow;
+          const nextNow = !barTimeEndNow;
+          barTimeEndNow = nextNow;
+          if(nextNow){
+            barTimePreset = "now";
+          }else{
+            barTimePreset = "";
+          }
           try{ $("barTimePickStart").disabled = false; }catch(e){}
-          try{ $("barTimePickEnd").disabled = !!barTimeEndNow; }catch(e){}
+          try{ $("barTimePickEnd").disabled = nextNow; }catch(e){}
           try{ barSyncTimePickerPresetUI(); }catch(e){}
         }catch(e){}
         return;
@@ -2192,11 +2230,11 @@ def build_html() -> str:
       try{
         const nowBtn = $("btnBarQuickNow");
         if(nowBtn){
-          nowBtn.classList.toggle("primary", !barTimePreset && !!barTimeEndNow);
+          nowBtn.classList.toggle("primary", barTimePreset === "now" || (!barTimePreset && barTimeEndNow));
         }
       }catch(e){}
-      if(barTimePreset){
-        try{ $("barTimePickStart").disabled = true; }catch(e){}
+      if(barTimePreset === "now"){
+        try{ $("barTimePickStart").disabled = false; }catch(e){}
         try{ $("barTimePickEnd").disabled = true; }catch(e){}
       }else{
         try{ $("barTimePickStart").disabled = false; }catch(e){}
@@ -2208,9 +2246,14 @@ def build_html() -> str:
         const s = $("fBarTimeStartShow");
         const e = $("fBarTimeEndShow");
         if(barTimePreset){
-          const name = (barTimePreset === "today") ? "当天" : (barTimePreset === "week" ? "近一周" : (barTimePreset === "month" ? "近一月" : (barTimePreset === "year" ? "近一年" : barTimePreset)));
-          if(s) s.value = name;
-          if(e) e.value = "动态";
+          const name = (barTimePreset === "today") ? "当天" : (barTimePreset === "week" ? "近一周" : (barTimePreset === "month" ? "近一月" : (barTimePreset === "year" ? "近一年" : (barTimePreset === "now" ? "至今" : barTimePreset))));
+          if(barTimePreset === "now"){
+            if(s) s.value = String(barTimeStart || "");
+            if(e) e.value = "至今";
+          }else{
+            if(s) s.value = name;
+            if(e) e.value = name;
+          }
           return;
         }
         if(s) s.value = String(barTimeStart || "");
@@ -2220,11 +2263,33 @@ def build_html() -> str:
     function barOpenTimePicker(){
       try{ barEnsureInit(); }catch(e){}
       try{
-        if($("barTimePickStart")) $("barTimePickStart").value = String(barTimeStart || "");
-        if($("barTimePickEnd")) $("barTimePickEnd").value = String(barTimeEnd || "");
+        const now = new Date();
+        let displayStart = barTimeStart || "";
+        let displayEnd = barTimeEnd || "";
+        if(barTimePreset && barTimePreset !== "now"){
+          const today = barFmtDate(now);
+          if(barTimePreset === "today"){
+            displayStart = today;
+            displayEnd = today;
+          }else if(barTimePreset === "week"){
+            const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(barTimePreset === "month"){
+            const s = new Date(now.getFullYear(), now.getMonth(), 1);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(barTimePreset === "year"){
+            const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }
+        }
+        if($("barTimePickStart")) $("barTimePickStart").value = String(displayStart || "");
+        if($("barTimePickEnd")) $("barTimePickEnd").value = String(displayEnd || "");
         try{
-          if(barTimePreset){
-            $("barTimePickStart").disabled = true;
+          if(barTimePreset === "now"){
+            $("barTimePickStart").disabled = false;
             $("barTimePickEnd").disabled = true;
           }else{
             $("barTimePickStart").disabled = false;
@@ -2239,7 +2304,12 @@ def build_html() -> str:
     function barApplyTimePicker(){
       try{
         const preset = String(barTimePreset || "").trim();
-        if(preset){
+        if(preset && preset !== "now"){
+          barTimeEndNow = true;
+          barTimeEnd = "";
+        }else if(preset === "now"){
+          const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+          if(s) barTimeStart = s;
           barTimeEndNow = true;
           barTimeEnd = "";
         }else{

@@ -175,7 +175,6 @@ class NotificationManager(QObject):
         if self.parent_widget:
             msg_box = CustomMessageBox(self.parent_widget, title, message, CustomMessageBox.ERROR)
             msg_box.exec()
-            sys.exit(0)
             
     def show_info(self, title, message):
         """显示信息对话框（如果需要强制弹窗），通常操作成功建议用 show_toast"""

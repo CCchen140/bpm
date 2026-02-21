@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QWidget, QComboBox, QPlainTextEdit
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 import os
 import json
 
@@ -10,15 +10,54 @@ from ui.utils.notification_manager import NotificationManager
 from ui.widgets.custom_input_dialog import CustomInputDialog
 from ui.utils.color_manager import ColorManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
+from utils.paths import PathManager
 
 class RemarkDialog(BasePopupDialog):
     def __init__(self, parent=None, current_remark=""):
         super().__init__(parent=parent, title="添加备注", size=(600, 450))
         self.current_remark = current_remark
-        self.presets_dir = os.path.join(os.getcwd(), "data", "remark_presets")
+        pm = PathManager.instance()
+        self.presets_dir = str(pm.get_user_data_path() / "remark_presets")
+        self._migrate_legacy_presets(str(pm.get_app_data_path() / "remark_presets"))
         self.init_ui()
         self.load_presets()
 
+    def _migrate_legacy_presets(self, legacy_dir: str):
+        try:
+            src_dir = str(legacy_dir or "")
+        except Exception:
+            src_dir = ""
+        if not src_dir:
+            return
+        try:
+            if not os.path.isdir(src_dir):
+                return
+        except Exception:
+            return
+        try:
+            os.makedirs(self.presets_dir, exist_ok=True)
+        except Exception:
+            return
+        try:
+            for name in os.listdir(src_dir):
+                if not str(name).lower().endswith(".json"):
+                    continue
+                src = os.path.join(src_dir, str(name))
+                dst = os.path.join(self.presets_dir, str(name))
+                try:
+                    if os.path.exists(dst):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    with open(src, "rb") as rf:
+                        data = rf.read()
+                    with open(dst, "wb") as wf:
+                        wf.write(data)
+                except Exception:
+                    pass
+        except Exception:
+            return
     def init_ui(self):
         self.setWindowTitle("添加备注")
         self.setModal(True)
@@ -41,6 +80,8 @@ class RemarkDialog(BasePopupDialog):
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
+        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
+        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
         self.preset_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 6px 10px;
@@ -56,12 +97,12 @@ class RemarkDialog(BasePopupDialog):
             QComboBox::drop-down {{
                 border: none;
                 width: 20px;
+                background: transparent;
             }}
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {text_color};
+                image: url({arrow_url});
+                width: 12px;
+                height: 12px;
                 margin-right: 6px;
             }}
             QComboBox QAbstractItemView {{
