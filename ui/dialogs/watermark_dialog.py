@@ -566,7 +566,11 @@ def _apply_mirror_effect_bgra(img_bgra: np.ndarray, *, strength: float = 0.6, ga
     except Exception:
         return img_bgra
 
+<<<<<<< HEAD
 def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int], gap_px: int, rgba: list[int], blur: int = 0, angle_deg: float | None = None) -> np.ndarray:
+=======
+def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int], gap_px: int, rgba: list[int], blur: int = 0) -> np.ndarray:
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     if img_bgra is None or not isinstance(img_bgra, np.ndarray) or img_bgra.ndim != 3 or img_bgra.shape[2] < 4:
         return img_bgra
     try:
@@ -619,6 +623,7 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
         layer[:, :, 2] = int(cr)
     vx = 0 if int(dx) == 0 else (1 if int(dx) > 0 else -1)
     vy = 0 if int(dy) == 0 else (1 if int(dy) > 0 else -1)
+<<<<<<< HEAD
     use_vertical = True
     try:
         use_vertical = bool(abs(int(dy)) >= abs(int(dx)))
@@ -669,6 +674,8 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
             roi[:, :, 3:4] = np.clip(out_a * 255.0, 0.0, 255.0).astype(np.uint8)
         except Exception:
             return
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     def _edge_empty_rows(alpha: np.ndarray) -> tuple[int, int]:
         try:
             mask = np.any(alpha > 0, axis=1)
@@ -689,6 +696,7 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
             return int(left), int(alpha.shape[1] - 1 - right)
         except Exception:
             return 0, 0
+<<<<<<< HEAD
     if use_vertical:
         flip = layer[::-1, :, :].copy()
         a_flip_src = img_bgra[::-1, :, 3]
@@ -725,10 +733,48 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
             shift_x_mag = 0
         canvas_h = int((int(h) + int(gap) + int(flip_h) - int(overlap)) if int(vy_sign) > 0 else (int(flip_h) + int(gap) + int(h) - int(overlap)))
         canvas_w = int(w + shift_x_mag)
+=======
+    # 镜像阴影：方向可能是斜向（例如左下/右下），需要在主轴镜像的同时做正交方向偏移
+    # 镜像阴影：当间隔为 0 时，让两部分尽量贴合，避免因为透明边距导致“中间有大空白”
+    shift_x = 0
+    shift_y = 0
+    # 斜向时需要明显的“侧向偏移”，否则左右/上下会看起来一样
+    # 这里用图块尺寸的比例来估算偏移，保证不同字号下视觉一致
+    try:
+        if int(vy) != 0 and int(vx) != 0:
+            base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
+            shift_x = int(max(6, min(60, base_shift)))
+    except Exception:
+        shift_x = 0
+    try:
+        if int(vx) != 0 and int(vy) != 0:
+            base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
+            shift_y = int(max(6, min(60, base_shift)))
+    except Exception:
+        shift_y = 0
+    if vy != 0:
+        flip = layer[::-1, :, :].copy()
+        overlap = 0
+        if int(gap) <= 0:
+            try:
+                a_img = img_bgra[:, :, 3]
+                a_flip_src = img_bgra[::-1, :, 3]
+                top_img, bottom_img = _edge_empty_rows(a_img)
+                top_flip, bottom_flip = _edge_empty_rows(a_flip_src)
+                if vy > 0:
+                    overlap = int(max(0, min(int(h), int(bottom_img) + int(top_flip))))
+                else:
+                    overlap = int(max(0, min(int(h), int(bottom_flip) + int(top_img))))
+            except Exception:
+                overlap = 0
+        canvas_h = int(h + gap + h - overlap)
+        canvas_w = int(w + (shift_x if int(vx) != 0 else 0))
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         canvas = np.zeros((int(canvas_h), int(canvas_w), 4), dtype=np.uint8)
         x_img = 0
         x_flip = 0
         if int(vx) >= 0:
+<<<<<<< HEAD
             x_flip = int(shift_x_mag)
         else:
             x_img = int(shift_x_mag)
@@ -777,10 +823,43 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
         shift_y_mag = 0
     canvas_w = int((int(w) + int(gap) + int(flip_w) - int(overlap)) if int(vx_sign) > 0 else (int(flip_w) + int(gap) + int(w) - int(overlap)))
     canvas_h = int(h + shift_y_mag)
+=======
+            x_flip = int(shift_x)
+        else:
+            x_img = int(shift_x)
+        if vy > 0:
+            y_img = 0
+            y_flip = int(h + gap - overlap)
+            canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
+            canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
+        else:
+            y_flip = 0
+            y_img = int(h + gap - overlap)
+            canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
+            canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
+        return canvas
+    flip = layer[:, ::-1, :].copy()
+    overlap = 0
+    if int(gap) <= 0:
+        try:
+            a_img = img_bgra[:, :, 3]
+            a_flip_src = img_bgra[:, ::-1, 3]
+            left_img, right_img = _edge_empty_cols(a_img)
+            left_flip, right_flip = _edge_empty_cols(a_flip_src)
+            if vx > 0:
+                overlap = int(max(0, min(int(w), int(right_img) + int(left_flip))))
+            else:
+                overlap = int(max(0, min(int(w), int(right_flip) + int(left_img))))
+        except Exception:
+            overlap = 0
+    canvas_w = int(w + gap + w - overlap)
+    canvas_h = int(h + (shift_y if int(vy) != 0 else 0))
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     canvas = np.zeros((int(canvas_h), int(canvas_w), 4), dtype=np.uint8)
     y_img = 0
     y_flip = 0
     if int(vy) >= 0:
+<<<<<<< HEAD
         y_flip = int(shift_y_mag)
     else:
         y_img = int(shift_y_mag)
@@ -794,6 +873,21 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
         x_img = int(int(flip_w) + int(gap) - int(overlap))
         _alpha_over(canvas, flip, int(x_flip), int(y_flip))
         _alpha_over(canvas, img_bgra, int(x_img), int(y_img))
+=======
+        y_flip = int(shift_y)
+    else:
+        y_img = int(shift_y)
+    if vx > 0:
+        x_img = 0
+        x_flip = int(w + gap - overlap)
+        canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
+        canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
+    else:
+        x_flip = 0
+        x_img = int(w + gap - overlap)
+        canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
+        canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     return canvas
 
 def _render_text_patch_to_bgra(
@@ -814,7 +908,10 @@ def _render_text_patch_to_bgra(
     shadow_range: int | None = None,
     shadow_style: str | None = None,
     mirror_gap_px: int | None = None,
+<<<<<<< HEAD
     mirror_angle_deg: float | None = None,
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     stack_count: int | None = None,
     stack_step_px: int | None = None,
 ) -> np.ndarray | None:
@@ -1178,6 +1275,7 @@ def _render_text_patch_to_bgra(
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((int(img.height()), int(img.width()), 4))
     out = arr.copy()
     if sh_style == "mirror" and sha > 0 and (int(sdx) != 0 or int(sdy) != 0):
+<<<<<<< HEAD
         out = _apply_mirror_shadow_bgra(
             out,
             direction=(int(sdx), int(sdy)),
@@ -1186,6 +1284,9 @@ def _render_text_patch_to_bgra(
             blur=int(srng),
             angle_deg=mirror_angle_deg,
         )
+=======
+        out = _apply_mirror_shadow_bgra(out, direction=(int(sdx), int(sdy)), gap_px=int(mgap), rgba=[int(shr), int(shg), int(shb), int(sha)], blur=int(srng))
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     return out
 
 def _render_text_patch_to_bgra_safe(
@@ -1206,7 +1307,10 @@ def _render_text_patch_to_bgra_safe(
     shadow_range: int | None = None,
     shadow_style: str | None = None,
     mirror_gap_px: int | None = None,
+<<<<<<< HEAD
     mirror_angle_deg: float | None = None,
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     stack_count: int | None = None,
     stack_step_px: int | None = None,
 ) -> np.ndarray | None:
@@ -1233,7 +1337,10 @@ def _render_text_patch_to_bgra_safe(
         shadow_range=shadow_range,
         shadow_style=shadow_style,
         mirror_gap_px=mirror_gap_px,
+<<<<<<< HEAD
         mirror_angle_deg=mirror_angle_deg,
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         stack_count=stack_count,
         stack_step_px=stack_step_px,
     )
@@ -3036,7 +3143,10 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 int(shadow_range),
                 str(effect_mode),
                 int(getattr(st, "mirror_gap_px", 0) or 0),
+<<<<<<< HEAD
                 int(getattr(st, "mirror_angle_deg", 180) or 180),
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 int(getattr(st, "stack_count", 3) or 0),
                 int(getattr(st, "stack_step_px", 2) or 0),
             )
@@ -3065,7 +3175,10 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                     "shadow_range": int(shadow_range),
                     "shadow_style": str(shadow_style),
                     "mirror_gap_px": int(getattr(st, "mirror_gap_px", 0) or 0),
+<<<<<<< HEAD
                     "mirror_angle_deg": float(getattr(st, "mirror_angle_deg", 180) or 180),
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                     "stack_count": int(getattr(st, "stack_count", 3) or 0),
                     "stack_step_px": int(getattr(st, "stack_step_px", 2) or 0),
                 }
@@ -3429,7 +3542,10 @@ class WatermarkState:
     effect_mode: str = "none"
     mirror_effect: bool = False
     mirror_gap_px: int = 0
+<<<<<<< HEAD
     mirror_angle_deg: int = 180
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
     stack_count: int = 3
     stack_step_px: int = 2
     image_path: str = ""
@@ -3470,7 +3586,10 @@ class WatermarkState:
             "effect_mode": str(getattr(self, "effect_mode", "none") or "none"),
             "mirror_effect": bool(getattr(self, "mirror_effect", False)),
             "mirror_gap_px": int(getattr(self, "mirror_gap_px", 0) or 0),
+<<<<<<< HEAD
             "mirror_angle_deg": int(getattr(self, "mirror_angle_deg", 180) or 180),
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             "stack_count": int(getattr(self, "stack_count", 3) or 0),
             "stack_step_px": int(getattr(self, "stack_step_px", 2) or 0),
             "image_path": str(self.image_path or ""),
@@ -3533,6 +3652,7 @@ class WatermarkState:
         except Exception:
             st.mirror_gap_px = 0
         try:
+<<<<<<< HEAD
             st.mirror_angle_deg = int(d.get("mirror_angle_deg") if d.get("mirror_angle_deg") is not None else 180)
         except Exception:
             st.mirror_angle_deg = 180
@@ -3541,6 +3661,8 @@ class WatermarkState:
         except Exception:
             st.mirror_angle_deg = 180
         try:
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             st.stack_count = int(d.get("stack_count") or 3)
         except Exception:
             st.stack_count = 3
@@ -3800,7 +3922,10 @@ class _WatermarkBatchTask(QRunnable):
                     shadow_range=int(shadow_range),
                     shadow_style=str(shadow_style),
                     mirror_gap_px=int(getattr(st, "mirror_gap_px", 0) or 0),
+<<<<<<< HEAD
                     mirror_angle_deg=float(getattr(st, "mirror_angle_deg", 180) or 180),
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                     stack_count=int(getattr(st, "stack_count", 3) or 0),
                     stack_step_px=int(getattr(st, "stack_step_px", 2) or 0),
                 )
@@ -4785,7 +4910,10 @@ class _TextPatchRenderTask(QRunnable):
                 shadow_range=self.payload.get("shadow_range"),
                 shadow_style=self.payload.get("shadow_style"),
                 mirror_gap_px=self.payload.get("mirror_gap_px"),
+<<<<<<< HEAD
                 mirror_angle_deg=self.payload.get("mirror_angle_deg"),
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 stack_count=self.payload.get("stack_count"),
                 stack_step_px=self.payload.get("stack_step_px"),
             )
@@ -5315,6 +5443,7 @@ class WatermarkDialog(BasePopupDialog):
         row_shadow_layout.addWidget(row_shadow_type)
 
         row_shadow_params = QWidget()
+<<<<<<< HEAD
         row_shadow_params_layout = QVBoxLayout(row_shadow_params)
         row_shadow_params_layout.setContentsMargins(0, 0, 0, 0)
         row_shadow_params_layout.setSpacing(6)
@@ -5329,6 +5458,17 @@ class WatermarkDialog(BasePopupDialog):
         row_shadow_params_top_layout.addWidget(self.chk_shadow_follow)
         self.lbl_shadow_dir = QLabel("方向")
         row_shadow_params_top_layout.addWidget(self.lbl_shadow_dir)
+=======
+        row_shadow_params_layout = QHBoxLayout(row_shadow_params)
+        row_shadow_params_layout.setContentsMargins(0, 0, 0, 0)
+        row_shadow_params_layout.setSpacing(8)
+        self.chk_shadow_follow = QCheckBox("跟随颜色")
+        self.chk_shadow_follow.setChecked(False)
+        self.chk_shadow_follow.stateChanged.connect(self._on_shadow_changed)
+        row_shadow_params_layout.addWidget(self.chk_shadow_follow)
+        self.lbl_shadow_dir = QLabel("方向")
+        row_shadow_params_layout.addWidget(self.lbl_shadow_dir)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.combo_shadow_dir = QComboBox()
         for t in ("右下", "左下", "右上", "左上", "上", "下", "左", "右"):
             self.combo_shadow_dir.addItem(t, t)
@@ -5340,9 +5480,15 @@ class WatermarkDialog(BasePopupDialog):
             self.combo_shadow_dir.setFixedWidth(84)
         except Exception:
             pass
+<<<<<<< HEAD
         row_shadow_params_top_layout.addWidget(self.combo_shadow_dir)
         self.lbl_shadow_dist = QLabel("长度")
         row_shadow_params_top_layout.addWidget(self.lbl_shadow_dist)
+=======
+        row_shadow_params_layout.addWidget(self.combo_shadow_dir)
+        self.lbl_shadow_dist = QLabel("长度")
+        row_shadow_params_layout.addWidget(self.lbl_shadow_dist)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_shadow_dist = QSpinBox()
         self.spin_shadow_dist.setRange(0, 200)
         self.spin_shadow_dist.setValue(4)
@@ -5352,9 +5498,15 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_shadow_dist.setFixedWidth(64)
         except Exception:
             pass
+<<<<<<< HEAD
         row_shadow_params_top_layout.addWidget(self.spin_shadow_dist)
         self.lbl_shadow_range = QLabel("模糊度")
         row_shadow_params_top_layout.addWidget(self.lbl_shadow_range)
+=======
+        row_shadow_params_layout.addWidget(self.spin_shadow_dist)
+        self.lbl_shadow_range = QLabel("模糊度")
+        row_shadow_params_layout.addWidget(self.lbl_shadow_range)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_shadow_range = QSpinBox()
         self.spin_shadow_range.setRange(0, 100)
         self.spin_shadow_range.setValue(0)
@@ -5364,9 +5516,15 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_shadow_range.setFixedWidth(64)
         except Exception:
             pass
+<<<<<<< HEAD
         row_shadow_params_top_layout.addWidget(self.spin_shadow_range)
         self.lbl_stack_step = QLabel("间隔")
         row_shadow_params_top_layout.addWidget(self.lbl_stack_step)
+=======
+        row_shadow_params_layout.addWidget(self.spin_shadow_range)
+        self.lbl_stack_step = QLabel("间隔")
+        row_shadow_params_layout.addWidget(self.lbl_stack_step)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_stack_step = QSpinBox()
         self.spin_stack_step.setRange(0, 50)
         self.spin_stack_step.setValue(2)
@@ -5376,6 +5534,7 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_stack_step.setFixedWidth(64)
         except Exception:
             pass
+<<<<<<< HEAD
         row_shadow_params_top_layout.addWidget(self.spin_stack_step)
         row_shadow_params_top_layout.addStretch(1)
         row_shadow_params_layout.addWidget(row_shadow_params_top)
@@ -5399,6 +5558,12 @@ class WatermarkDialog(BasePopupDialog):
         self.btn_pick_shadow_color = QPushButton("阴影颜色")
         self.btn_pick_shadow_color.clicked.connect(self._pick_shadow_color)
         row_shadow_params_color_layout.addWidget(self.btn_pick_shadow_color)
+=======
+        row_shadow_params_layout.addWidget(self.spin_stack_step)
+        self.btn_pick_shadow_color = QPushButton("阴影颜色")
+        self.btn_pick_shadow_color.clicked.connect(self._pick_shadow_color)
+        row_shadow_params_layout.addWidget(self.btn_pick_shadow_color)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.shadow_preview = QLabel("")
         self.shadow_preview.setFixedSize(22, 22)
         try:
@@ -5408,9 +5573,14 @@ class WatermarkDialog(BasePopupDialog):
             self.btn_pick_shadow_color.setStyleSheet("border:none; background:transparent; padding:0px;")
         except Exception:
             pass
+<<<<<<< HEAD
         row_shadow_params_color_layout.addWidget(self.shadow_preview)
         row_shadow_params_color_layout.addStretch(1)
         row_shadow_params_layout.addWidget(row_shadow_params_color)
+=======
+        row_shadow_params_layout.addWidget(self.shadow_preview)
+        row_shadow_params_layout.addStretch(1)
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         row_shadow_layout.addWidget(row_shadow_params)
         self.lbl_shadow = QLabel("")
         try:
@@ -6687,7 +6857,10 @@ class WatermarkDialog(BasePopupDialog):
                     mode0 = "none"
                 if mode0 == "mirror":
                     self.spin_shadow_dist.setValue(int(getattr(st, "mirror_gap_px", 0) or 0))
+<<<<<<< HEAD
                     self.spin_mirror_angle.setValue(int(getattr(st, "mirror_angle_deg", 180) or 180))
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 elif mode0 == "stack":
                     self.spin_shadow_dist.setValue(int(getattr(st, "stack_count", 3) or 3))
                     self.spin_stack_step.setValue(int(getattr(st, "stack_step_px", 2) or 0))
@@ -6826,8 +6999,11 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_shadow_range.setVisible(True)
             self.lbl_stack_step.setVisible(False)
             self.spin_stack_step.setVisible(False)
+<<<<<<< HEAD
             self.lbl_mirror_angle.setVisible(False)
             self.spin_mirror_angle.setVisible(False)
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             self.btn_pick_shadow_color.setVisible(True)
             self.shadow_preview.setVisible(True)
             self.lbl_shadow.setVisible(True)
@@ -6885,11 +7061,14 @@ class WatermarkDialog(BasePopupDialog):
             except Exception:
                 pass
             try:
+<<<<<<< HEAD
                 self.lbl_mirror_angle.setVisible(True)
                 self.spin_mirror_angle.setVisible(True)
             except Exception:
                 pass
             try:
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 self._adjust_panel_width()
             except Exception:
                 pass
@@ -7069,7 +7248,10 @@ class WatermarkDialog(BasePopupDialog):
         dist = int(getattr(st, "shadow_distance", 4) or 0)
         blur = int(getattr(st, "shadow_range", 0) or 0)
         gap_px = int(getattr(st, "mirror_gap_px", 0) or 0)
+<<<<<<< HEAD
         angle_deg = int(getattr(st, "mirror_angle_deg", 180) or 180)
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         stack_count = int(getattr(st, "stack_count", 3) or 3)
         stack_step = int(getattr(st, "stack_step_px", 2) or 0)
         if follow:
@@ -7077,7 +7259,11 @@ class WatermarkDialog(BasePopupDialog):
                 if mode == "beam":
                     self.lbl_shadow.setText(f"光束阴影  跟随颜色  {dir_name}  长度{dist}  模糊{blur}")
                 elif mode == "mirror":
+<<<<<<< HEAD
                     self.lbl_shadow.setText(f"镜像阴影  跟随颜色  {dir_name}  间隔{gap_px}  夹角{angle_deg}")
+=======
+                    self.lbl_shadow.setText(f"镜像阴影  跟随颜色  {dir_name}  间隔{gap_px}")
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 elif mode == "stack":
                     self.lbl_shadow.setText(f"叠字阴影  跟随颜色  {dir_name}  数量{stack_count}  间隔{stack_step}")
                 else:
@@ -7105,7 +7291,11 @@ class WatermarkDialog(BasePopupDialog):
             if mode == "beam":
                 self.lbl_shadow.setText(f"光束阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  长度{dist}  模糊{blur}")
             elif mode == "mirror":
+<<<<<<< HEAD
                 self.lbl_shadow.setText(f"镜像阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  间隔{gap_px}  夹角{angle_deg}")
+=======
+                self.lbl_shadow.setText(f"镜像阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  间隔{gap_px}")
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             elif mode == "stack":
                 self.lbl_shadow.setText(f"叠字阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  数量{stack_count}  间隔{stack_step}")
             else:
@@ -7183,7 +7373,10 @@ class WatermarkDialog(BasePopupDialog):
             v0 = int(self.spin_shadow_dist.value())
             if mode == "mirror":
                 st.mirror_gap_px = int(v0)
+<<<<<<< HEAD
                 st.mirror_angle_deg = int(self.spin_mirror_angle.value())
+=======
+>>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             elif mode == "stack":
                 st.stack_count = int(v0)
             else:
