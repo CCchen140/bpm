@@ -353,8 +353,9 @@ class SettingsPage(QWidget):
         light_bg = cm.get("theme.background.light")
         dark_bg = cm.get("theme.background.dark")
         primary = cm.get("theme.primary")
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(text_dark)
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(page_bg))
         self.setPalette(palette)
@@ -1353,12 +1354,13 @@ class SettingsPage(QWidget):
         self._general_recognizer_group = recognizer_group
 
         self.recognizer_service_combo = QComboBox()
+        self.recognizer_service_combo.addItem("本地服务", "local")
         self.recognizer_service_combo.addItem("豆包", "doubao")
         self.recognizer_service_combo.addItem("懂鸟", "dongniao")
         try:
-            cur = str(self.settings_manager.get("recognizer/service", "doubao") or "doubao").strip().lower()
+            cur = str(self.settings_manager.get("recognizer/service", "local") or "local").strip().lower()
         except Exception:
-            cur = "doubao"
+            cur = "local"
         try:
             for i in range(self.recognizer_service_combo.count()):
                 if str(self.recognizer_service_combo.itemData(i) or "") == cur:
@@ -1718,6 +1720,14 @@ class SettingsPage(QWidget):
         use_gpu_scaling = self.settings_manager.get("performance/use_gpu_scaling", True)
         self.use_gpu_scaling_checkbox.setChecked(bool(use_gpu_scaling))
         self.use_gpu_scaling_checkbox.setStyleSheet(checkbox_style)
+        try:
+            from utils.system.gpu_utils import is_gpu_build
+
+            if not bool(is_gpu_build()):
+                self.use_gpu_scaling_checkbox.setChecked(False)
+                self.use_gpu_scaling_checkbox.setEnabled(False)
+        except Exception:
+            pass
         gpu_layout = QHBoxLayout()
         gpu_layout.addWidget(self.use_gpu_scaling_checkbox)
         gpu_layout.addStretch()
@@ -2212,8 +2222,9 @@ class SettingsPage(QWidget):
         combo_hover_border = cm.to_qss_color("theme.primary")
         combo_primary = cm.to_qss_color("theme.primary")
         combo_selected_text = cm.to_qss_color("theme.text.light")
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(combo_text.lstrip('#') if combo_text.startswith('#') else "#333333")
         self.shortcut_table.setStyleSheet(f"""
             QTableWidget {{ 
                 border: none; 
@@ -2600,9 +2611,9 @@ class SettingsPage(QWidget):
             self.settings_manager.set("recognizer/doubao_api_key", self.doubao_api_key_input.text().strip())
         try:
             if hasattr(self, "recognizer_service_combo"):
-                svc = str(self.recognizer_service_combo.currentData() or "doubao").strip().lower()
-                if svc not in ("doubao", "dongniao"):
-                    svc = "doubao"
+                svc = str(self.recognizer_service_combo.currentData() or "local").strip().lower()
+                if svc not in ("local", "doubao", "dongniao"):
+                    svc = "local"
                 self.settings_manager.set("recognizer/service", svc)
         except Exception:
             pass

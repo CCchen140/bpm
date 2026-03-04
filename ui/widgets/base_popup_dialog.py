@@ -58,15 +58,12 @@ class BasePopupDialog(QDialog):
         self._hover_bg = cm.get("settings.shortcut_table.row.hover_background", "#EEF3FA")
 
         main_layout = QVBoxLayout(self)
+        # 使用透明背景，设置边距用于阴影效果
         main_layout.setContentsMargins(10, 10, 10, 10)
-        if not bool(getattr(self, "_translucent_background", True)):
-            try:
-                self.setStyleSheet(f"background-color: {self._content_bg};")
-            except Exception:
-                pass
 
         self.container = QWidget()
         self.container.setObjectName("container")
+        # 统一使用圆角和边框样式
         self.container.setStyleSheet(f"""
             QWidget#container {{
                 background-color: {self._content_bg};
@@ -81,6 +78,7 @@ class BasePopupDialog(QDialog):
 
         self.title_bar = QWidget()
         self.title_bar.setFixedHeight(40)
+        # 统一使用圆角样式
         self.title_bar.setStyleSheet(f"""
             QWidget {{
                 background-color: {self._header_bg};
@@ -171,6 +169,7 @@ class BasePopupDialog(QDialog):
         self.bottom_bar = QWidget()
         self.bottom_bar.setObjectName("bottomBar")
         self.bottom_bar.setFixedHeight(60)
+        # 统一使用圆角样式
         self.bottom_bar.setStyleSheet(f"""
             QWidget#bottomBar {{
                 border-bottom-left-radius: 8px;
@@ -257,6 +256,7 @@ class BasePopupDialog(QDialog):
         self._footer_bg = background
         if border_color:
             self._border_color = border_color
+        # 统一使用圆角样式
         self.bottom_bar.setStyleSheet(f"""
             QWidget#bottomBar {{
                 border-bottom-left-radius: 8px;

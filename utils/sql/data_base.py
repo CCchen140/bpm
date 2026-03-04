@@ -659,6 +659,7 @@ class BirdLibraryDB:
                     latitude REAL DEFAULT 0,
                     longitude REAL DEFAULT 0,
                     location TEXT DEFAULT '',
+                    region_code TEXT DEFAULT '',  -- 区域代码（如 CN, CN-44, US-CA）
                     tags TEXT DEFAULT '',
                     imported_at TEXT DEFAULT '',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -677,6 +678,8 @@ class BirdLibraryDB:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_bird_results_favorite ON bird_results (is_favorite)')
                 # 针对评分的索引
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_bird_results_rating ON bird_results (rating)')
+                # 针对区域代码的索引
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_bird_results_region_code ON bird_results (region_code)')
             except Exception:
                 pass
             
@@ -716,6 +719,7 @@ class BirdLibraryDB:
                     latitude REAL DEFAULT 0,
                     longitude REAL DEFAULT 0,
                     location TEXT DEFAULT '',
+                    region_code TEXT DEFAULT '',  -- 区域代码（如 CN, CN-44, US-CA）
                     tags TEXT DEFAULT '',
                     imported_at TEXT DEFAULT '',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -728,6 +732,15 @@ class BirdLibraryDB:
                 pass
             try:
                 cursor.execute("ALTER TABLE import_cache ADD COLUMN imported_at TEXT DEFAULT ''")
+            except Exception:
+                pass
+            # 为现有数据库添加region_code字段
+            try:
+                cursor.execute("ALTER TABLE bird_results ADD COLUMN region_code TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE import_cache ADD COLUMN region_code TEXT DEFAULT ''")
             except Exception:
                 pass
 
@@ -2529,13 +2542,15 @@ class BirdLibraryDB:
     def update_description(self, file_path, description, table_name='bird_results'):
         self.update_user_field_batch_for_table([file_path], 'description', description, table_name=table_name)
 
-    def update_geolocation(self, file_path, latitude, longitude, location, table_name='bird_results'):
+    def update_geolocation(self, file_path, latitude, longitude, location, region_code='', table_name='bird_results'):
         """
         更新地理位置信息
         :param file_path: 图片路径
         :param latitude: 纬度 (float)
         :param longitude: 经度 (float)
         :param location: 地点名称 (str)
+        :param region_code: 区域代码 (str)，如 "CN", "CN-44", "US-CA"
+        :param table_name: 表名
         """
         with self._lock:
             conn = self._get_connection()
@@ -2547,8 +2562,8 @@ class BirdLibraryDB:
                 
                 if record:
                     # 更新
-                    cursor.execute(f"UPDATE {table_name} SET latitude = ?, longitude = ?, location = ? WHERE file_path = ?", 
-                                   (latitude, longitude, location, record.get('file_path')))
+                    cursor.execute(f"UPDATE {table_name} SET latitude = ?, longitude = ?, location = ?, region_code = ? WHERE file_path = ?", 
+                                   (latitude, longitude, location, region_code, record.get('file_path')))
                 else:
                     # 插入新记录 (最简模式)
                     uuid = get_unique_id()
@@ -2557,9 +2572,9 @@ class BirdLibraryDB:
                         return
                     name = os.path.basename(file_path_db)
                     cursor.execute(f'''
-                        INSERT INTO {table_name} (uuid, file_path, file_name, latitude, longitude, location, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ''', (uuid, file_path_db, name, latitude, longitude, location))
+                        INSERT INTO {table_name} (uuid, file_path, file_name, latitude, longitude, location, region_code, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ''', (uuid, file_path_db, name, latitude, longitude, location, region_code))
                 
                 self._dedupe_specific_normalized_paths(cursor, table_name, [self._norm_path_key(file_path)])
                 conn.commit()
@@ -2673,6 +2688,36 @@ class BirdLibraryDB:
             candidates = [c for c in list(dict.fromkeys([str(x) for x in candidates if x])) if c]
         except Exception:
             candidates = [fp_raw]
+
+        if os.name == "nt":
+            try:
+                expanded = []
+                for c in (candidates or []):
+                    if not c:
+                        continue
+                    try:
+                        c0 = self._normalize_file_path_for_db(c) or str(c)
+                    except Exception:
+                        c0 = str(c)
+                    if c0:
+                        expanded.append(str(c0))
+                        try:
+                            expanded.append(str(c0).replace("\\", "/"))
+                        except Exception:
+                            pass
+                    try:
+                        c1 = str(c).replace("/", "\\")
+                        try:
+                            c1 = self._normalize_file_path_for_db(c1) or c1
+                        except Exception:
+                            c1 = c1
+                        expanded.append(str(c1))
+                        expanded.append(str(c1).replace("\\", "/"))
+                    except Exception:
+                        pass
+                candidates = list(dict.fromkeys([x for x in expanded if x]))
+            except Exception:
+                pass
 
         for attempt in range(4):
             conn = None

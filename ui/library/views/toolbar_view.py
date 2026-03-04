@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlider, QFrame, QStyledItemDelegate, QToolButton, QMenu, QInputDialog)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QRect
+from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlider, QFrame, QStyledItemDelegate, QToolButton, QMenu, QInputDialog, QApplication)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QRect, QEvent
 from PyQt6.QtGui import QPainter, QAction
 from ui.utils.icon_loader import qta
 from ui.common.base_toolbar import BaseToolbar
@@ -82,6 +82,10 @@ class ToolbarView(BaseToolbar):
         self.setup_ui()
         ColorManager.instance().register_listener(self._apply_theme_styles)
         self._apply_theme_styles()
+        try:
+            QApplication.instance().installEventFilter(self)
+        except Exception:
+            pass
 
     def setup_ui(self):
         self.setup_file_actions()
@@ -410,57 +414,30 @@ class ToolbarView(BaseToolbar):
         
         # Zoom Slider
         if self.config.get('show_slider', True):
-            cm = ColorManager.instance()
-            slider_bg = cm.get("theme.background.primary")
-            slider_groove = cm.get("theme.background.dark")
-            slider_handle = cm.get("theme.primary")
-            slider_handle_hover = cm.get("theme.primary")
-            slider_sub = cm.get("theme.primary")
-            slider_add = cm.get("theme.background.light")
+            self.thumbnail_size_btn = QPushButton()
+            self.thumbnail_size_btn.setFixedSize(32, 32)
+            self.thumbnail_size_btn.setToolTip("缩略图大小")
+            self.thumbnail_size_btn.setStyleSheet(TOOLBAR_BTN_STYLE)
+            self.thumbnail_size_btn.setCheckable(True)
+            self.thumbnail_size_btn.toggled.connect(self.toggle_thumbnail_size_panel)
+            self.add_widget(self.thumbnail_size_btn)
+
+            parent_widget = self.parent() or self
+            self.thumbnail_size_panel = QFrame(parent_widget)
+            self.thumbnail_size_panel.setFixedWidth(320)
+            self.thumbnail_size_panel.setFixedHeight(52)
+            self.thumbnail_size_panel.hide()
+            layout = QHBoxLayout(self.thumbnail_size_panel)
+            layout.setContentsMargins(12, 6, 12, 6)
+            layout.setSpacing(8)
+
             self.preview_slider = QSlider(Qt.Orientation.Horizontal)
             self.preview_slider.setMinimum(0)
             self.preview_slider.setMaximum(200)
             self.preview_slider.setValue(0)
-            # 移除固定大小，改为设置最大宽度和SizePolicy，允许其在空间不足时缩小
-            # 用户希望滑块更长，延伸到排序框附近，因此增加最大宽度
-            self.preview_slider.setMaximumWidth(400)
-            self.preview_slider.setMinimumWidth(150)
-            from PyQt6.QtWidgets import QSizePolicy
-            self.preview_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.preview_slider.setFixedHeight(36)
-            self.preview_slider.setStyleSheet(f"""
-                QSlider {{
-                    background: {slider_bg};
-                }}
-                QSlider::groove:horizontal {{
-                    border: none;
-                    height: 6px;
-                    background: {slider_groove};
-                    margin: 15px 0;
-                }}
-                QSlider::handle:horizontal {{
-                    width: 12px;
-                    height: 20px;
-                    background: {slider_handle};
-                    border-radius: 2px;
-                    margin: -7px 0;
-                }}
-                QSlider::handle:horizontal:hover {{
-                    background: {slider_handle_hover};
-                }}
-                QSlider::sub-page:horizontal {{
-                    background: {slider_sub};
-                    height: 6px;
-                    margin: 15px 0;
-                }}
-                QSlider::add-page:horizontal {{
-                    background: {slider_add};
-                    height: 6px;
-                    margin: 15px 0;
-                }}
-            """)
             self.preview_slider.valueChanged.connect(self.thumbnailSizeChanged.emit)
-            self.add_widget(self.preview_slider)
+            layout.addWidget(self.preview_slider)
 
     def _apply_theme_styles(self):
         cm = ColorManager.instance()
@@ -527,6 +504,83 @@ class ToolbarView(BaseToolbar):
             self.view_icon.setPixmap(qta.icon('mdi6.view-grid', color=text_dark, options=[{'scale_factor': 1.1}]).pixmap(22, 22))
         if getattr(self, "sort_icon", None):
             self.sort_icon.setPixmap(qta.icon('mdi6.sort', color=text_dark, options=[{'scale_factor': 1.1}]).pixmap(22, 22))
+        if getattr(self, "thumbnail_size_btn", None):
+            try:
+                color = cm.get("theme.primary") if bool(self.thumbnail_size_btn.isChecked()) else text_dark
+            except Exception:
+                color = text_dark
+            try:
+                self.thumbnail_size_btn.setIcon(qta.icon("mdi.image-size-select-large", color=color, options=[{"scale_factor": 1.1}]))
+            except Exception:
+                pass
+            self.thumbnail_size_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: {hover_bg};
+                }}
+                QPushButton:pressed {{
+                    background-color: {hover_bg};
+                }}
+                QPushButton:checked {{
+                    background-color: {hover_bg};
+                    border: 1px solid {border};
+                }}
+            """)
+        if getattr(self, "thumbnail_size_panel", None):
+            try:
+                panel_bg = cm.get("theme.background.light")
+            except Exception:
+                panel_bg = "#ffffff"
+            self.thumbnail_size_panel.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {panel_bg};
+                    border: 1px solid {border};
+                    border-radius: 8px;
+                }}
+            """)
+        if getattr(self, "preview_slider", None) is not None:
+            slider_bg = cm.get("theme.background.primary")
+            slider_groove = cm.get("theme.background.dark")
+            slider_handle = cm.get("theme.primary")
+            slider_handle_hover = cm.get("theme.primary")
+            slider_sub = cm.get("theme.primary")
+            slider_add = cm.get("theme.background.light")
+            self.preview_slider.setStyleSheet(f"""
+                QSlider {{
+                    background: {slider_bg};
+                }}
+                QSlider::groove:horizontal {{
+                    border: none;
+                    height: 6px;
+                    background: {slider_groove};
+                    margin: 15px 0;
+                }}
+                QSlider::handle:horizontal {{
+                    width: 12px;
+                    height: 20px;
+                    background: {slider_handle};
+                    border-radius: 2px;
+                    margin: -7px 0;
+                }}
+                QSlider::handle:horizontal:hover {{
+                    background: {slider_handle_hover};
+                }}
+                QSlider::sub-page:horizontal {{
+                    background: {slider_sub};
+                    height: 6px;
+                    margin: 15px 0;
+                }}
+                QSlider::add-page:horizontal {{
+                    background: {slider_add};
+                    height: 6px;
+                    margin: 15px 0;
+                }}
+            """)
         
         # Apply tooltip styles to all buttons
         tooltip_style = f"""
@@ -672,6 +726,11 @@ class ToolbarView(BaseToolbar):
         if checked:
             if not self.filter_panel:
                 return
+            try:
+                if getattr(self, "thumbnail_size_btn", None) is not None and bool(self.thumbnail_size_btn.isChecked()):
+                    self.thumbnail_size_btn.setChecked(False)
+            except Exception:
+                pass
             
             parent_widget = self.filter_panel.parent()
             if not parent_widget:
@@ -717,6 +776,86 @@ class ToolbarView(BaseToolbar):
             except Exception:
                 color_off = "#555"
             self.filter_btn.setIcon(qta.icon('mdi6.filter-outline', color=color_off, options=[{'scale_factor': 1.1}]))
+
+    def toggle_thumbnail_size_panel(self, checked: bool):
+        panel = getattr(self, "thumbnail_size_panel", None)
+        btn = getattr(self, "thumbnail_size_btn", None)
+        if panel is None or btn is None:
+            return
+        if checked:
+            try:
+                if getattr(self, "filter_btn", None) is not None and bool(self.filter_btn.isChecked()):
+                    self.filter_btn.setChecked(False)
+            except Exception:
+                pass
+            parent_widget = panel.parent()
+            if not parent_widget:
+                panel.show()
+                panel.raise_()
+                return
+            try:
+                panel_w = int(panel.width() or 320)
+            except Exception:
+                panel_w = 320
+            btn_pos = btn.mapTo(parent_widget, QPoint(0, 0))
+            target_x = int(btn_pos.x() + (btn.width() - panel_w) // 2)
+            parent_width = int(parent_widget.width() or 0)
+            if parent_width > 0:
+                if target_x + panel_w > parent_width - 10:
+                    target_x = parent_width - panel_w - 10
+                if target_x < 10:
+                    target_x = 10
+            target_y = int(btn_pos.y() + btn.height() + 4)
+            panel.move(target_x, target_y)
+            panel.show()
+            panel.raise_()
+            try:
+                color_on = ColorManager.instance().get("theme.primary")
+            except Exception:
+                color_on = "#2196f3"
+            try:
+                btn.setIcon(qta.icon("mdi.image-size-select-large", color=color_on, options=[{"scale_factor": 1.1}]))
+            except Exception:
+                pass
+        else:
+            try:
+                panel.hide()
+            except Exception:
+                pass
+            try:
+                color_off = ColorManager.instance().get("theme.text.dark")
+            except Exception:
+                color_off = "#555"
+            try:
+                btn.setIcon(qta.icon("mdi.image-size-select-large", color=color_off, options=[{"scale_factor": 1.1}]))
+            except Exception:
+                pass
+
+    def eventFilter(self, obj, event):
+        try:
+            et = event.type()
+        except Exception:
+            et = None
+        if et == QEvent.Type.MouseButtonPress:
+            try:
+                btn = getattr(self, "thumbnail_size_btn", None)
+                panel = getattr(self, "thumbnail_size_panel", None)
+                if btn is not None and panel is not None and panel.isVisible():
+                    try:
+                        p = event.globalPosition().toPoint()
+                    except Exception:
+                        p = None
+                    if p is not None:
+                        inside_panel = panel.rect().contains(panel.mapFromGlobal(p))
+                        inside_btn = btn.rect().contains(btn.mapFromGlobal(p))
+                        if not inside_panel and not inside_btn:
+                            try:
+                                btn.setChecked(False)
+                            except Exception:
+                                panel.hide()
+            except Exception:
+                pass
+        return super().eventFilter(obj, event)
             
     # Helper methods for updating UI state
     def set_fav_checked(self, checked):

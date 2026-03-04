@@ -44,7 +44,26 @@ class FilterRow(QWidget):
         # 2. 字段选择下拉框
         self.field_combo = QComboBox()
         self.field_combo.addItems(["文件名", "标签", "路径", "评分", "分数", "鸟的位置", "色标", "目", "科", "属", "种", "备注", "拍摄时间", "拍摄地址"])
-        self.field_combo.setFixedWidth(80)
+        try:
+            self.field_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.field_combo.setMinimumContentsLength(8)
+        except Exception:
+            pass
+        self.field_combo.setMinimumWidth(120)
+        self.field_combo.setMaximumWidth(180)
+        try:
+            view = self.field_combo.view()
+            fm = self.field_combo.fontMetrics()
+            max_w = 0
+            for i in range(self.field_combo.count()):
+                try:
+                    max_w = max(max_w, int(fm.horizontalAdvance(self.field_combo.itemText(i))))
+                except Exception:
+                    continue
+            if view is not None:
+                view.setMinimumWidth(max(200, max_w + 60))
+        except Exception:
+            pass
         self.field_combo.currentTextChanged.connect(self.on_field_changed)
         layout.addWidget(self.field_combo)
         
@@ -79,6 +98,12 @@ class FilterRow(QWidget):
         
         # 3.5 值选择框 (默认隐藏)
         self.value_combo = QComboBox()
+        try:
+            self.value_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.value_combo.setMinimumContentsLength(10)
+        except Exception:
+            pass
+        self.value_combo.setMinimumWidth(160)
         self.value_combo.hide()
         layout.addWidget(self.value_combo)
         
@@ -128,6 +153,19 @@ class FilterRow(QWidget):
             # 大小写可能需要根据数据库实际值调整，这里先用 Title Case
             self.value_combo.addItems(["Sharp", "Normal", "Blurry", "Minimal", "ExpFrame", "NoBird"])
             self.value_combo.show()
+            try:
+                view = self.value_combo.view()
+                fm = self.value_combo.fontMetrics()
+                max_w = 0
+                for i in range(self.value_combo.count()):
+                    try:
+                        max_w = max(max_w, int(fm.horizontalAdvance(self.value_combo.itemText(i))))
+                    except Exception:
+                        continue
+                if view is not None:
+                    view.setMinimumWidth(max(220, max_w + 60))
+            except Exception:
+                pass
         elif text == "鸟的位置":
             self.value_combo.clear()
             # 上下左右，左上左下右上右下，中间
@@ -136,6 +174,19 @@ class FilterRow(QWidget):
                 "TopLeft", "TopRight", "BottomLeft", "BottomRight"
             ])
             self.value_combo.show()
+            try:
+                view = self.value_combo.view()
+                fm = self.value_combo.fontMetrics()
+                max_w = 0
+                for i in range(self.value_combo.count()):
+                    try:
+                        max_w = max(max_w, int(fm.horizontalAdvance(self.value_combo.itemText(i))))
+                    except Exception:
+                        continue
+                if view is not None:
+                    view.setMinimumWidth(max(220, max_w + 60))
+            except Exception:
+                pass
         elif text == "色标":
             self.value_combo.clear()
             # 使用 (显示文本, 实际值) 的方式添加
@@ -148,6 +199,19 @@ class FilterRow(QWidget):
             for cn, en in labels:
                 self.value_combo.addItem(cn, en)
             self.value_combo.show()
+            try:
+                view = self.value_combo.view()
+                fm = self.value_combo.fontMetrics()
+                max_w = 0
+                for i in range(self.value_combo.count()):
+                    try:
+                        max_w = max(max_w, int(fm.horizontalAdvance(self.value_combo.itemText(i))))
+                    except Exception:
+                        continue
+                if view is not None:
+                    view.setMinimumWidth(max(220, max_w + 60))
+            except Exception:
+                pass
         elif text == "评分":
             self.star_rating.show()
         elif text == "标签":
@@ -156,6 +220,19 @@ class FilterRow(QWidget):
             if tags:
                 self.value_combo.addItems(tags)
             self.value_combo.show()
+            try:
+                view = self.value_combo.view()
+                fm = self.value_combo.fontMetrics()
+                max_w = 0
+                for i in range(self.value_combo.count()):
+                    try:
+                        max_w = max(max_w, int(fm.horizontalAdvance(self.value_combo.itemText(i))))
+                    except Exception:
+                        continue
+                if view is not None:
+                    view.setMinimumWidth(max(240, max_w + 60))
+            except Exception:
+                pass
         elif text == "拍摄时间":
             self.datetime_start.show()
             self.datetime_end.show()

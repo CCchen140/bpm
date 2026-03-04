@@ -160,6 +160,21 @@ class ImageLibraryManager:
             if not img:
                 return None
             
+            # 格式化坐标显示
+            lat = img.get('latitude')
+            lon = img.get('longitude')
+            lat_str = ""
+            lon_str = ""
+            if lat is not None and lon is not None:
+                try:
+                    from ui.utils.geo_manager import GeoInfoManager
+                    geo = GeoInfoManager.instance()
+                    lat_str = geo.format_coordinate(float(lat))
+                    lon_str = geo.format_coordinate(float(lon))
+                except Exception:
+                    lat_str = str(lat) if lat else ""
+                    lon_str = str(lon) if lon else ""
+            
             return {
                 'id': img.get('id', ''),
                 'path': img.get('path', ''),
@@ -181,8 +196,8 @@ class ImageLibraryManager:
                 'aperture': img.get('aperture', ''),
                 'shutter': img.get('shutter_speed', ''),
                 'focal_length': img.get('focal_length', ''),
-                'latitude': img.get('latitude', ''),
-                'longitude': img.get('longitude', ''),
+                'latitude': lat_str,
+                'longitude': lon_str,
             }
             
         except Exception as e:

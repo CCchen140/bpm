@@ -8,13 +8,34 @@ import shutil
 import threading
 import hashlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
-import cv2
-import numpy as np
+# cv2 和 numpy 延迟导入，避免在导入模块时创建窗口
+# import cv2
+# import numpy as np
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QObject, QRunnable, QThreadPool, QPointF, QEvent, QUrl, QRectF, QThread
+# 全局模块，延迟加载
+_cv2 = None
+_np = None
+
+def _get_cv2():
+    """延迟加载 cv2 模块，避免在导入时创建窗口"""
+    global _cv2
+    if _cv2 is None:
+        import cv2
+        _cv2 = cv2
+    return _cv2
+
+def _get_np():
+    """延迟加载 numpy 模块，避免在导入时创建窗口"""
+    global _np
+    if _np is None:
+        import numpy as np
+        _np = np
+    return _np
+
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QObject, QRunnable, QThreadPool, QPointF, QEvent, QUrl, QRectF, QThread, QBuffer, QByteArray
 from PyQt6.QtGui import QImage, QPixmap, QColor, QFont, QFontDatabase, QKeySequence, QShortcut, QFontMetricsF, QCursor, QImageReader, QPainter, QBrush, QPen, QTransform, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication,
@@ -53,13 +74,26 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtSvg import QSvgRenderer
 
 from ui.widgets.base_popup_dialog import BasePopupDialog
-from ui.widgets.themed_color_dialog import ThemedColorDialog
+# 延迟导入 ThemedColorDialog，避免在导入模块时创建窗口
+# from ui.widgets.themed_color_dialog import ThemedColorDialog
 from ui.utils.color_manager import ColorManager
+
+# 延迟加载 ThemedColorDialog
+_themed_color_dialog = None
+
+def _get_themed_color_dialog():
+    """延迟加载 ThemedColorDialog，避免在导入时创建窗口"""
+    global _themed_color_dialog
+    if _themed_color_dialog is None:
+        from ui.widgets.themed_color_dialog import ThemedColorDialog
+        _themed_color_dialog = ThemedColorDialog
+    return _themed_color_dialog
 from ui.utils.icon_loader import qta
 from ui.utils.notification_manager import NotificationManager
 from utils.setting.settings_manager import SettingsManager
-from utils.file.file import load_image
-from utils.exif.exif_utils import get_exiftool_path, ExifHandleWorker, EXIF_TAG
+from utils.file.file import load_image, raw_exts
+# 延迟导入 exif_utils，避免在导入模块时创建窗口
+# from utils.exif.exif_utils import get_exiftool_path, _get_exif_utils().ExifHandleWorker, EXIF_TAG
 from utils.sql.data_base import BirdLibraryDB
 from utils.file.fingerprint import get_unique_id
 from utils.file.file_util import get_fast_id
@@ -67,15 +101,115 @@ from utils.log_manager import LogManager
 from utils.paths import PathManager
 
 
-def _cv_to_qimage_bgr(img_bgr: np.ndarray) -> QImage:
-    if img_bgr is None or not isinstance(img_bgr, np.ndarray):
+# 延迟加载 exif_utils 模块
+_exif_utils = None
+
+def _get_exif_utils():
+    """延迟加载 exif_utils 模块，避免在导入时创建窗口"""
+    global _exif_utils
+    if _exif_utils is None:
+        from utils.exif import exif_utils
+        _exif_utils = exif_utils
+    return _exif_utils
+
+
+def _cv_to_qimage_bgr(img_bgr: _get_np().ndarray) -> QImage:
+    if img_bgr is None or not isinstance(img_bgr, _get_np().ndarray):
         return QImage()
     h, w = img_bgr.shape[:2]
     if h <= 0 or w <= 0:
         return QImage()
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    bytes_per_line = int(img_rgb.strides[0])
-    return QImage(img_rgb.data, int(w), int(h), bytes_per_line, QImage.Format.Format_RGB888).copy()
+    try:
+        # 使用 numpy 做 BGR->RGB 通道翻转，避免某些环境下 cv2.cvtColor 的不稳定行为
+        img_rgb = img_bgr[:, :, ::-1].copy()
+        bytes_per_line = int(img_rgb.strides[0])
+        return QImage(img_rgb.data, int(w), int(h), bytes_per_line, QImage.Format.Format_RGB888).copy()
+    except Exception:
+        img_rgb = _get_cv2().cvtColor(img_bgr, _get_cv2().COLOR_BGR2RGB)
+        bytes_per_line = int(img_rgb.strides[0])
+        return QImage(img_rgb.data, int(w), int(h), bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+
+def _qimage_encode_bytes(img_bgr: _get_np().ndarray, fmt: str, *, quality: int | None = None) -> bytes | None:
+    """
+    使用 Qt 的 QImage 编码输出字节。
+
+    说明：
+    - 这里用于替代 cv2.imencode，避免部分机器/图片上 OpenCV 编码导致的闪退（原生崩溃无法被 try/except 捕获）。
+    - 仅处理 BGR uint8 三通道图片，其他类型会先做兜底转换。
+
+    参数：
+    - img_bgr: BGR 格式 numpy 图像
+    - fmt: 编码格式（如 "JPG"、"PNG"）
+    - quality: JPG 质量（0-100），None 表示使用 Qt 默认
+    """
+    try:
+        if img_bgr is None or not isinstance(img_bgr, _get_np().ndarray) or img_bgr.size <= 0:
+            return None
+        if img_bgr.ndim != 3 or int(img_bgr.shape[2]) < 3:
+            return None
+        if img_bgr.dtype != _get_np().uint8:
+            try:
+                img_bgr = _get_np().clip(img_bgr, 0, 255).astype(_get_np().uint8)
+            except Exception:
+                return None
+        if int(img_bgr.shape[2]) > 3:
+            img_bgr = img_bgr[:, :, :3]
+        qimg = _cv_to_qimage_bgr(img_bgr)
+        if qimg.isNull():
+            return None
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        if quality is None:
+            ok = bool(qimg.save(buf, str(fmt or "").upper()))
+        else:
+            ok = bool(qimg.save(buf, str(fmt or "").upper(), int(quality)))
+        try:
+            buf.close()
+        except Exception:
+            pass
+        if not ok:
+            return None
+        return bytes(ba.data())
+    except Exception:
+        return None
+
+
+def _qimage_read_bgr(file_path: str) -> _get_np().ndarray | None:
+    """
+    使用 Qt 的 QImageReader 读取图片并转换为 BGR numpy。
+
+    说明：
+    - 用于替代部分场景下 OpenCV 解码导致的原生级闪退。
+    - 读取失败时返回 None，调用方可以回退到其他解码方案。
+    """
+    p = str(file_path or "")
+    if not p or not os.path.exists(p):
+        return None
+    try:
+        reader = QImageReader(p)
+        try:
+            reader.setAutoTransform(True)
+        except Exception:
+            pass
+        qimg = reader.read()
+        if qimg.isNull():
+            return None
+        qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
+        w = int(qimg.width())
+        h = int(qimg.height())
+        if w <= 0 or h <= 0:
+            return None
+        ptr = qimg.bits()
+        ptr.setsize(qimg.sizeInBytes())
+        arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((int(h), int(w), 3)).copy()
+        try:
+            return arr[:, :, ::-1].copy()
+        except Exception:
+            return arr
+    except Exception:
+        return None
 
 
 def _fill_meta_from_exifread(file_path: str, meta: dict) -> dict:
@@ -83,7 +217,7 @@ def _fill_meta_from_exifread(file_path: str, meta: dict) -> dict:
     使用 exifread 对 EXIF 进行回填，补齐 exiftool 路径可能缺失的关键字段。
 
     说明：
-    - 本项目存在两条 EXIF 读取链路：exiftool（ExifHandleWorker）与 exifread（信息面板）。
+    - 本项目存在两条 EXIF 读取链路：exiftool（_get_exif_utils().ExifHandleWorker）与 exifread（信息面板）。
     - 部分图片在 exiftool 下会出现 ISO/快门/光圈等字段为空或缺失，导致水印标签无法替换。
     - 这里在不破坏现有 meta 的前提下，只对“缺失/为空”的字段做回填，保证水印标签与信息面板显示一致。
 
@@ -201,20 +335,21 @@ def _fill_meta_from_exifread(file_path: str, meta: dict) -> dict:
     return out
 
 
-def _load_preview_qimage(file_path: str, max_edge: int) -> tuple[QImage, bool | None]:
+def _load_preview_qimage(file_path: str, max_edge: int) -> tuple[QImage, bool | None, int, int]:
     p = str(file_path or "")
     if not p:
-        return QImage(), None
+        return QImage(), None, 0, 0
     try:
         reader = QImageReader(p)
         if not reader.canRead():
-            return QImage(), None
+            return QImage(), None, 0, 0
         try:
             sz = reader.size()
             w = int(sz.width())
             h = int(sz.height())
         except Exception:
             w, h = 0, 0
+        orig_w, orig_h = w, h
         ref_landscape = None
         try:
             if w > 0 and h > 0:
@@ -232,9 +367,9 @@ def _load_preview_qimage(file_path: str, max_edge: int) -> tuple[QImage, bool | 
             except Exception:
                 pass
         img = reader.read()
-        return img if isinstance(img, QImage) else QImage(), ref_landscape
+        return img if isinstance(img, QImage) else QImage(), ref_landscape, orig_w, orig_h
     except Exception:
-        return QImage(), None
+        return QImage(), None, 0, 0
 
 def _scale_long_edge(w: int, h: int, max_edge: int) -> tuple[int, int]:
     w = int(max(1, w))
@@ -247,7 +382,7 @@ def _scale_long_edge(w: int, h: int, max_edge: int) -> tuple[int, int]:
     return max(1, int(round(w * scale))), max(1, int(round(h * scale)))
 
 
-def _render_svg_to_rgba(svg_path: str, width: int, height: int) -> np.ndarray | None:
+def _render_svg_to_rgba(svg_path: str, width: int, height: int) -> _get_np().ndarray | None:
     p = str(svg_path or "")
     if not p or not os.path.exists(p):
         return None
@@ -267,10 +402,10 @@ def _render_svg_to_rgba(svg_path: str, width: int, height: int) -> np.ndarray | 
         painter.end()
     ptr = img.bits()
     ptr.setsize(img.sizeInBytes())
-    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 4))
+    arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((height, width, 4))
     return arr.copy()
 
-def _render_text_to_bgra(text: str, font_family: str, font_px: int, *, bold: bool = False, italic: bool = False, underline: bool = False, rgba: list[int] | None = None) -> np.ndarray | None:
+def _render_text_to_bgra(text: str, font_family: str, font_px: int, *, bold: bool = False, italic: bool = False, underline: bool = False, rgba: list[int] | None = None) -> _get_np().ndarray | None:
     """
     使用 Qt 在离屏 QImage 上渲染文本（导出用），保证中文/字体样式与预览一致。
     
@@ -383,7 +518,7 @@ def _render_text_to_bgra(text: str, font_family: str, font_px: int, *, bold: boo
             pass
     ptr = img.bits()
     ptr.setsize(img.sizeInBytes())
-    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((int(h), int(w), 4))
+    arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((int(h), int(w), 4))
     return arr.copy()
 
 _TEXT_RENDER_SERVICE = None
@@ -478,8 +613,10 @@ class _TextRenderService(QObject):
                     shadow_style=payload.get("shadow_style"),
                     mirror_gap_px=payload.get("mirror_gap_px"),
                     mirror_angle_deg=payload.get("mirror_angle_deg"),
+                    shadow_tilt_angle=payload.get("shadow_tilt_angle"),
                     stack_count=payload.get("stack_count"),
                     stack_step_px=payload.get("stack_step_px"),
+                    letter_spacing=payload.get("letter_spacing"),
                 )
             return _render_text_to_bgra(
                 str(payload.get("text") or ""),
@@ -493,7 +630,7 @@ class _TextRenderService(QObject):
         except Exception:
             return None
 
-def _render_text_to_bgra_safe(text: str, font_family: str, font_px: int, *, bold: bool = False, italic: bool = False, underline: bool = False, rgba: list[int] | None = None) -> np.ndarray | None:
+def _render_text_to_bgra_safe(text: str, font_family: str, font_px: int, *, bold: bool = False, italic: bool = False, underline: bool = False, rgba: list[int] | None = None) -> _get_np().ndarray | None:
     svc = globals().get("_TEXT_RENDER_SERVICE")
     if svc is None or not isinstance(svc, _TextRenderService):
         try:
@@ -517,7 +654,7 @@ def _render_text_to_bgra_safe(text: str, font_family: str, font_px: int, *, bold
         out = svc.render_sync(payload)
     except Exception:
         out = None
-    if out is None or not isinstance(out, np.ndarray):
+    if out is None or not isinstance(out, _get_np().ndarray):
         try:
             app = QApplication.instance()
             if app is not None and QThread.currentThread() != app.thread():
@@ -527,8 +664,8 @@ def _render_text_to_bgra_safe(text: str, font_family: str, font_px: int, *, bold
         return _render_text_to_bgra(text, font_family, font_px, bold=bold, italic=italic, underline=underline, rgba=rgba)
     return out
 
-def _apply_mirror_effect_bgra(img_bgra: np.ndarray, *, strength: float = 0.6, gap_px: int = 0, ref_ratio: float = 0.6) -> np.ndarray:
-    if img_bgra is None or not isinstance(img_bgra, np.ndarray) or img_bgra.ndim != 3 or img_bgra.shape[2] < 4:
+def _apply_mirror_effect_bgra(img_bgra: _get_np().ndarray, *, strength: float = 0.6, gap_px: int = 0, ref_ratio: float = 0.6) -> _get_np().ndarray:
+    if img_bgra is None or not isinstance(img_bgra, _get_np().ndarray) or img_bgra.ndim != 3 or img_bgra.shape[2] < 4:
         return img_bgra
     try:
         h, w = img_bgra.shape[:2]
@@ -545,33 +682,36 @@ def _apply_mirror_effect_bgra(img_bgra: np.ndarray, *, strength: float = 0.6, ga
     except Exception:
         ref_h = int(max(1, round(float(h) * 0.6)))
     try:
-        canvas = np.zeros((int(h + gap + ref_h), int(w), 4), dtype=np.uint8)
+        canvas = _get_np().zeros((int(h + gap + ref_h), int(w), 4), dtype=_get_np().uint8)
         canvas[:h, :w] = img_bgra
         ref = img_bgra[::-1, :, :].copy()
         ref = ref[:ref_h, :, :]
         if ref_h > 1:
-            grad = np.linspace(1.0, 0.0, int(ref_h), dtype=np.float32).reshape((int(ref_h), 1))
+            grad = _get_np().linspace(1.0, 0.0, int(ref_h), dtype=_get_np().float32).reshape((int(ref_h), 1))
         else:
-            grad = np.array([[1.0]], dtype=np.float32)
-        alpha = ref[:, :, 3].astype(np.float32) / 255.0
+            grad = _get_np().array([[1.0]], dtype=_get_np().float32)
+        alpha = ref[:, :, 3].astype(_get_np().float32) / 255.0
         try:
             k = float(max(0.0, min(1.0, float(strength))))
         except Exception:
             k = 0.6
         alpha = alpha * grad * k
-        ref[:, :, 0:3] = np.clip(ref[:, :, 0:3].astype(np.float32) * 0.95, 0.0, 255.0).astype(np.uint8)
-        ref[:, :, 3] = np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8)
+        ref[:, :, 0:3] = _get_np().clip(ref[:, :, 0:3].astype(_get_np().float32) * 0.95, 0.0, 255.0).astype(_get_np().uint8)
+        ref[:, :, 3] = _get_np().clip(alpha * 255.0, 0.0, 255.0).astype(_get_np().uint8)
         canvas[int(h + gap):int(h + gap + ref_h), :w] = ref
         return canvas
     except Exception:
         return img_bgra
 
-<<<<<<< HEAD
-def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int], gap_px: int, rgba: list[int], blur: int = 0, angle_deg: float | None = None) -> np.ndarray:
-=======
-def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int], gap_px: int, rgba: list[int], blur: int = 0) -> np.ndarray:
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-    if img_bgra is None or not isinstance(img_bgra, np.ndarray) or img_bgra.ndim != 3 or img_bgra.shape[2] < 4:
+def _apply_mirror_shadow_bgra(img_bgra: _get_np().ndarray, *, direction: tuple[int, int], gap_px: int, rgba: list[int], blur: int = 0, angle_deg: float = 180.0, tilt_angle: int = 0) -> _get_np().ndarray:
+    """
+    应用镜像阴影效果。
+    
+    参数:
+    - direction: 阴影方向 (dx, dy)，决定阴影在水印的哪一侧
+    - tilt_angle: 镜像角度（0-180度，控制水印与镜像阴影之间的夹角；0 会重叠，180 为标准倒影）
+    """
+    if img_bgra is None or not isinstance(img_bgra, _get_np().ndarray) or img_bgra.ndim != 3 or img_bgra.shape[2] < 4:
         return img_bgra
     try:
         h, w = img_bgra.shape[:2]
@@ -580,315 +720,203 @@ def _apply_mirror_shadow_bgra(img_bgra: np.ndarray, *, direction: tuple[int, int
     if int(h) <= 0 or int(w) <= 0:
         return img_bgra
     try:
-        dx, dy = int(direction[0] or 0), int(direction[1] or 0)
+        gap_raw = int(gap_px or 0)
     except Exception:
-        dx, dy = 0, 1
+        gap_raw = 0
     try:
-        gap = int(max(0, min(200, int(gap_px or 0))))
+        angle = float(angle_deg or 90.0)
     except Exception:
-        gap = 0
+        angle = 90.0
+    try:
+        tilt = int(max(0, min(180, int(tilt_angle if tilt_angle is not None else 180))))
+    except Exception:
+        tilt = 180
     try:
         c = [int(max(0, min(255, int(x)))) for x in (rgba or [0, 0, 0, 153])[:4]]
         cr, cg, cb, ca = int(c[0]), int(c[1]), int(c[2]), int(c[3])
     except Exception:
         cr, cg, cb, ca = 0, 0, 0, 153
-    alpha0 = img_bgra[:, :, 3].astype(np.float32) / 255.0
-    alpha1 = np.clip(alpha0 * (float(ca) / 255.0), 0.0, 1.0)
+    
+    # 计算内容边界(去除透明边距)
+    def _get_content_bbox(alpha: _get_np().ndarray) -> tuple[int, int, int, int]:
+        """获取非透明内容的边界框(上,下,左,右)"""
+        try:
+            rows = _get_np().any(alpha > 0, axis=1)
+            cols = _get_np().any(alpha > 0, axis=0)
+            if not rows.any() or not cols.any():
+                return 0, alpha.shape[0]-1, 0, alpha.shape[1]-1
+            top = int(_get_np().argmax(rows))
+            bottom = int(alpha.shape[0] - 1 - _get_np().argmax(rows[::-1]))
+            left = int(_get_np().argmax(cols))
+            right = int(alpha.shape[1] - 1 - _get_np().argmax(cols[::-1]))
+            return top, bottom, left, right
+        except Exception:
+            return 0, alpha.shape[0]-1, 0, alpha.shape[1]-1
+    
+    # 获取原始图像的内容边界
+    alpha_orig = img_bgra[:, :, 3]
+    top_o, bottom_o, left_o, right_o = _get_content_bbox(alpha_orig)
+    content_h = bottom_o - top_o + 1
+    content_w = right_o - left_o + 1
+    
+    # 提取有效内容区域
+    content = img_bgra[top_o:bottom_o+1, left_o:right_o+1].copy()
+    
+    # 创建阴影层(使用内容区域大小)
+    alpha0 = content[:, :, 3].astype(_get_np().float32) / 255.0
+    alpha1 = _get_np().clip(alpha0 * (float(ca) / 255.0), 0.0, 1.0)
     try:
         sigma = float(max(0.0, float(int(blur) if blur is not None else 0) / 100.0 * 3.2))
     except Exception:
         sigma = 0.0
     if sigma > 1e-6:
         try:
-            alpha1 = cv2.GaussianBlur(alpha1, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_CONSTANT)
+            alpha1 = _get_cv2().GaussianBlur(alpha1, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=_get_cv2().BORDER_CONSTANT)
         except Exception:
             pass
     try:
-        # 防止模糊后在整块画布上留下极低透明度，合成到背景时会表现为“半透明矩形遮挡”
-        alpha1 = np.where(alpha1 < (2.0 / 255.0), 0.0, alpha1)
+        # 防止模糊后在整块画布上留下极低透明度
+        alpha1 = _get_np().where(alpha1 < (2.0 / 255.0), 0.0, alpha1)
     except Exception:
         pass
-    layer = np.zeros((int(h), int(w), 4), dtype=np.uint8)
-    a_u8 = np.clip(alpha1 * 255.0, 0.0, 255.0).astype(np.uint8)
-    layer[:, :, 3] = a_u8
+    
+    shadow = _get_np().zeros((content_h, content_w, 4), dtype=_get_np().uint8)
+    a_u8 = _get_np().clip(alpha1 * 255.0, 0.0, 255.0).astype(_get_np().uint8)
+    shadow[:, :, 3] = a_u8
+    m = a_u8 > 0
+    if m.any():
+        shadow[m, 0] = int(cb)
+        shadow[m, 1] = int(cg)
+        shadow[m, 2] = int(cr)
+    
     try:
-        m = a_u8 > 0
-        if bool(m.any()):
-            layer[m, 0] = int(cb)
-            layer[m, 1] = int(cg)
-            layer[m, 2] = int(cr)
+        max_gap = int(max(0, min(50000, int(max(content_w, content_h)) * 8)))
     except Exception:
-        layer[:, :, 0] = int(cb)
-        layer[:, :, 1] = int(cg)
-        layer[:, :, 2] = int(cr)
-    vx = 0 if int(dx) == 0 else (1 if int(dx) > 0 else -1)
-    vy = 0 if int(dy) == 0 else (1 if int(dy) > 0 else -1)
-<<<<<<< HEAD
-    use_vertical = True
+        max_gap = 50000
     try:
-        use_vertical = bool(abs(int(dy)) >= abs(int(dx)))
+        gap = int(max(0, min(int(max_gap), int(gap_raw))))
     except Exception:
-        use_vertical = True
-    f = 1.0
+        gap = 0
+
     try:
-        a = float(angle_deg if angle_deg is not None else 180.0)
-        a = float(max(0.0, min(180.0, a)))
-        f = float(abs(math.cos(math.radians(a))))
-        f = float(max(0.02, min(1.0, f)))
+        import math
+        open_k = float(max(0.0, min(1.0, math.sin(float(tilt) * math.pi / 360.0))))
     except Exception:
-        f = 1.0
-    def _alpha_over(dst: np.ndarray, src: np.ndarray, x: int, y: int) -> None:
-        """
-        将 src 以 alpha 叠加到 dst 指定位置（src 覆盖 dst）。
-        
-        说明：
-        - 镜像阴影在 gap=0 时可能与原图发生重叠，如果直接用数组赋值会出现“阴影把水印盖住一块”的问题。
-        - 这里使用标准 alpha 合成，且保证后续把原图叠加到阴影上时不会把阴影透明区抹掉。
-        """
-        if dst is None or src is None:
-            return
+        open_k = 1.0
+    try:
+        import math
+        proj_k = float(abs(math.cos(float(tilt) * math.pi / 180.0)))
+        proj_k = float(max(0.0, min(1.0, proj_k)))
+    except Exception:
+        proj_k = 1.0
+    try:
+        eff_gap = int(max(0, int(gap)))
+    except Exception:
+        eff_gap = 0
+    
+    shadow_work = shadow
+    if int(tilt) >= 90:
         try:
-            dh, dw = dst.shape[:2]
+            shadow_work = shadow_work[::-1, :, :]
+        except Exception:
+            shadow_work = shadow
+    try:
+        new_h = int(max(1, round(float(shadow_work.shape[0]) * float(proj_k))))
+        if new_h != int(shadow_work.shape[0]):
+            shadow_work = _get_cv2().resize(shadow_work, (int(shadow_work.shape[1]), int(new_h)), interpolation=_get_cv2().INTER_AREA)
+    except Exception:
+        pass
+    shadow = shadow_work
+    try:
+        sh_h, sh_w = shadow.shape[:2]
+    except Exception:
+        sh_h, sh_w = content_h, content_w
+    dx, dy = 0, 1
+    try:
+        dx = int(direction[0])
+        dy = int(direction[1])
+    except Exception:
+        dx, dy = 0, 1
+    if int(dx) == 0 and int(dy) == 0:
+        dx, dy = 0, 1
+    try:
+        import math
+        n = float(math.hypot(float(dx), float(dy)))
+        ux = float(dx) / float(n)
+        uy = float(dy) / float(n)
+    except Exception:
+        ux, uy = 0.0, 1.0
+    try:
+        base_sep = float(abs(ux) * float(content_w) + abs(uy) * float(content_h))
+    except Exception:
+        base_sep = float(max(content_w, content_h))
+    try:
+        sep = float(base_sep) * float(open_k) + float(eff_gap)
+    except Exception:
+        sep = float(max(0, eff_gap))
+    try:
+        cx = float(content_w) / 2.0
+        cy = float(content_h) / 2.0
+    except Exception:
+        cx, cy = 0.0, 0.0
+    sh_xf = float(cx + float(ux) * float(sep) - float(sh_w) / 2.0)
+    sh_yf = float(cy + float(uy) * float(sep) - float(sh_h) / 2.0)
+    min_xf = float(min(0.0, sh_xf))
+    min_yf = float(min(0.0, sh_yf))
+    max_xf = float(max(float(content_w), sh_xf + float(sh_w)))
+    max_yf = float(max(float(content_h), sh_yf + float(sh_h)))
+    pad = 2
+    try:
+        import math
+        total_w = int(max(1, int(math.ceil(max_xf - min_xf)) + pad * 2))
+        total_h = int(max(1, int(math.ceil(max_yf - min_yf)) + pad * 2))
+        content_x = int(pad + int(round(-min_xf)))
+        content_y = int(pad + int(round(-min_yf)))
+        shadow_x = int(round(float(content_x) + float(sh_xf)))
+        shadow_y = int(round(float(content_y) + float(sh_yf)))
+    except Exception:
+        total_w = int(max(1, int(max(content_w, sh_w) + pad * 2)))
+        total_h = int(max(1, int(max(content_h, sh_h) + pad * 2)))
+        content_x, content_y = int(pad), int(pad)
+        shadow_x, shadow_y = int(pad), int(pad)
+    canvas = _get_np().zeros((int(total_h), int(total_w), 4), dtype=_get_np().uint8)
+    
+    # Alpha混合函数
+    def _blend_bgra(dst: _get_np().ndarray, src: _get_np().ndarray, x: int, y: int):
+        try:
             sh, sw = src.shape[:2]
+            dh, dw = dst.shape[:2]
+            x0 = int(max(0, int(x)))
+            y0 = int(max(0, int(y)))
+            x1 = int(min(int(dw), int(x) + int(sw)))
+            y1 = int(min(int(dh), int(y) + int(sh)))
+            if x1 <= x0 or y1 <= y0:
+                return
+            sx0 = int(x0 - int(x))
+            sy0 = int(y0 - int(y))
+            sx1 = int(sx0 + (x1 - x0))
+            sy1 = int(sy0 + (y1 - y0))
+            src_roi = src[int(sy0):int(sy1), int(sx0):int(sx1)]
+            dst_roi = dst[int(y0):int(y1), int(x0):int(x1)]
+            src_a = src_roi[:, :, 3].astype(_get_np().float32) / 255.0
+            dst_a = dst_roi[:, :, 3].astype(_get_np().float32) / 255.0
+            out_a = src_a + dst_a * (1.0 - src_a)
+            rgb_src = src_roi[:, :, 0:3].astype(_get_np().float32)
+            rgb_dst = dst_roi[:, :, 0:3].astype(_get_np().float32)
+            out_rgb = rgb_src * src_a[:, :, None] + rgb_dst * dst_a[:, :, None] * (1.0 - src_a[:, :, None])
+            denom = _get_np().where(out_a > 1e-6, out_a, 1.0)
+            out_rgb = out_rgb / denom[:, :, None]
+            dst[int(y0):int(y1), int(x0):int(x1), 0:3] = _get_np().clip(out_rgb, 0.0, 255.0).astype(_get_np().uint8)
+            dst[int(y0):int(y1), int(x0):int(x1), 3] = _get_np().clip(out_a * 255.0, 0.0, 255.0).astype(_get_np().uint8)
         except Exception:
-            return
-        if dh <= 0 or dw <= 0 or sh <= 0 or sw <= 0:
-            return
-        x0 = int(max(0, x))
-        y0 = int(max(0, y))
-        x1 = int(min(dw, x + sw))
-        y1 = int(min(dh, y + sh))
-        if x1 <= x0 or y1 <= y0:
-            return
-        sx0 = int(x0 - x)
-        sy0 = int(y0 - y)
-        sx1 = int(sx0 + (x1 - x0))
-        sy1 = int(sy0 + (y1 - y0))
-        try:
-            roi = dst[y0:y1, x0:x1]
-            s = src[sy0:sy1, sx0:sx1]
-            a_s = s[:, :, 3:4].astype(np.float32) / 255.0
-            a_d = roi[:, :, 3:4].astype(np.float32) / 255.0
-            out_a = a_s + a_d * (1.0 - a_s)
-            roi[:, :, 0:3] = np.clip(s[:, :, 0:3].astype(np.float32) * a_s + roi[:, :, 0:3].astype(np.float32) * (1.0 - a_s), 0.0, 255.0).astype(np.uint8)
-            roi[:, :, 3:4] = np.clip(out_a * 255.0, 0.0, 255.0).astype(np.uint8)
-        except Exception:
-            return
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-    def _edge_empty_rows(alpha: np.ndarray) -> tuple[int, int]:
-        try:
-            mask = np.any(alpha > 0, axis=1)
-            if not bool(mask.any()):
-                return int(alpha.shape[0]), int(alpha.shape[0])
-            top = int(np.argmax(mask))
-            bottom = int(alpha.shape[0] - 1 - np.argmax(mask[::-1]))
-            return int(top), int(alpha.shape[0] - 1 - bottom)
-        except Exception:
-            return 0, 0
-    def _edge_empty_cols(alpha: np.ndarray) -> tuple[int, int]:
-        try:
-            mask = np.any(alpha > 0, axis=0)
-            if not bool(mask.any()):
-                return int(alpha.shape[1]), int(alpha.shape[1])
-            left = int(np.argmax(mask))
-            right = int(alpha.shape[1] - 1 - np.argmax(mask[::-1]))
-            return int(left), int(alpha.shape[1] - 1 - right)
-        except Exception:
-            return 0, 0
-<<<<<<< HEAD
-    if use_vertical:
-        flip = layer[::-1, :, :].copy()
-        a_flip_src = img_bgra[::-1, :, 3]
-        flip_h = int(h)
-        if float(f) < 0.999:
-            try:
-                flip_h = int(max(1, round(float(h) * float(f))))
-                interp = cv2.INTER_AREA if int(flip_h) < int(h) else cv2.INTER_LINEAR
-                flip = cv2.resize(flip, (int(w), int(flip_h)), interpolation=interp)
-                a_flip_src = cv2.resize(a_flip_src, (int(w), int(flip_h)), interpolation=interp)
-            except Exception:
-                flip_h = int(h)
-                a_flip_src = img_bgra[::-1, :, 3]
-                flip = layer[::-1, :, :].copy()
-        overlap = 0
-        vy_sign = 1 if int(vy) >= 0 else -1
-        try:
-            # 无论 gap=0 还是 gap>0，都用透明边距来“抵消”空白，避免 0 与 1 差距过大
-            a_img = img_bgra[:, :, 3]
-            top_img, bottom_img = _edge_empty_rows(a_img)
-            top_flip, bottom_flip = _edge_empty_rows(a_flip_src)
-            if int(vy_sign) > 0:
-                overlap = int(max(0, min(int(h), int(bottom_img) + int(top_flip))))
-            else:
-                overlap = int(max(0, min(int(flip_h), int(bottom_flip) + int(top_img))))
-        except Exception:
-            overlap = 0
-        shift_x_mag = 0
-        try:
-            if int(vx) != 0 and int(vy) != 0:
-                base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
-                shift_x_mag = int(max(6, min(60, base_shift)))
-        except Exception:
-            shift_x_mag = 0
-        canvas_h = int((int(h) + int(gap) + int(flip_h) - int(overlap)) if int(vy_sign) > 0 else (int(flip_h) + int(gap) + int(h) - int(overlap)))
-        canvas_w = int(w + shift_x_mag)
-=======
-    # 镜像阴影：方向可能是斜向（例如左下/右下），需要在主轴镜像的同时做正交方向偏移
-    # 镜像阴影：当间隔为 0 时，让两部分尽量贴合，避免因为透明边距导致“中间有大空白”
-    shift_x = 0
-    shift_y = 0
-    # 斜向时需要明显的“侧向偏移”，否则左右/上下会看起来一样
-    # 这里用图块尺寸的比例来估算偏移，保证不同字号下视觉一致
-    try:
-        if int(vy) != 0 and int(vx) != 0:
-            base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
-            shift_x = int(max(6, min(60, base_shift)))
-    except Exception:
-        shift_x = 0
-    try:
-        if int(vx) != 0 and int(vy) != 0:
-            base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
-            shift_y = int(max(6, min(60, base_shift)))
-    except Exception:
-        shift_y = 0
-    if vy != 0:
-        flip = layer[::-1, :, :].copy()
-        overlap = 0
-        if int(gap) <= 0:
-            try:
-                a_img = img_bgra[:, :, 3]
-                a_flip_src = img_bgra[::-1, :, 3]
-                top_img, bottom_img = _edge_empty_rows(a_img)
-                top_flip, bottom_flip = _edge_empty_rows(a_flip_src)
-                if vy > 0:
-                    overlap = int(max(0, min(int(h), int(bottom_img) + int(top_flip))))
-                else:
-                    overlap = int(max(0, min(int(h), int(bottom_flip) + int(top_img))))
-            except Exception:
-                overlap = 0
-        canvas_h = int(h + gap + h - overlap)
-        canvas_w = int(w + (shift_x if int(vx) != 0 else 0))
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-        canvas = np.zeros((int(canvas_h), int(canvas_w), 4), dtype=np.uint8)
-        x_img = 0
-        x_flip = 0
-        if int(vx) >= 0:
-<<<<<<< HEAD
-            x_flip = int(shift_x_mag)
-        else:
-            x_img = int(shift_x_mag)
-        if int(vy_sign) > 0:
-            y_img = 0
-            y_flip = int(int(h) + int(gap) - int(overlap))
-            _alpha_over(canvas, flip, int(x_flip), int(y_flip))
-            _alpha_over(canvas, img_bgra, int(x_img), int(y_img))
-        else:
-            y_flip = 0
-            y_img = int(int(flip_h) + int(gap) - int(overlap))
-            _alpha_over(canvas, flip, int(x_flip), int(y_flip))
-            _alpha_over(canvas, img_bgra, int(x_img), int(y_img))
-        return canvas
-    flip = layer[:, ::-1, :].copy()
-    a_flip_src = img_bgra[:, ::-1, 3]
-    flip_w = int(w)
-    if float(f) < 0.999:
-        try:
-            flip_w = int(max(1, round(float(w) * float(f))))
-            interp = cv2.INTER_AREA if int(flip_w) < int(w) else cv2.INTER_LINEAR
-            flip = cv2.resize(flip, (int(flip_w), int(h)), interpolation=interp)
-            a_flip_src = cv2.resize(a_flip_src, (int(flip_w), int(h)), interpolation=interp)
-        except Exception:
-            flip_w = int(w)
-            a_flip_src = img_bgra[:, ::-1, 3]
-            flip = layer[:, ::-1, :].copy()
-    overlap = 0
-    vx_sign = 1 if int(vx) >= 0 else -1
-    try:
-        a_img = img_bgra[:, :, 3]
-        left_img, right_img = _edge_empty_cols(a_img)
-        left_flip, right_flip = _edge_empty_cols(a_flip_src)
-        if int(vx_sign) > 0:
-            overlap = int(max(0, min(int(w), int(right_img) + int(left_flip))))
-        else:
-            overlap = int(max(0, min(int(flip_w), int(right_flip) + int(left_img))))
-    except Exception:
-        overlap = 0
-    shift_y_mag = 0
-    try:
-        if int(vx) != 0 and int(vy) != 0:
-            base_shift = int(round(float(max(1, min(int(w), int(h)))) * 0.12))
-            shift_y_mag = int(max(6, min(60, base_shift)))
-    except Exception:
-        shift_y_mag = 0
-    canvas_w = int((int(w) + int(gap) + int(flip_w) - int(overlap)) if int(vx_sign) > 0 else (int(flip_w) + int(gap) + int(w) - int(overlap)))
-    canvas_h = int(h + shift_y_mag)
-=======
-            x_flip = int(shift_x)
-        else:
-            x_img = int(shift_x)
-        if vy > 0:
-            y_img = 0
-            y_flip = int(h + gap - overlap)
-            canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
-            canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
-        else:
-            y_flip = 0
-            y_img = int(h + gap - overlap)
-            canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
-            canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
-        return canvas
-    flip = layer[:, ::-1, :].copy()
-    overlap = 0
-    if int(gap) <= 0:
-        try:
-            a_img = img_bgra[:, :, 3]
-            a_flip_src = img_bgra[:, ::-1, 3]
-            left_img, right_img = _edge_empty_cols(a_img)
-            left_flip, right_flip = _edge_empty_cols(a_flip_src)
-            if vx > 0:
-                overlap = int(max(0, min(int(w), int(right_img) + int(left_flip))))
-            else:
-                overlap = int(max(0, min(int(w), int(right_flip) + int(left_img))))
-        except Exception:
-            overlap = 0
-    canvas_w = int(w + gap + w - overlap)
-    canvas_h = int(h + (shift_y if int(vy) != 0 else 0))
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-    canvas = np.zeros((int(canvas_h), int(canvas_w), 4), dtype=np.uint8)
-    y_img = 0
-    y_flip = 0
-    if int(vy) >= 0:
-<<<<<<< HEAD
-        y_flip = int(shift_y_mag)
-    else:
-        y_img = int(shift_y_mag)
-    if int(vx_sign) > 0:
-        x_img = 0
-        x_flip = int(int(w) + int(gap) - int(overlap))
-        _alpha_over(canvas, flip, int(x_flip), int(y_flip))
-        _alpha_over(canvas, img_bgra, int(x_img), int(y_img))
-    else:
-        x_flip = 0
-        x_img = int(int(flip_w) + int(gap) - int(overlap))
-        _alpha_over(canvas, flip, int(x_flip), int(y_flip))
-        _alpha_over(canvas, img_bgra, int(x_img), int(y_img))
-=======
-        y_flip = int(shift_y)
-    else:
-        y_img = int(shift_y)
-    if vx > 0:
-        x_img = 0
-        x_flip = int(w + gap - overlap)
-        canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
-        canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
-    else:
-        x_flip = 0
-        x_img = int(w + gap - overlap)
-        canvas[int(y_flip):int(y_flip + h), int(x_flip):int(x_flip + w)] = flip
-        canvas[int(y_img):int(y_img + h), int(x_img):int(x_img + w)] = img_bgra
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+            pass
+    
+    # 先绘制阴影，再绘制内容（确保内容在阴影之上）
+    _blend_bgra(canvas, shadow, int(shadow_x), int(shadow_y))
+    _blend_bgra(canvas, content, int(content_x), int(content_y))
+    
     return canvas
+
 
 def _render_text_patch_to_bgra(
     text: str,
@@ -908,13 +936,12 @@ def _render_text_patch_to_bgra(
     shadow_range: int | None = None,
     shadow_style: str | None = None,
     mirror_gap_px: int | None = None,
-<<<<<<< HEAD
-    mirror_angle_deg: float | None = None,
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+    mirror_angle_deg: float = 180.0,
+    shadow_tilt_angle: int = 180,
     stack_count: int | None = None,
     stack_step_px: int | None = None,
-) -> np.ndarray | None:
+    letter_spacing: int = 0,
+) -> _get_np().ndarray | None:
     try:
         s = str(text or "")
     except Exception:
@@ -979,7 +1006,16 @@ def _render_text_patch_to_bgra(
         mgap = int(mirror_gap_px if mirror_gap_px is not None else 0)
     except Exception:
         mgap = 0
-    mgap = int(max(0, min(200, mgap)))
+    mgap = int(max(0, min(50000, mgap)))
+    try:
+        mang = 90.0
+    except Exception:
+        mang = 90.0
+    try:
+        tilt_angle = int(shadow_tilt_angle if shadow_tilt_angle is not None else 180)
+    except Exception:
+        tilt_angle = 180
+    tilt_angle = int(max(0, min(180, tilt_angle)))
     try:
         scount = int(stack_count if stack_count is not None else 3)
     except Exception:
@@ -1001,6 +1037,14 @@ def _render_text_patch_to_bgra(
         font.setUnderline(bool(underline))
     except Exception:
         pass
+    # 设置文字间隔
+    try:
+        spacing = int(letter_spacing if letter_spacing is not None else 0)
+        if spacing != 0:
+            # AbsoluteSpacing: 绝对像素值，Positive: 正值增加间隔
+            font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, float(spacing))
+    except Exception:
+        pass
     fm = QFontMetricsF(font)
     try:
         lines = [str(x) for x in str(s).splitlines()]
@@ -1008,46 +1052,81 @@ def _render_text_patch_to_bgra(
         lines = [s]
     if not lines:
         lines = [""]
-    lefts = []
-    rights = []
-    for line in lines:
-        sline = line if line != "" else " "
-        try:
-            br = fm.boundingRect(str(sline))
-            lefts.append(float(br.left()))
-            rights.append(float(br.right()))
-        except Exception:
-            lefts.append(0.0)
-            rights.append(1.0)
     try:
         line_h = float(fm.height())
         ascent = float(fm.ascent())
     except Exception:
         line_h = float(max(1, int(base_px * ss)))
         ascent = float(max(1, int(round(base_px * ss * 0.8))))
+    base_path = QPainterPath()
+    underline_lines = []
+    try:
+        ul_pos = float(fm.underlinePos())
+    except Exception:
+        ul_pos = 0.0
+    try:
+        ul_w = float(max(1.0, float(fm.lineWidth())))
+    except Exception:
+        ul_w = 1.0
+    for i, line in enumerate(lines):
+        sline = str(line or "")
+        try:
+            y = float(ascent + float(i) * line_h)
+        except Exception:
+            y = float(ascent)
+        if sline:
+            try:
+                base_path.addText(QPointF(0.0, float(y)), font, str(sline))
+            except Exception:
+                pass
+        if bool(underline):
+            try:
+                adv = float(fm.horizontalAdvance(str(sline if sline else " ")))
+                underline_lines.append((0.0, float(y + ul_pos), float(adv), float(y + ul_pos)))
+            except Exception:
+                pass
+    try:
+        br0 = base_path.boundingRect()
+        br0_left = float(br0.left())
+        br0_top = float(br0.top())
+        br0_w = float(br0.width())
+        br0_h = float(br0.height())
+    except Exception:
+        br0_left = 0.0
+        br0_top = 0.0
+        br0_w = 1.0
+        br0_h = float(max(1.0, line_h * float(len(lines))))
     try:
         dist0 = int(max(abs(int(sdx)), abs(int(sdy))))
     except Exception:
         dist0 = 0
     extra_shadow = 0
-    if sha > 0 and dist0 > 0:
-        if sh_style in ("trail", "beam"):
-            # 光束/拖尾的“模糊度”需要对阴影边缘范围产生明显影响
-            # 这里扩大 padding，避免后续模糊被裁剪，同时让模糊对边缘软化更明显
-            extra_shadow = int(round(float(dist0) * 1.8)) + int(round(float(srng) / 100.0 * 120.0)) + 20
-        elif sh_style == "stack":
+    if sha > 0:
+        if sh_style == "stack":
             extra_shadow = int(int(sstep) * int(scount)) + 4
         elif sh_style == "mirror":
             extra_shadow = int(round(float(srng) / 100.0 * 12.0)) + 6
-        else:
-            extra_shadow = int(dist0) + 2
+        elif dist0 > 0:
+            if sh_style in ("trail", "beam"):
+                extra_shadow = int(round(float(dist0) * 1.8)) + int(round(float(srng) / 100.0 * 120.0)) + 20
+            else:
+                extra_shadow = int(dist0) + 2
     extra = int(max(0, int(sw) + int(extra_shadow)))
     pad = float((2 + extra) * ss)
-    min_left = float(min(lefts) if lefts else 0.0)
-    max_right = float(max(rights) if rights else 1.0)
-    text_w = float(max(1.0, max_right - min_left))
-    w0 = float(max(1.0, text_w + pad * 2.0))
-    h0 = float(max(1.0, line_h * float(len(lines)) + pad * 2.0))
+    try:
+        br0_w = float(max(1.0, br0_w))
+        br0_h = float(max(1.0, br0_h))
+    except Exception:
+        br0_w = 1.0
+        br0_h = float(max(1.0, line_h * float(len(lines))))
+    w0 = float(br0_w + pad * 2.0)
+    h0 = float(br0_h + pad * 2.0)
+    try:
+        tx0 = float(pad) - float(br0_left)
+        ty0 = float(pad) - float(br0_top)
+    except Exception:
+        tx0 = float(pad)
+        ty0 = float(pad)
     try:
         ang = float(angle_deg or 0.0)
     except Exception:
@@ -1072,37 +1151,6 @@ def _render_text_patch_to_bgra(
             painter.setFont(font)
         except Exception:
             pass
-        try:
-            x_base = float(pad) - float(min_left)
-        except Exception:
-            x_base = float(pad)
-        base_path = QPainterPath()
-        underline_lines = []
-        try:
-            ul_pos = float(fm.underlinePos())
-        except Exception:
-            ul_pos = 0.0
-        try:
-            ul_w = float(max(1.0, float(fm.lineWidth())))
-        except Exception:
-            ul_w = 1.0
-        for i, line in enumerate(lines):
-            sline = str(line or "")
-            try:
-                y = float(pad + ascent + float(i) * line_h)
-            except Exception:
-                y = float(pad)
-            if sline:
-                try:
-                    base_path.addText(QPointF(float(x_base), float(y)), font, str(sline))
-                except Exception:
-                    pass
-            if bool(underline):
-                try:
-                    adv = float(fm.horizontalAdvance(str(sline if sline else " ")))
-                    underline_lines.append((float(x_base), float(y + ul_pos), float(x_base + adv), float(y + ul_pos)))
-                except Exception:
-                    pass
         def _fill_text_at(p: QPainter, dx0: float, dy0: float, color: QColor):
             """
             在指定偏移处“填充”文字路径（用于更平滑的斜线/曲线/字体边缘）。
@@ -1114,7 +1162,7 @@ def _render_text_patch_to_bgra(
             """
             p.save()
             try:
-                p.translate(float(dx0), float(dy0))
+                p.translate(float(dx0) + float(tx0), float(dy0) + float(ty0))
             except Exception:
                 pass
             try:
@@ -1143,7 +1191,7 @@ def _render_text_patch_to_bgra(
             """
             p.save()
             try:
-                p.translate(float(dx0), float(dy0))
+                p.translate(float(dx0) + float(tx0), float(dy0) + float(ty0))
             except Exception:
                 pass
             try:
@@ -1166,7 +1214,9 @@ def _render_text_patch_to_bgra(
             painter.translate(-float(w0) / 2.0, -float(h0) / 2.0)
         except Exception:
             pass
-        if sha > 0 and (int(sdx) != 0 or int(sdy) != 0) and sh_style != "mirror":
+        # 渲染阴影：只要阴影颜色不透明且不是镜像阴影就渲染
+        # 叠字和光束阴影需要方向，但方向由角度决定，不依赖sdx/sdy是否为0
+        if sha > 0 and sh_style != "mirror":
             if sh_style in ("trail", "beam"):
                 dist = int(max(abs(int(sdx)), abs(int(sdy))))
                 steps = int(max(10, min(22, dist * 3)))
@@ -1212,18 +1262,18 @@ def _render_text_patch_to_bgra(
                 try:
                     ptr2 = shadow_img.bits()
                     ptr2.setsize(shadow_img.sizeInBytes())
-                    arr2 = np.frombuffer(ptr2, dtype=np.uint8).reshape((int(shadow_img.height()), int(shadow_img.width()), 4))
-                    alpha2 = arr2[:, :, 3].astype(np.float32)
+                    arr2 = _get_np().frombuffer(ptr2, dtype=_get_np().uint8).reshape((int(shadow_img.height()), int(shadow_img.width()), 4))
+                    alpha2 = arr2[:, :, 3].astype(_get_np().float32)
                     # 提高模糊半径，让“模糊度”到 100 时阴影能“糊成一团”
-                    sigma = float(max(0.0, float(srng) / 100.0 * 40.0))
+                    sigma = float(max(0.0, float(srng) / 100.0 * 80.0))
                     if sigma > 1e-6:
-                        alpha2 = cv2.GaussianBlur(alpha2, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_CONSTANT)
+                        alpha2 = _get_cv2().GaussianBlur(alpha2, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=_get_cv2().BORDER_CONSTANT)
                     try:
                         # 防止模糊把边缘“糊出一圈整块透明度”，导致出现看不见的方形遮挡
-                        alpha2 = np.where(alpha2 < 1.0, 0.0, alpha2)
+                        alpha2 = _get_np().where(alpha2 < 1.0, 0.0, alpha2)
                     except Exception:
                         pass
-                    arr2[:, :, 3] = np.clip(alpha2, 0.0, 255.0).astype(np.uint8)
+                    arr2[:, :, 3] = _get_np().clip(alpha2, 0.0, 255.0).astype(_get_np().uint8)
                     blur_img = QImage(arr2.data, int(shadow_img.width()), int(shadow_img.height()), int(arr2.strides[0]), QImage.Format.Format_ARGB32)
                     painter.save()
                     painter.resetTransform()
@@ -1272,21 +1322,11 @@ def _render_text_patch_to_bgra(
             pass
     ptr = img.bits()
     ptr.setsize(img.sizeInBytes())
-    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((int(img.height()), int(img.width()), 4))
+    arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((int(img.height()), int(img.width()), 4))
     out = arr.copy()
-    if sh_style == "mirror" and sha > 0 and (int(sdx) != 0 or int(sdy) != 0):
-<<<<<<< HEAD
-        out = _apply_mirror_shadow_bgra(
-            out,
-            direction=(int(sdx), int(sdy)),
-            gap_px=int(mgap),
-            rgba=[int(shr), int(shg), int(shb), int(sha)],
-            blur=int(srng),
-            angle_deg=mirror_angle_deg,
-        )
-=======
-        out = _apply_mirror_shadow_bgra(out, direction=(int(sdx), int(sdy)), gap_px=int(mgap), rgba=[int(shr), int(shg), int(shb), int(sha)], blur=int(srng))
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+    # 镜像阴影：只要启用了镜像阴影且颜色不透明就显示
+    if sh_style == "mirror" and sha > 0:
+        out = _apply_mirror_shadow_bgra(out, direction=(int(sdx), int(sdy)), gap_px=int(mgap), rgba=[int(shr), int(shg), int(shb), int(sha)], blur=int(srng), angle_deg=float(mang), tilt_angle=int(tilt_angle))
     return out
 
 def _render_text_patch_to_bgra_safe(
@@ -1307,13 +1347,12 @@ def _render_text_patch_to_bgra_safe(
     shadow_range: int | None = None,
     shadow_style: str | None = None,
     mirror_gap_px: int | None = None,
-<<<<<<< HEAD
-    mirror_angle_deg: float | None = None,
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+    mirror_angle_deg: float = 180.0,
+    shadow_tilt_angle: int = 180,
     stack_count: int | None = None,
     stack_step_px: int | None = None,
-) -> np.ndarray | None:
+    letter_spacing: int = 0,
+) -> _get_np().ndarray | None:
     try:
         app = QApplication.instance()
         if app is not None and QThread.currentThread() == app.thread():
@@ -1337,23 +1376,22 @@ def _render_text_patch_to_bgra_safe(
         shadow_range=shadow_range,
         shadow_style=shadow_style,
         mirror_gap_px=mirror_gap_px,
-<<<<<<< HEAD
         mirror_angle_deg=mirror_angle_deg,
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+        shadow_tilt_angle=shadow_tilt_angle,
         stack_count=stack_count,
         stack_step_px=stack_step_px,
+        letter_spacing=letter_spacing,
     )
 
-def _rotate_bgra_keep_bounds(img_bgra: np.ndarray, angle_deg: float) -> np.ndarray:
+def _rotate_bgra_keep_bounds(img_bgra: _get_np().ndarray, angle_deg: float) -> _get_np().ndarray:
     """
     旋转 BGRA 图像并扩大画布，避免旋转后被裁剪。
     
     说明：
-    - 预览（QGraphicsItem）旋转不会裁剪内容，但 cv2.warpAffine 若输出尺寸不变会裁掉四角。
+    - 预览（QGraphicsItem）旋转不会裁剪内容，但 _get_cv2().warpAffine 若输出尺寸不变会裁掉四角。
     - 这里按旋转后的外接矩形计算新尺寸，并平移仿射矩阵，让内容完整保留。
     """
-    if img_bgra is None or not isinstance(img_bgra, np.ndarray):
+    if img_bgra is None or not isinstance(img_bgra, _get_np().ndarray):
         return img_bgra
     h, w = img_bgra.shape[:2]
     if h <= 0 or w <= 0:
@@ -1365,7 +1403,7 @@ def _rotate_bgra_keep_bounds(img_bgra: np.ndarray, angle_deg: float) -> np.ndarr
     if abs(ang) <= 0.1:
         return img_bgra
     center = (float(w) / 2.0, float(h) / 2.0)
-    M = cv2.getRotationMatrix2D(center, float(ang), 1.0)
+    M = _get_cv2().getRotationMatrix2D(center, float(ang), 1.0)
     cos = abs(float(M[0, 0]))
     sin = abs(float(M[0, 1]))
     new_w = int(round(float(h) * sin + float(w) * cos))
@@ -1374,13 +1412,13 @@ def _rotate_bgra_keep_bounds(img_bgra: np.ndarray, angle_deg: float) -> np.ndarr
     new_h = int(max(1, new_h))
     M[0, 2] += float(new_w) / 2.0 - float(w) / 2.0
     M[1, 2] += float(new_h) / 2.0 - float(h) / 2.0
-    interp = cv2.INTER_CUBIC
+    interp = _get_cv2().INTER_CUBIC
     try:
         if hasattr(cv2, "INTER_LANCZOS4"):
-            interp = cv2.INTER_LANCZOS4
+            interp = _get_cv2().INTER_LANCZOS4
     except Exception:
         pass
-    return cv2.warpAffine(img_bgra, M, (int(new_w), int(new_h)), flags=interp, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    return _get_cv2().warpAffine(img_bgra, M, (int(new_w), int(new_h)), flags=interp, borderMode=_get_cv2().BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
 
 def _ensure_svg_raster_cache(svg_path: str, max_edge: int = 2048) -> str:
@@ -1401,10 +1439,7 @@ def _ensure_svg_raster_cache(svg_path: str, max_edge: int = 2048) -> str:
         key = hashlib.sha1(sig.encode("utf-8", errors="ignore")).hexdigest()
     except Exception:
         key = str(abs(hash(sig)))
-    try:
-        cache_dir = str(PathManager.instance().get_user_data_path() / "watermark" / "svg_cache")
-    except Exception:
-        cache_dir = os.path.join(os.getcwd(), "data", "watermark", "svg_cache")
+    cache_dir = str(PathManager.instance().get_user_data_path() / "cache" / "watermark" / "svg_cache")
     try:
         os.makedirs(cache_dir, exist_ok=True)
     except Exception:
@@ -1468,6 +1503,25 @@ def _first_non_empty(*values) -> str:
         if s:
             return s
     return ""
+
+def _trace(tag: str, extra: str = ""):
+    try:
+        t = str(tag or "").strip()
+    except Exception:
+        t = ""
+    try:
+        e = str(extra or "").strip()
+    except Exception:
+        e = ""
+    try:
+        if t and e:
+            LogManager.instance().debug(f"[WatermarkSaveCopy] {t} {e}")
+        elif t:
+            LogManager.instance().debug(f"[WatermarkSaveCopy] {t}")
+        elif e:
+            LogManager.instance().debug(f"[WatermarkSaveCopy] {e}")
+    except Exception:
+        pass
 
 def _meta_first(meta: dict, *keys) -> str:
     if not isinstance(meta, dict):
@@ -1595,7 +1649,7 @@ def _resolve_tag_text(meta: dict, tag_key: str) -> str:
     if key == "location":
         v = _first_non_empty(
             meta.get("XMP-bmp:Location"),
-            meta.get(str(EXIF_TAG.Location.value)),
+            meta.get(str(_get_exif_utils().EXIF_TAG.Location.value)),
             _meta_first(meta, "Location"),
             meta.get("XMP:Location"),
         )
@@ -1614,7 +1668,7 @@ def _resolve_tag_text(meta: dict, tag_key: str) -> str:
                 pass
         return v
     if key == "species":
-        v = _first_non_empty(meta.get(str(EXIF_TAG.SpeciesCls.value)), meta.get(str(EXIF_TAG.Object.value)), _meta_first(meta, "Species"))
+        v = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.SpeciesCls.value)), meta.get(str(_get_exif_utils().EXIF_TAG.Object.value)), _meta_first(meta, "Species"))
         if not v:
             try:
                 LogManager.instance().debug(f"[Watermark] 物种为空: {key}")
@@ -1622,13 +1676,13 @@ def _resolve_tag_text(meta: dict, tag_key: str) -> str:
                 pass
         return v
     if key == "order":
-        v = _first_non_empty(meta.get(str(EXIF_TAG.OrderCls.value)), _meta_first(meta, "OrderCls"), _meta_first(meta, "Order"))
+        v = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.OrderCls.value)), _meta_first(meta, "OrderCls"), _meta_first(meta, "Order"))
         return v
     if key == "family":
-        v = _first_non_empty(meta.get(str(EXIF_TAG.FamilyCls.value)), _meta_first(meta, "FamilyCls"), _meta_first(meta, "Family"))
+        v = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.FamilyCls.value)), _meta_first(meta, "FamilyCls"), _meta_first(meta, "Family"))
         return v
     if key == "genus":
-        v = _first_non_empty(meta.get(str(EXIF_TAG.GenusCls.value)), _meta_first(meta, "GenusCls"), _meta_first(meta, "Genus"))
+        v = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.GenusCls.value)), _meta_first(meta, "GenusCls"), _meta_first(meta, "Genus"))
         return v
     return ""
 
@@ -1768,7 +1822,7 @@ def _get_tags_multi_merged(file_paths: list[str], tags: list[str], timeout: int 
     if not paths:
         return {}
     try:
-        worker = ExifHandleWorker.get_instance()
+        worker = _get_exif_utils().ExifHandleWorker.get_instance()
     except Exception:
         return {p: {} for p in paths}
     try:
@@ -1821,7 +1875,7 @@ def _fill_meta_from_db(file_path: str, meta: dict) -> dict:
         return out
     record = None
     try:
-        uuid_key = str(EXIF_TAG.Uuid.value)
+        uuid_key = str(_get_exif_utils().EXIF_TAG.Uuid.value)
         uuid_val = _first_non_empty(out.get(uuid_key), _meta_first(out, uuid_key), _meta_first(out, "Uuid"))
         if uuid_val:
             record = db.get_result_by_uuid(str(uuid_val).strip(), table_name="bird_results")
@@ -1842,7 +1896,7 @@ def _fill_meta_from_db(file_path: str, meta: dict) -> dict:
         loc = record.get("location")
         if loc is not None and str(loc).strip():
             v = str(loc).strip()
-            out[str(EXIF_TAG.Location.value)] = v
+            out[str(_get_exif_utils().EXIF_TAG.Location.value)] = v
             out["XMP-bmp:Location"] = v
             out["Xmp-bmp:Location"] = v
     except Exception:
@@ -1869,37 +1923,37 @@ def _fill_meta_from_db(file_path: str, meta: dict) -> dict:
     try:
         obj = record.get("object")
         if obj is not None and str(obj).strip():
-            out[str(EXIF_TAG.Object.value)] = str(obj).strip()
+            out[str(_get_exif_utils().EXIF_TAG.Object.value)] = str(obj).strip()
     except Exception:
         pass
     try:
         o = record.get("order_cls")
         if o is not None and str(o).strip():
-            out[str(EXIF_TAG.OrderCls.value)] = str(o).strip()
+            out[str(_get_exif_utils().EXIF_TAG.OrderCls.value)] = str(o).strip()
     except Exception:
         pass
     try:
         f = record.get("family_cls")
         if f is not None and str(f).strip():
-            out[str(EXIF_TAG.FamilyCls.value)] = str(f).strip()
+            out[str(_get_exif_utils().EXIF_TAG.FamilyCls.value)] = str(f).strip()
     except Exception:
         pass
     try:
         g = record.get("genus_cls")
         if g is not None and str(g).strip():
-            out[str(EXIF_TAG.GenusCls.value)] = str(g).strip()
+            out[str(_get_exif_utils().EXIF_TAG.GenusCls.value)] = str(g).strip()
     except Exception:
         pass
     try:
         s = record.get("species_cls")
         if s is not None and str(s).strip():
-            out[str(EXIF_TAG.SpeciesCls.value)] = str(s).strip()
+            out[str(_get_exif_utils().EXIF_TAG.SpeciesCls.value)] = str(s).strip()
     except Exception:
         pass
     try:
         t = record.get("tags")
         if t is not None and str(t).strip():
-            out[str(EXIF_TAG.Tags.value)] = str(t).strip()
+            out[str(_get_exif_utils().EXIF_TAG.Tags.value)] = str(t).strip()
     except Exception:
         pass
     return out
@@ -1928,15 +1982,15 @@ WATERMARK_TAG_READ_LIST = [
     "FocusDistanceLower",
     "Model",
     "LensModel",
-    str(EXIF_TAG.Location.value),
+    str(_get_exif_utils().EXIF_TAG.Location.value),
     "XMP-bmp:Location",
-    str(EXIF_TAG.OrderCls.value),
-    str(EXIF_TAG.FamilyCls.value),
-    str(EXIF_TAG.GenusCls.value),
-    str(EXIF_TAG.SpeciesCls.value),
-    str(EXIF_TAG.Object.value),
-    str(EXIF_TAG.Uuid.value),
-    str(EXIF_TAG.Fastid.value),
+    str(_get_exif_utils().EXIF_TAG.OrderCls.value),
+    str(_get_exif_utils().EXIF_TAG.FamilyCls.value),
+    str(_get_exif_utils().EXIF_TAG.GenusCls.value),
+    str(_get_exif_utils().EXIF_TAG.SpeciesCls.value),
+    str(_get_exif_utils().EXIF_TAG.Object.value),
+    str(_get_exif_utils().EXIF_TAG.Uuid.value),
+    str(_get_exif_utils().EXIF_TAG.Fastid.value),
     "GPSLatitude",
     "GPSLongitude",
     "GPSLatitudeRef",
@@ -2043,6 +2097,74 @@ class _IgnoreWheelFilter(QObject):
         except Exception:
             pass
         return super().eventFilter(obj, event)
+
+
+class _ZoomableGraphicsView(QGraphicsView):
+    """支持Ctrl+滚轮缩放的GraphicsView"""
+
+    zoom_changed = pyqtSignal(int)  # 缩放值变化信号
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 启用鼠标跟踪
+        self.setMouseTracking(True)
+
+    def wheelEvent(self, event):
+        # 检查是否按下了Ctrl键
+        try:
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                # 获取当前缩放值
+                try:
+                    parent = self.parent()
+                    if parent is None or not hasattr(parent, "slider_preview_zoom"):
+                        try:
+                            parent = self.window()
+                        except Exception:
+                            parent = None
+                        if parent is not None and not hasattr(parent, "slider_preview_zoom"):
+                            try:
+                                p = parent
+                                while p is not None and not hasattr(p, "slider_preview_zoom"):
+                                    p = p.parent()
+                                parent = p
+                            except Exception:
+                                parent = None
+                    if parent is not None and hasattr(parent, "slider_preview_zoom"):
+                        current_zoom = int(parent.slider_preview_zoom.value())
+                    else:
+                        current_zoom = 100
+                except Exception:
+                    current_zoom = 100
+                try:
+                    delta = int(event.angleDelta().y())
+                except Exception:
+                    delta = 0
+                if not delta:
+                    try:
+                        delta = int(event.pixelDelta().y())
+                    except Exception:
+                        delta = 0
+                direction = 1 if delta > 0 else -1
+                step = 5
+                new_zoom = int(current_zoom) + int(direction) * int(step)
+                try:
+                    if parent is not None and hasattr(parent, "slider_preview_zoom"):
+                        z_min = int(parent.slider_preview_zoom.minimum())
+                        z_max = int(parent.slider_preview_zoom.maximum())
+                    else:
+                        z_min, z_max = 25, 400
+                except Exception:
+                    z_min, z_max = 25, 400
+                new_zoom = max(int(z_min), min(int(z_max), int(new_zoom)))
+                # 发送信号更新缩放
+                self.zoom_changed.emit(new_zoom)
+                event.accept()
+                return
+        except Exception:
+            pass
+        # 如果没有按Ctrl，调用父类的wheelEvent（正常滚动）
+        super().wheelEvent(event)
 
 
 class _WatermarkFontSelectDialog(BasePopupDialog):
@@ -2708,16 +2830,29 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         on_interaction=None,
         bg_qimg: QImage | None = None,
         render_requester=None,
+        orig_image_size: QSize | None = None,
+        current_image_index: int = 0,
     ):
         super().__init__()
         self.state = state
         self.image_w = int(max(1, image_size.width()))
         self.image_h = int(max(1, image_size.height()))
+        # 原始图片尺寸（用于归一化坐标计算）
+        # 如果没有提供原始尺寸或尺寸为0，则使用预览尺寸作为默认值
+        if orig_image_size is not None and orig_image_size.width() > 0 and orig_image_size.height() > 0:
+            self.orig_image_w = int(orig_image_size.width())
+            self.orig_image_h = int(orig_image_size.height())
+        else:
+            # 使用预览尺寸作为后备
+            self.orig_image_w = self.image_w
+            self.orig_image_h = self.image_h
         self.on_changed = on_changed
         self.on_selected = on_selected
         self.on_interaction = on_interaction
         self._bg_qimg = bg_qimg if isinstance(bg_qimg, QImage) and not bg_qimg.isNull() else None
         self._render_requester = render_requester
+        # 当前图片索引，用于判断是否是在模板图片上调整位置
+        self._current_image_index = current_image_index
 
         self.setZValue(10)
         self.setPen(QColor(255, 255, 255, 160))
@@ -2727,8 +2862,8 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setTransformOriginPoint(0, 0)
         try:
-            # 拖动时主要是平移，为了避免每帧都重新栅格化复杂内容，开启设备坐标缓存
-            self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            # 拖动/缩放时优先保证重绘区域计算正确，关闭缓存避免残影与叠字
+            self.setCacheMode(QGraphicsItem.CacheMode.NoCache)
         except Exception:
             pass
 
@@ -2816,6 +2951,7 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                             w, h = self._current_rect_wh()
                             cx = float(pos.x()) + float(w) / 2.0
                             cy = float(pos.y()) + float(h) / 2.0
+                            # 使用预览尺寸计算归一化坐标
                             st.x_norm = float(cx) / float(self.image_w)
                             st.y_norm = float(cy) / float(self.image_h)
                             now = float(time.monotonic())
@@ -2872,10 +3008,70 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             y0 = float(self.pos().y())
             cx = x0 + w / 2.0
             cy = y0 + h / 2.0
-            self.state.x_norm = float(cx) / float(self.image_w)
-            self.state.y_norm = float(cy) / float(self.image_h)
-            self.state.w_norm = float(w) / float(self.image_w)
-            self.state.h_norm = float(h) / float(self.image_h)
+            # 判断是否在模板图片上
+            is_template_image = (self._current_image_index == self.state.template_image_index)
+            
+            # 只在模板图片上更新 x_norm 和 y_norm
+            if is_template_image:
+                # 模板图片：更新归一化坐标
+                self.state.x_norm = float(cx) / float(self.image_w)
+                self.state.y_norm = float(cy) / float(self.image_h)
+                self.state.w_norm = float(w) / float(self.image_w)
+                self.state.h_norm = float(h) / float(self.image_h)
+            LogManager.instance().debug(f"[WatermarkItem] _sync_state_from_item: _current_image_index={self._current_image_index}, template_image_index={self.state.template_image_index}, is_template_image={is_template_image}")
+            if is_template_image:
+                # 在模板图片上：记录边距信息
+                # 使用原始图片尺寸来记录边距，这样更加稳定
+                preview_margin_left = x0
+                preview_margin_right = float(self.image_w) - x0 - w
+                preview_margin_top = y0
+                preview_margin_bottom = float(self.image_h) - y0 - h
+                # 缩放到原始图片尺寸，得到实际的边距像素值
+                scale_x = float(self.orig_image_w) / float(self.image_w)
+                scale_y = float(self.orig_image_h) / float(self.image_h)
+                margin_left_orig = preview_margin_left * scale_x
+                margin_right_orig = preview_margin_right * scale_x
+                margin_top_orig = preview_margin_top * scale_y
+                margin_bottom_orig = preview_margin_bottom * scale_y
+                # 记录最近的水平边和对应的边距像素值（原始尺寸）
+                if margin_left_orig <= margin_right_orig:
+                    self.state.nearest_h_edge = "left"
+                    self.state.margin_h_px = margin_left_orig
+                else:
+                    self.state.nearest_h_edge = "right"
+                    self.state.margin_h_px = margin_right_orig
+                # 记录最近的垂直边和对应的边距像素值（原始尺寸）
+                if margin_top_orig <= margin_bottom_orig:
+                    self.state.nearest_v_edge = "top"
+                    self.state.margin_v_px = margin_top_orig
+                else:
+                    self.state.nearest_v_edge = "bottom"
+                    self.state.margin_v_px = margin_bottom_orig
+                # 存储模板图片的原始尺寸（用于计算缩放比例）
+                self.state.template_image_w = int(self.orig_image_w)
+                self.state.template_image_h = int(self.orig_image_h)
+                # 存储参考图片尺寸
+                self.state.ref_image_w = int(self.orig_image_w)
+                self.state.ref_image_h = int(self.orig_image_h)
+                LogManager.instance().debug(f"[WatermarkItem] 记录模板边距(原始尺寸): margin_h_px={self.state.margin_h_px:.1f}, margin_v_px={self.state.margin_v_px:.1f}, nearest_h={self.state.nearest_h_edge}, nearest_v={self.state.nearest_v_edge}")
+                LogManager.instance().debug(f"[WatermarkItem] 模板图片原始尺寸: template_image_w={self.state.template_image_w}, template_image_h={self.state.template_image_h}")
+                # 检查 custom_positions 是否被意外修改
+                current_custom_positions = getattr(self.state, "custom_positions", {})
+                LogManager.instance().debug(f"[WatermarkItem] 模板图片处理后 custom_positions={current_custom_positions}")
+            else:
+                # 在非模板图片上：只记录该图片的自定义位置
+                # 如果已有自定义位置则更新，如果没有则添加
+                if not hasattr(self.state, "custom_positions"):
+                    self.state.custom_positions = {}
+                # 使用当前实际位置计算归一化坐标
+                # 注意：这里使用当前图片的预览尺寸计算
+                custom_x_norm = float(cx) / float(self.image_w)
+                custom_y_norm = float(cy) / float(self.image_h)
+                self.state.custom_positions[str(self._current_image_index)] = {
+                    "x_norm": custom_x_norm,
+                    "y_norm": custom_y_norm,
+                }
+                LogManager.instance().debug(f"[WatermarkItem] 记录自定义位置: 图片{self._current_image_index}, x_norm={custom_x_norm:.4f}, y_norm={custom_y_norm:.4f}")
         except Exception:
             pass
         try:
@@ -2995,8 +3191,129 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
 
     def _update_from_state(self, *, sync_geometry: bool = True):
         st = self.state
-        base_w = max(1.0, float(st.w_norm) * float(self.image_w))
-        base_h = max(1.0, float(getattr(st, "h_norm", st.w_norm)) * float(self.image_h))
+
+        # 判断当前是否是模板图片
+        is_template_image = (self._current_image_index == st.template_image_index)
+        
+        # 调试日志
+        LogManager.instance().debug(f"[WatermarkItem] _update_from_state: _current_image_index={self._current_image_index}, template_image_index={st.template_image_index}, is_template_image={is_template_image}")
+
+        # 如果有边距信息且参考图片尺寸有效，使用边距计算位置
+        ref_w = int(getattr(st, "ref_image_w", 0) or 0)
+        ref_h = int(getattr(st, "ref_image_h", 0) or 0)
+        nearest_h = str(getattr(st, "nearest_h_edge", "") or "")
+        nearest_v = str(getattr(st, "nearest_v_edge", "") or "")
+        # 获取记录的边距像素值（在模板图片上设置的）
+        margin_h_px = float(getattr(st, "margin_h_px", 0.0) or 0.0)
+        margin_v_px = float(getattr(st, "margin_v_px", 0.0) or 0.0)
+        # 获取模板图片尺寸（用于计算缩放比例）
+        template_image_w = int(getattr(st, "template_image_w", 0) or 0)
+        template_image_h = int(getattr(st, "template_image_h", 0) or 0)
+        # 获取自定义位置记录
+        custom_positions = getattr(st, "custom_positions", {}) or {}
+        # 检查当前图片是否有自定义位置
+        current_index_str = str(self._current_image_index)
+        has_custom_position = current_index_str in custom_positions
+
+        # 检查是否有有效的边距信息
+        has_margin_info = (margin_h_px > 0 or margin_v_px > 0) and (nearest_h or nearest_v)
+        
+        # 调试日志
+        LogManager.instance().debug(f"[WatermarkItem] margin_h_px={margin_h_px}, margin_v_px={margin_v_px}, nearest_h={nearest_h}, nearest_v={nearest_v}, has_margin_info={has_margin_info}")
+        LogManager.instance().debug(f"[WatermarkItem] template_image_w={template_image_w}, template_image_h={template_image_h}, orig_image_w={self.orig_image_w}, orig_image_h={self.orig_image_h}")
+        LogManager.instance().debug(f"[WatermarkItem] 当前图片预览尺寸: image_w={self.image_w}, image_h={self.image_h}")
+        LogManager.instance().debug(f"[WatermarkItem] custom_positions={custom_positions}, current_index_str={current_index_str}, has_custom_position={has_custom_position}")
+
+        # 计算水印尺寸（基于预览尺寸）
+        preview_w = max(1.0, float(st.w_norm) * float(self.image_w))
+        preview_h = max(1.0, float(getattr(st, "h_norm", st.w_norm)) * float(self.image_h))
+
+        if is_template_image:
+            # 如果是模板图片，直接使用保存的归一化坐标
+            # 不要根据边距重新计算，以保持用户设置的精确位置
+            LogManager.instance().debug(f"[WatermarkItem] 模板图片，使用保存的坐标 x_norm={st.x_norm}, y_norm={st.y_norm}")
+            # 不修改 st.x_norm 和 st.y_norm，保持原值
+        elif has_custom_position:
+            # 如果当前图片有自定义位置，使用自定义位置
+            custom_pos = custom_positions[current_index_str]
+            custom_x_norm = float(custom_pos.get("x_norm", st.x_norm))
+            custom_y_norm = float(custom_pos.get("y_norm", st.y_norm))
+            # 直接设置位置，不修改状态对象
+            cx = custom_x_norm * float(self.image_w)
+            cy = custom_y_norm * float(self.image_h)
+            x0 = cx - preview_w / 2.0
+            y0 = cy - preview_h / 2.0
+            self.setPos(x0, y0)
+            LogManager.instance().debug(f"[WatermarkItem] 使用自定义位置 x0={x0:.1f}, y0={y0:.1f}")
+            # 验证实际位置
+            actual_pos = self.pos()
+            LogManager.instance().debug(f"[WatermarkItem] 验证实际位置: actual_x={actual_pos.x():.1f}, actual_y={actual_pos.y():.1f}")
+        elif ref_w > 0 and ref_h > 0 and has_margin_info and template_image_w > 0 and template_image_h > 0:
+            # 用户期望：边距使用固定的像素值，只根据面积缩放
+            # 与图片的宽高无关
+            
+            # 计算面积缩放因子
+            template_area = float(template_image_w) * float(template_image_h)
+            current_area = float(self.orig_image_w) * float(self.orig_image_h)
+            area_scale = (current_area / template_area) ** 0.5 if template_area > 0 else 1.0
+            
+            # 边距根据面积缩放（基于原始尺寸）
+            scaled_margin_h = margin_h_px * area_scale
+            scaled_margin_v = margin_v_px * area_scale
+            
+            # 转换到预览尺寸
+            scale_to_preview = float(self.image_w) / float(self.orig_image_w)
+            preview_margin_h = scaled_margin_h * scale_to_preview
+            preview_margin_v = scaled_margin_v * scale_to_preview
+            
+            # 调试日志
+            LogManager.instance().debug(f"[WatermarkItem] 边距计算: area_scale={area_scale:.4f}, margin_h_px={margin_h_px:.1f}, margin_v_px={margin_v_px:.1f}")
+            LogManager.instance().debug(f"[WatermarkItem] 缩放后边距(原始): scaled_margin_h={scaled_margin_h:.1f}, scaled_margin_v={scaled_margin_v:.1f}")
+            LogManager.instance().debug(f"[WatermarkItem] 缩放后边距(预览): preview_margin_h={preview_margin_h:.1f}, preview_margin_v={preview_margin_v:.1f}")
+
+            # 调试：显示水印尺寸
+            LogManager.instance().debug(f"[WatermarkItem] 水印尺寸: preview_w={preview_w:.1f}, preview_h={preview_h:.1f}")
+
+            # 根据最近的水平边计算x位置
+            if nearest_h == "left":
+                x0 = preview_margin_h
+            elif nearest_h == "right":
+                x0 = float(self.image_w) - preview_w - preview_margin_h
+            else:
+                x0 = float(st.x_norm) * float(self.image_w) - preview_w / 2.0
+            # 根据最近的垂直边计算y位置
+            if nearest_v == "top":
+                y0 = preview_margin_v
+            elif nearest_v == "bottom":
+                y0 = float(self.image_h) - preview_h - preview_margin_v
+            else:
+                y0 = float(st.y_norm) * float(self.image_h) - preview_h / 2.0
+            
+            # 调试：显示计算出的位置和实际边距
+            actual_right_margin = float(self.image_w) - x0 - preview_w
+            actual_bottom_margin = float(self.image_h) - y0 - preview_h
+            LogManager.instance().debug(f"[WatermarkItem] 位置: x0={x0:.1f}, y0={y0:.1f}, 实际右边距={actual_right_margin:.1f}, 实际下边距={actual_bottom_margin:.1f}")
+            
+            # 确保位置在有效范围内
+            x0 = max(0.0, min(x0, float(self.image_w) - preview_w))
+            y0 = max(0.0, min(y0, float(self.image_h) - preview_h))
+            
+            # 计算归一化坐标，但不修改共享的 st.x_norm 和 st.y_norm
+            # 以避免影响模板图片的位置
+            cx = x0 + preview_w / 2.0
+            cy = y0 + preview_h / 2.0
+            new_x_norm = float(cx) / float(self.image_w)
+            new_y_norm = float(cy) / float(self.image_h)
+            
+            # 直接设置位置，不修改状态对象
+            self.setPos(x0, y0)
+            LogManager.instance().debug(f"[WatermarkItem] 计算后位置: new_x_norm={new_x_norm:.4f}, new_y_norm={new_y_norm:.4f}")
+            # 注意：不再更新 st.x_norm 和 st.y_norm，避免影响模板图片
+        
+        # 计算预览尺寸上的水印尺寸
+        preview_w = max(1.0, float(st.w_norm) * float(self.image_w))
+        preview_h = max(1.0, float(getattr(st, "h_norm", st.w_norm)) * float(self.image_h))
+        
         if st.kind == "text":
             txt = str(st.text or "")
             if self._content_pix is None:
@@ -3005,7 +3322,7 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                     self._content_pix.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                     self._content_pix.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                     self._content_pix.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
-                    self._content_pix.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                    self._content_pix.setCacheMode(QGraphicsItem.CacheMode.NoCache)
                 except Exception:
                     pass
             if self._content_text is not None:
@@ -3020,10 +3337,11 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 mode = "custom"
             if mode == "auto" and self._bg_qimg is not None:
                 try:
+                    # 使用预览尺寸计算位置
                     cx = float(st.x_norm) * float(self.image_w)
                     cy = float(st.y_norm) * float(self.image_h)
-                    bw = float(base_w)
-                    bh = float(base_h)
+                    bw = float(preview_w)
+                    bh = float(preview_h)
                     box = int(max(8, min(96, min(bw, bh))))
                     x0 = int(max(0, min(self.image_w - 1, round(cx - box / 2.0))))
                     y0 = int(max(0, min(self.image_h - 1, round(cy - box / 2.0))))
@@ -3033,13 +3351,14 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                         sub = self._bg_qimg.copy(int(x0), int(y0), int(x1 - x0), int(y1 - y0)).convertToFormat(QImage.Format.Format_ARGB32)
                         ptr = sub.bits()
                         ptr.setsize(sub.sizeInBytes())
-                        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((int(sub.height()), int(sub.width()), 4))
-                        bgr = arr[:, :, :3].astype(np.float32)
+                        arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((int(sub.height()), int(sub.width()), 4))
+                        bgr = arr[:, :, :3].astype(_get_np().float32)
                         lum = float((0.114 * bgr[:, :, 0] + 0.587 * bgr[:, :, 1] + 0.299 * bgr[:, :, 2]).mean())
                         rgb = 0 if lum >= 140.0 else 255
                         rgba = [int(rgb), int(rgb), int(rgb), int(rgba[3])]
                 except Exception:
                     pass
+            # 字体大小保持统一，不根据图片尺寸缩放
             try:
                 font_px = int(max(10, int(getattr(st, "font_point_size", 24) or 24)))
             except Exception:
@@ -3082,9 +3401,9 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             elif not shadow_rgba:
                 shadow_rgba = [0, 0, 0, 153]
             try:
-                shadow_dir = str(getattr(st, "shadow_dir", "右下") or "右下")
+                shadow_angle = int(getattr(st, "shadow_angle", 45) or 45)
             except Exception:
-                shadow_dir = "右下"
+                shadow_angle = 45
             try:
                 shadow_dist = int(max(0, int(getattr(st, "shadow_distance", 4) or 4)))
             except Exception:
@@ -3096,23 +3415,15 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             unit = 1
             if effect_mode in ("mirror", "stack"):
                 shadow_dist = unit
-            dx, dy = 0, 0
-            if shadow_dir == "右下":
-                dx, dy = shadow_dist, shadow_dist
-            elif shadow_dir == "左下":
-                dx, dy = -shadow_dist, shadow_dist
-            elif shadow_dir == "右上":
-                dx, dy = shadow_dist, -shadow_dist
-            elif shadow_dir == "左上":
-                dx, dy = -shadow_dist, -shadow_dist
-            elif shadow_dir == "上":
-                dx, dy = 0, -shadow_dist
-            elif shadow_dir == "下":
-                dx, dy = 0, shadow_dist
-            elif shadow_dir == "左":
-                dx, dy = -shadow_dist, 0
-            elif shadow_dir == "右":
-                dx, dy = shadow_dist, 0
+            # 使用角度计算方向（0度=右，90度=下，180度=左，270度=上）
+            import math
+            angle_rad = math.radians(shadow_angle)
+            dx = int(shadow_dist * math.cos(angle_rad))
+            dy = int(shadow_dist * math.sin(angle_rad))
+            try:
+                mirror_dir_preview = float(getattr(st, "mirror_angle_deg", 90.0) or 90.0)
+            except Exception:
+                mirror_dir_preview = 90.0
             if effect_mode == "beam" and shadow_enabled and int(getattr(st, "shadow_distance", 0) or 0) <= 0:
                 shadow_enabled = False
             try:
@@ -3138,17 +3449,16 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 bool(shadow_enabled),
                 bool(shadow_follow),
                 tuple(int(x) for x in (shadow_rgba or [0, 0, 0, 153])[:4]),
-                str(shadow_dir),
+                int(shadow_angle),
                 int(shadow_dist),
                 int(shadow_range),
                 str(effect_mode),
                 int(getattr(st, "mirror_gap_px", 0) or 0),
-<<<<<<< HEAD
-                int(getattr(st, "mirror_angle_deg", 180) or 180),
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+                int(mirror_dir_preview),
+                int(getattr(st, "shadow_tilt_angle", 180) or 0),
                 int(getattr(st, "stack_count", 3) or 0),
                 int(getattr(st, "stack_step_px", 2) or 0),
+                int(getattr(st, "letter_spacing", 0) or 0),
             )
             if key != self._render_key:
                 self._render_key = key
@@ -3175,12 +3485,11 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                     "shadow_range": int(shadow_range),
                     "shadow_style": str(shadow_style),
                     "mirror_gap_px": int(getattr(st, "mirror_gap_px", 0) or 0),
-<<<<<<< HEAD
-                    "mirror_angle_deg": float(getattr(st, "mirror_angle_deg", 180) or 180),
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+                    "mirror_angle_deg": float(mirror_dir_preview),
+                    "shadow_tilt_angle": int(getattr(st, "shadow_tilt_angle", 180) or 0),
                     "stack_count": int(getattr(st, "stack_count", 3) or 0),
                     "stack_step_px": int(getattr(st, "stack_step_px", 2) or 0),
+                    "letter_spacing": int(getattr(st, "letter_spacing", 0) or 0),
                 }
                 try:
                     if self._render_requester is not None and hasattr(self._render_requester, "_queue_text_patch_render"):
@@ -3188,9 +3497,9 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 except Exception:
                     pass
             if self._content_pix.pixmap().isNull():
-                self.setRect(0, 0, float(base_w), float(base_h))
+                self.setRect(0, 0, float(preview_w), float(preview_h))
                 try:
-                    self.setTransformOriginPoint(float(base_w) / 2.0, float(base_h) / 2.0)
+                    self.setTransformOriginPoint(float(preview_w) / 2.0, float(preview_h) / 2.0)
                     self._content_pix.setPos(0.0, 0.0)
                 except Exception:
                     pass
@@ -3219,11 +3528,11 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             if self._content_pix is None:
                 self._content_pix = QGraphicsPixmapItem(self)
                 try:
-                    self._content_pix.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+                    self._content_pix.setCacheMode(QGraphicsItem.CacheMode.NoCache)
                 except Exception:
                     pass
-            target_w = int(max(1, round(base_w)))
-            target_h = int(max(1, round(base_h)))
+            target_w = int(max(1, round(preview_w)))
+            target_h = int(max(1, round(preview_h)))
             try:
                 me = bool(getattr(st, "mirror_effect", False))
             except Exception:
@@ -3282,12 +3591,24 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 self.setRotation(float(st.rotation_deg))
             except Exception:
                 pass
-            cx = float(st.x_norm) * float(self.image_w)
-            cy = float(st.y_norm) * float(self.image_h)
-            w, h = self._current_rect_wh()
-            x0 = float(cx - w / 2.0)
-            y0 = float(cy - h / 2.0)
-            self.setPos(float(x0), float(y0))
+            # 只在非模板图片且没有自定义位置时，才使用 st.x_norm 和 st.y_norm 设置位置
+            # 否则保持之前设置的位置（自定义位置或边距计算位置）
+            is_template_image = (self._current_image_index == st.template_image_index)
+            custom_positions = getattr(st, "custom_positions", {}) or {}
+            has_custom_position = str(self._current_image_index) in custom_positions
+            
+            if is_template_image or not has_custom_position:
+                # 使用预览尺寸计算显示位置
+                cx = float(st.x_norm) * float(self.image_w)
+                cy = float(st.y_norm) * float(self.image_h)
+                w, h = self._current_rect_wh()
+                x0 = float(cx - w / 2.0)
+                y0 = float(cy - h / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] sync_geometry 设置位置: x0={x0:.1f}, y0={y0:.1f}")
+            else:
+                LogManager.instance().debug(f"[WatermarkItem] sync_geometry 跳过位置设置（已有自定义位置）")
+            
             self._update_handles()
             try:
                 for hdl in self._handles.values():
@@ -3301,7 +3622,7 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 return
         except Exception:
             return
-        if patch is None or not isinstance(patch, np.ndarray) or patch.ndim != 3 or patch.shape[2] < 4:
+        if patch is None or not isinstance(patch, _get_np().ndarray) or patch.ndim != 3 or patch.shape[2] < 4:
             return
         if self._content_pix is None:
             self._content_pix = QGraphicsPixmapItem(self)
@@ -3334,22 +3655,35 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 mode = str(getattr(self.state, "effect_mode", "none") or "none").strip().lower()
             except Exception:
                 mode = "none"
-            if mode == "mirror":
-                thr = 4
-                try:
-                    srng = int(getattr(self.state, "shadow_range", 0) or 0)
-                except Exception:
-                    srng = 0
-                pad = int(6 + round(max(0, min(100, srng)) / 100.0 * 18.0))
-            mask = a >= np.uint8(int(max(0, min(255, thr))))
-            if bool(mask.any()):
-                ys = np.where(np.any(mask, axis=1))[0]
-                xs = np.where(np.any(mask, axis=0))[0]
-                if ys.size > 0 and xs.size > 0:
-                    y0i = int(ys[0])
-                    y1i = int(ys[-1] + 1)
-                    x0i = int(xs[0])
-                    x1i = int(xs[-1] + 1)
+            if mode == "stack":
+                x0i, y0i, x1i, y1i = 0, 0, int(w), int(h)
+                pad = 0
+            else:
+                # 选择框需要包含阴影范围，否则阴影“看起来像被边框截断”
+                # 这里通过降低透明度阈值 + 增大 padding，让边框更贴合包含阴影的整体外接矩形
+                if mode in ("beam", "trail"):
+                    thr = 4
+                    try:
+                        srng = int(getattr(self.state, "shadow_range", 0) or 0)
+                    except Exception:
+                        srng = 0
+                    pad = int(max(10, 12 + round(max(0, min(100, srng)) / 100.0 * 140.0)))
+                if mode == "mirror":
+                    thr = 4
+                    try:
+                        srng = int(getattr(self.state, "shadow_range", 0) or 0)
+                    except Exception:
+                        srng = 0
+                    pad = int(6 + round(max(0, min(100, srng)) / 100.0 * 18.0))
+                mask = a >= _get_np().uint8(int(max(0, min(255, thr))))
+                if bool(mask.any()):
+                    ys = _get_np().where(_get_np().any(mask, axis=1))[0]
+                    xs = _get_np().where(_get_np().any(mask, axis=0))[0]
+                    if ys.size > 0 and xs.size > 0:
+                        y0i = int(ys[0])
+                        y1i = int(ys[-1] + 1)
+                        x0i = int(xs[0])
+                        x1i = int(xs[-1] + 1)
         except Exception:
             x0i, y0i, x1i, y1i = 0, 0, int(w), int(h)
         try:
@@ -3365,14 +3699,30 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         self.setTransformOriginPoint(float(rect_w) / 2.0, float(rect_h) / 2.0)
         self._content_pix.setPos(float(-x0i), float(-y0i))
         try:
-            cx = float(self.state.x_norm) * float(self.image_w)
-            cy = float(self.state.y_norm) * float(self.image_h)
-            x0 = float(cx - float(rect_w) / 2.0)
-            y0 = float(cy - float(rect_h) / 2.0)
-            self.setPos(float(x0), float(y0))
+            # 只在非模板图片且没有自定义位置时，才使用 st.x_norm 和 st.y_norm 设置位置
+            # 否则保持当前位置（自定义位置或边距计算位置）
+            st = self.state
+            is_template_image = (self._current_image_index == st.template_image_index)
+            custom_positions = getattr(st, "custom_positions", {}) or {}
+            has_custom_position = str(self._current_image_index) in custom_positions
+            
+            if is_template_image or not has_custom_position:
+                # 使用预览尺寸计算显示位置
+                cx = float(st.x_norm) * float(self.image_w)
+                cy = float(st.y_norm) * float(self.image_h)
+                x0 = float(cx - float(rect_w) / 2.0)
+                y0 = float(cy - float(rect_h) / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] _apply_text_patch 设置位置: x0={x0:.1f}, y0={y0:.1f}")
+            else:
+                LogManager.instance().debug(f"[WatermarkItem] _apply_text_patch 跳过位置设置（已有自定义位置）")
         except Exception:
             pass
         self._update_handles()
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def _apply_image_qimg(self, token: int, qimg: object):
         try:
@@ -3420,14 +3770,29 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         except Exception:
             pass
         try:
-            cx = float(self.state.x_norm) * float(self.image_w)
-            cy = float(self.state.y_norm) * float(self.image_h)
-            x0 = float(cx - float(base_w) / 2.0)
-            y0 = float(cy - float(base_h) / 2.0)
-            self.setPos(float(x0), float(y0))
+            # 只在非模板图片且没有自定义位置时，才使用 st.x_norm 和 st.y_norm 设置位置
+            # 否则保持当前位置（自定义位置或边距计算位置）
+            st = self.state
+            is_template_image = (self._current_image_index == st.template_image_index)
+            custom_positions = getattr(st, "custom_positions", {}) or {}
+            has_custom_position = str(self._current_image_index) in custom_positions
+            
+            if is_template_image or not has_custom_position:
+                cx = float(st.x_norm) * float(self.image_w)
+                cy = float(st.y_norm) * float(self.image_h)
+                x0 = float(cx - float(base_w) / 2.0)
+                y0 = float(cy - float(base_h) / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] _apply_image_qimg 设置位置: x0={x0:.1f}, y0={y0:.1f}")
+            else:
+                LogManager.instance().debug(f"[WatermarkItem] _apply_image_qimg 跳过位置设置（已有自定义位置）")
         except Exception:
             pass
         self._update_handles()
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def _on_handle_press(self, _corner: str, scene_pos):
         try:
@@ -3528,6 +3893,7 @@ class WatermarkState:
     font_bold: bool = False
     font_italic: bool = False
     font_underline: bool = False
+    letter_spacing: int = 0
     color_rgba: list = None
     color_mode: str = "custom"
     stroke_enabled: bool = False
@@ -3536,20 +3902,35 @@ class WatermarkState:
     shadow_enabled: bool = False
     shadow_follow_color: bool = True
     shadow_rgba: list = None
-    shadow_dir: str = "右下"
+    shadow_angle: int = 45
     shadow_distance: int = 4
     shadow_range: int = 0
+    shadow_tilt_angle: int = 180
     effect_mode: str = "none"
     mirror_effect: bool = False
     mirror_gap_px: int = 0
-<<<<<<< HEAD
-    mirror_angle_deg: int = 180
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+    mirror_angle_deg: int = 90
     stack_count: int = 3
     stack_step_px: int = 2
     image_path: str = ""
     svg_raster_path: str = ""
+    ref_image_w: int = 0
+    ref_image_h: int = 0
+    # 记录模板图片索引（在该图片上调整位置时会更新边距记录）
+    template_image_index: int = 0
+    # 记录最近的水平边和垂直边（"left"/"right", "top"/"bottom"）
+    nearest_h_edge: str = ""  # 水平方向最近的边
+    nearest_v_edge: str = ""  # 垂直方向最近的边
+    # 记录模板图片上的边距像素值（在模板图片上设置）
+    # 切换到其他图片时，根据图片尺寸比例缩放，保持边距比例一致
+    margin_h_px: float = 0.0  # 水平方向边距像素值（根据 nearest_h_edge 决定是左边距还是右边距）
+    margin_v_px: float = 0.0  # 垂直方向边距像素值（根据 nearest_v_edge 决定是顶边距还是底边距）
+    # 记录模板图片的尺寸（用于计算缩放比例）
+    template_image_w: int = 0
+    template_image_h: int = 0
+    # 存储每个非模板图片的自定义位置（图片索引 -> 归一化坐标）
+    # 格式: {图片索引: {"x_norm": float, "y_norm": float}}
+    custom_positions: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -3572,6 +3953,7 @@ class WatermarkState:
             "font_bold": bool(self.font_bold),
             "font_italic": bool(self.font_italic),
             "font_underline": bool(self.font_underline),
+            "letter_spacing": int(getattr(self, "letter_spacing", 0) or 0),
             "color_rgba": list(self.color_rgba or [255, 255, 255, 200]),
             "color_mode": str(getattr(self, "color_mode", "custom") or "custom"),
             "stroke_enabled": bool(getattr(self, "stroke_enabled", False)),
@@ -3580,20 +3962,28 @@ class WatermarkState:
             "shadow_enabled": bool(getattr(self, "shadow_enabled", False)),
             "shadow_follow_color": bool(getattr(self, "shadow_follow_color", True)),
             "shadow_rgba": list(getattr(self, "shadow_rgba", None) or []),
-            "shadow_dir": str(getattr(self, "shadow_dir", "右下") or "右下"),
+            "shadow_angle": int(getattr(self, "shadow_angle", 45) or 45),
             "shadow_distance": int(getattr(self, "shadow_distance", 4) or 0),
             "shadow_range": int(getattr(self, "shadow_range", 0) or 0),
+            "shadow_tilt_angle": int(getattr(self, "shadow_tilt_angle", 180) or 0),
             "effect_mode": str(getattr(self, "effect_mode", "none") or "none"),
             "mirror_effect": bool(getattr(self, "mirror_effect", False)),
-            "mirror_gap_px": int(getattr(self, "mirror_gap_px", 0) or 0),
-<<<<<<< HEAD
-            "mirror_angle_deg": int(getattr(self, "mirror_angle_deg", 180) or 180),
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+            "mirror_gap_px": int(0 if getattr(self, "mirror_gap_px", None) is None else getattr(self, "mirror_gap_px")),
+            "mirror_angle_deg": int(90 if getattr(self, "mirror_angle_deg", None) is None else getattr(self, "mirror_angle_deg")),
             "stack_count": int(getattr(self, "stack_count", 3) or 0),
             "stack_step_px": int(getattr(self, "stack_step_px", 2) or 0),
             "image_path": str(self.image_path or ""),
             "svg_raster_path": str(self.svg_raster_path or ""),
+            "ref_image_w": int(getattr(self, "ref_image_w", 0) or 0),
+            "ref_image_h": int(getattr(self, "ref_image_h", 0) or 0),
+            "template_image_index": int(getattr(self, "template_image_index", 0) or 0),
+            "nearest_h_edge": str(getattr(self, "nearest_h_edge", "") or ""),
+            "nearest_v_edge": str(getattr(self, "nearest_v_edge", "") or ""),
+            "margin_h_px": float(getattr(self, "margin_h_px", 0.0) or 0.0),
+            "margin_v_px": float(getattr(self, "margin_v_px", 0.0) or 0.0),
+            "template_image_w": int(getattr(self, "template_image_w", 0) or 0),
+            "template_image_h": int(getattr(self, "template_image_h", 0) or 0),
+            "custom_positions": dict(getattr(self, "custom_positions", None) or {}),
         }
 
     @staticmethod
@@ -3621,6 +4011,10 @@ class WatermarkState:
         st.font_bold = bool(d.get("font_bold", False))
         st.font_italic = bool(d.get("font_italic", False))
         st.font_underline = bool(d.get("font_underline", False))
+        try:
+            st.letter_spacing = int(d.get("letter_spacing") or 0)
+        except Exception:
+            st.letter_spacing = 0
         st.color_rgba = list(d.get("color_rgba") or [255, 255, 255, 200])
         st.color_mode = str(d.get("color_mode") or "custom")
         st.stroke_enabled = bool(d.get("stroke_enabled", False))
@@ -3629,9 +4023,20 @@ class WatermarkState:
         st.shadow_enabled = bool(d.get("shadow_enabled", False))
         st.shadow_follow_color = bool(d.get("shadow_follow_color", True))
         st.shadow_rgba = list(d.get("shadow_rgba") or [])
-        st.shadow_dir = str(d.get("shadow_dir") or "右下")
+        st.shadow_angle = int(d.get("shadow_angle") or 45)
         st.shadow_distance = int(d.get("shadow_distance") or 4)
         st.shadow_range = int(d.get("shadow_range") or 0)
+        try:
+            if d.get("shadow_tilt_angle") is not None:
+                st.shadow_tilt_angle = int(d.get("shadow_tilt_angle") or 0)
+            else:
+                st.shadow_tilt_angle = 180
+        except Exception:
+            st.shadow_tilt_angle = 180
+        try:
+            st.shadow_tilt_angle = int(max(0, min(180, int(st.shadow_tilt_angle))))
+        except Exception:
+            st.shadow_tilt_angle = 180
         try:
             if d.get("effect_mode") is not None:
                 st.effect_mode = str(d.get("effect_mode") or "none")
@@ -3642,27 +4047,23 @@ class WatermarkState:
         st.mirror_effect = bool(d.get("mirror_effect", False))
         try:
             if d.get("mirror_gap_px") is not None:
-                st.mirror_gap_px = int(d.get("mirror_gap_px") or 0)
+                st.mirror_gap_px = int(d.get("mirror_gap_px"))
             else:
-                st.mirror_gap_px = int(d.get("mirror_gap_percent") or 0)
+                if d.get("mirror_gap_percent") is not None:
+                    st.mirror_gap_px = int(d.get("mirror_gap_percent") or 0)
+                else:
+                    st.mirror_gap_px = 0
         except Exception:
             st.mirror_gap_px = 0
         try:
-            st.mirror_gap_px = int(max(0, min(200, int(st.mirror_gap_px))))
+            st.mirror_gap_px = int(max(0, min(50000, int(st.mirror_gap_px))))
         except Exception:
             st.mirror_gap_px = 0
         try:
-<<<<<<< HEAD
-            st.mirror_angle_deg = int(d.get("mirror_angle_deg") if d.get("mirror_angle_deg") is not None else 180)
+            st.mirror_angle_deg = 90
         except Exception:
-            st.mirror_angle_deg = 180
+            st.mirror_angle_deg = 90
         try:
-            st.mirror_angle_deg = int(max(0, min(180, int(st.mirror_angle_deg))))
-        except Exception:
-            st.mirror_angle_deg = 180
-        try:
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             st.stack_count = int(d.get("stack_count") or 3)
         except Exception:
             st.stack_count = 3
@@ -3680,6 +4081,50 @@ class WatermarkState:
             st.stack_step_px = 2
         st.image_path = str(d.get("image_path") or "")
         st.svg_raster_path = str(d.get("svg_raster_path") or "")
+        try:
+            # 兼容旧数据：ref_image_long_edge -> ref_image_w, ref_image_h
+            if d.get("ref_image_w") is not None and d.get("ref_image_h") is not None:
+                st.ref_image_w = int(d.get("ref_image_w") or 0)
+                st.ref_image_h = int(d.get("ref_image_h") or 0)
+            elif d.get("ref_image_long_edge") is not None:
+                old_val = int(d.get("ref_image_long_edge") or 0)
+                st.ref_image_w = old_val
+                st.ref_image_h = old_val
+        except Exception:
+            st.ref_image_w = 0
+            st.ref_image_h = 0
+        try:
+            st.template_image_index = int(d.get("template_image_index", 0) or 0)
+        except Exception:
+            st.template_image_index = 0
+        try:
+            st.nearest_h_edge = str(d.get("nearest_h_edge") or "")
+        except Exception:
+            st.nearest_h_edge = ""
+        try:
+            st.nearest_v_edge = str(d.get("nearest_v_edge") or "")
+        except Exception:
+            st.nearest_v_edge = ""
+        try:
+            st.margin_h_px = float(d.get("margin_h_px") or 0.0)
+        except Exception:
+            st.margin_h_px = 0.0
+        try:
+            st.margin_v_px = float(d.get("margin_v_px") or 0.0)
+        except Exception:
+            st.margin_v_px = 0.0
+        try:
+            st.template_image_w = int(d.get("template_image_w") or 0)
+        except Exception:
+            st.template_image_w = 0
+        try:
+            st.template_image_h = int(d.get("template_image_h") or 0)
+        except Exception:
+            st.template_image_h = 0
+        try:
+            st.custom_positions = dict(d.get("custom_positions") or {})
+        except Exception:
+            st.custom_positions = {}
         try:
             if str(st.image_path or "").lower().endswith(".svg"):
                 rp = _ensure_svg_raster_cache(st.image_path)
@@ -3762,8 +4207,8 @@ class _WatermarkBatchTask(QRunnable):
             pass
         return resolved
 
-    def _compose_on_image(self, img_bgr: np.ndarray, states: List[WatermarkState], angle_offset: float = 0.0, meta: dict | None = None) -> np.ndarray:
-        if img_bgr is None or not isinstance(img_bgr, np.ndarray):
+    def _compose_on_image(self, img_bgr: _get_np().ndarray, states: List[WatermarkState], angle_offset: float = 0.0, meta: dict | None = None) -> _get_np().ndarray:
+        if img_bgr is None or not isinstance(img_bgr, _get_np().ndarray):
             return img_bgr
         if meta is None or not isinstance(meta, dict):
             meta = {}
@@ -3782,11 +4227,41 @@ class _WatermarkBatchTask(QRunnable):
         for st in states:
             if not st.visible:
                 continue
-            cx = float(st.x_norm) * float(w)
-            cy = float(st.y_norm) * float(h)
+            # 计算水印尺寸
             target_w = max(1.0, float(st.w_norm) * float(w))
             target_h = max(1.0, float(getattr(st, "h_norm", st.w_norm)) * float(h))
             angle = float(st.rotation_deg) + float(angle_offset or 0.0)
+            
+            # 计算基于参考图片尺寸的缩放比例
+            ref_w = int(getattr(st, "ref_image_w", 0) or 0)
+            ref_h = int(getattr(st, "ref_image_h", 0) or 0)
+            ref_long_edge = max(ref_w, ref_h) if ref_w > 0 and ref_h > 0 else 0
+            cur_long_edge = max(w, h)
+            size_scale_ratio = 1.0
+            if ref_long_edge > 0 and cur_long_edge > 0:
+                size_scale_ratio = float(cur_long_edge) / float(ref_long_edge)
+            
+            # 使用边距计算位置（如果有的话）
+            margin_right = float(getattr(st, "margin_right_px", 0.0) or 0.0)
+            margin_bottom = float(getattr(st, "margin_bottom_px", 0.0) or 0.0)
+            
+            if ref_w > 0 and ref_h > 0 and (margin_right > 0 or margin_bottom > 0):
+                # 使用边距计算位置：保持距离右边和底边的距离不变
+                scale_x = float(w) / float(ref_w)
+                scale_y = float(h) / float(ref_h)
+                scaled_margin_right = margin_right * scale_x
+                scaled_margin_bottom = margin_bottom * scale_y
+                x0 = float(w) - target_w - scaled_margin_right
+                y0 = float(h) - target_h - scaled_margin_bottom
+                x0 = max(0.0, min(x0, float(w) - target_w))
+                y0 = max(0.0, min(y0, float(h) - target_h))
+                cx = x0 + target_w / 2.0
+                cy = y0 + target_h / 2.0
+            else:
+                # 使用归一化坐标计算位置
+                cx = float(st.x_norm) * float(w)
+                cy = float(st.y_norm) * float(h)
+            
             if st.kind == "text":
                 txt = self._resolve_text_for_meta(st, meta)
                 if not txt:
@@ -3807,13 +4282,18 @@ class _WatermarkBatchTask(QRunnable):
                         y1b = int(max(0, min(h, y0b + box)))
                         if x1b > x0b and y1b > y0b:
                             roi_bg = out[int(y0b):int(y1b), int(x0b):int(x1b)]
-                            if roi_bg is not None and isinstance(roi_bg, np.ndarray) and roi_bg.size > 0 and roi_bg.ndim == 3:
-                                bgr = roi_bg[:, :, :3].astype(np.float32)
+                            if roi_bg is not None and isinstance(roi_bg, _get_np().ndarray) and roi_bg.size > 0 and roi_bg.ndim == 3:
+                                bgr = roi_bg[:, :, :3].astype(_get_np().float32)
                                 lum = float((0.114 * bgr[:, :, 0] + 0.587 * bgr[:, :, 1] + 0.299 * bgr[:, :, 2]).mean())
                                 rgb = 0 if lum >= 140.0 else 255
                                 rgba = [int(rgb), int(rgb), int(rgb), int(rgba[3])]
                     except Exception:
                         pass
+                try:
+                    item_opacity = max(0.0, min(1.0, float(int(rgba[3])) / 255.0))
+                except Exception:
+                    item_opacity = 1.0
+                render_rgba = [int(rgba[0]), int(rgba[1]), int(rgba[2]), 255]
                 try:
                     font_px = int(getattr(st, "font_point_size", 0) or 0)
                 except Exception:
@@ -3825,8 +4305,9 @@ class _WatermarkBatchTask(QRunnable):
                         font_px = 0
                 if int(font_px) <= 0:
                     font_px = 24
+                # 应用图片尺寸缩放和预览缩放
                 try:
-                    font_px = int(round(float(font_px) * float(preview_scale_ratio)))
+                    font_px = int(round(float(font_px) * float(size_scale_ratio) * float(preview_scale_ratio)))
                 except Exception:
                     pass
                 font_px = max(10, int(font_px))
@@ -3843,7 +4324,7 @@ class _WatermarkBatchTask(QRunnable):
                 except Exception:
                     stroke_rgba = []
                 if not stroke_rgba:
-                    stroke_rgba = [0, 0, 0, int(rgba[3])]
+                    stroke_rgba = [0, 0, 0, 255]
                 try:
                     shadow_enabled = bool(getattr(st, "shadow_enabled", False))
                 except Exception:
@@ -3864,13 +4345,13 @@ class _WatermarkBatchTask(QRunnable):
                 except Exception:
                     shadow_rgba = []
                 if shadow_follow:
-                    shadow_rgba = [int(rgba[0]), int(rgba[1]), int(rgba[2]), int(max(0, min(255, round(int(rgba[3]) * 0.6))))]
+                    shadow_rgba = [int(rgba[0]), int(rgba[1]), int(rgba[2]), 153]
                 elif not shadow_rgba:
-                    shadow_rgba = [0, 0, 0, int(max(0, min(255, round(int(rgba[3]) * 0.6))))]
+                    shadow_rgba = [0, 0, 0, 153]
                 try:
-                    shadow_dir = str(getattr(st, "shadow_dir", "右下") or "右下")
+                    shadow_angle = int(getattr(st, "shadow_angle", 45) or 45)
                 except Exception:
-                    shadow_dir = "右下"
+                    shadow_angle = 45
                 try:
                     shadow_dist = int(max(0, int(getattr(st, "shadow_distance", 4) or 4)))
                 except Exception:
@@ -3879,30 +4360,32 @@ class _WatermarkBatchTask(QRunnable):
                     shadow_range = int(getattr(st, "shadow_range", 0) or 0)
                 except Exception:
                     shadow_range = 0
+                # 镜像和堆叠效果也需要使用有意义的距离值来确定方向
+                # 但对于这些效果，距离值只用于确定方向，不影响实际间距
                 if effect_mode in ("mirror", "stack"):
-                    shadow_dist = 1
-                dx, dy = 0, 0
-                if shadow_dir == "右下":
-                    dx, dy = shadow_dist, shadow_dist
-                elif shadow_dir == "左下":
-                    dx, dy = -shadow_dist, shadow_dist
-                elif shadow_dir == "右上":
-                    dx, dy = shadow_dist, -shadow_dist
-                elif shadow_dir == "左上":
-                    dx, dy = -shadow_dist, -shadow_dist
-                elif shadow_dir == "上":
-                    dx, dy = 0, -shadow_dist
-                elif shadow_dir == "下":
-                    dx, dy = 0, shadow_dist
-                elif shadow_dir == "左":
-                    dx, dy = -shadow_dist, 0
-                elif shadow_dir == "右":
-                    dx, dy = shadow_dist, 0
+                    shadow_dist = max(1, shadow_dist)
+                # 使用角度计算方向（0度=右，90度=下，180度=左，270度=上）
+                import math
+                angle_rad = math.radians(shadow_angle)
+                dx = int(shadow_dist * math.cos(angle_rad))
+                dy = int(shadow_dist * math.sin(angle_rad))
                 if effect_mode == "beam" and shadow_enabled and int(getattr(st, "shadow_distance", 0) or 0) <= 0:
                     shadow_enabled = False
                 shadow_style = "none"
                 if shadow_enabled and effect_mode in ("beam", "mirror", "stack"):
                     shadow_style = str(effect_mode)
+                try:
+                    mirror_gap_px = int(getattr(st, "mirror_gap_px", 0) or 0)
+                except Exception:
+                    mirror_gap_px = 0
+                try:
+                    mirror_gap_px = int(max(0, int(round(float(mirror_gap_px) * float(preview_scale_ratio)))))
+                except Exception:
+                    mirror_gap_px = int(max(0, int(mirror_gap_px)))
+                try:
+                    mirror_dir = 90.0
+                except Exception:
+                    mirror_dir = 90.0
                 patch = _render_text_patch_to_bgra_safe(
                     str(txt),
                     str(getattr(st, "font_family", "") or ""),
@@ -3910,7 +4393,7 @@ class _WatermarkBatchTask(QRunnable):
                     bold=bool(getattr(st, "font_bold", False)),
                     italic=bool(getattr(st, "font_italic", False)),
                     underline=bool(getattr(st, "font_underline", False)),
-                    rgba=[int(rgba[0]), int(rgba[1]), int(rgba[2]), int(rgba[3])],
+                    rgba=list(render_rgba),
                     # 旋转方向需与预览保持一致（预览使用 QGraphicsItem.setRotation(st.rotation_deg)）
                     angle_deg=float(angle),
                     # 提高超采样倍率，降低斜线/曲线边缘锯齿（尤其在旋转与小字号时更明显）
@@ -3921,15 +4404,13 @@ class _WatermarkBatchTask(QRunnable):
                     shadow_rgba=[int(shadow_rgba[0]), int(shadow_rgba[1]), int(shadow_rgba[2]), int(shadow_rgba[3])] if shadow_enabled else None,
                     shadow_range=int(shadow_range),
                     shadow_style=str(shadow_style),
-                    mirror_gap_px=int(getattr(st, "mirror_gap_px", 0) or 0),
-<<<<<<< HEAD
-                    mirror_angle_deg=float(getattr(st, "mirror_angle_deg", 180) or 180),
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+                    mirror_gap_px=int(mirror_gap_px),
+                    mirror_angle_deg=float(mirror_dir),
+                    shadow_tilt_angle=int(getattr(st, "shadow_tilt_angle", 180) or 180),
                     stack_count=int(getattr(st, "stack_count", 3) or 0),
                     stack_step_px=int(getattr(st, "stack_step_px", 2) or 0),
                 )
-                if patch is None or not isinstance(patch, np.ndarray):
+                if patch is None or not isinstance(patch, _get_np().ndarray):
                     continue
                 if patch.ndim != 3 or patch.shape[2] < 4:
                     continue
@@ -3957,11 +4438,13 @@ class _WatermarkBatchTask(QRunnable):
                 if patch_roi.size == 0:
                     continue
                 try:
-                    alpha = patch_roi[:, :, 3:4].astype(np.float32) / 255.0
-                    fg = patch_roi[:, :, :3].astype(np.float32)
-                    bg = roi.astype(np.float32)
+                    alpha = patch_roi[:, :, 3:4].astype(_get_np().float32) / 255.0
+                    if float(item_opacity) < 0.999999:
+                        alpha = alpha * float(item_opacity)
+                    fg = patch_roi[:, :, :3].astype(_get_np().float32)
+                    bg = roi.astype(_get_np().float32)
                     comp = fg * alpha + bg * (1.0 - alpha)
-                    out[iy0:iy1, ix0:ix1] = np.clip(comp, 0.0, 255.0).astype(np.uint8)
+                    out[iy0:iy1, ix0:ix1] = _get_np().clip(comp, 0.0, 255.0).astype(_get_np().uint8)
                 except Exception:
                     pass
             else:
@@ -3977,24 +4460,24 @@ class _WatermarkBatchTask(QRunnable):
                         rp = ""
                     if not rp or not os.path.exists(rp):
                         continue
-                    data = np.fromfile(rp, dtype=np.uint8)
-                    wm = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+                    data = _get_np().fromfile(rp, dtype=_get_np().uint8)
+                    wm = _get_cv2().imdecode(data, _get_cv2().IMREAD_UNCHANGED)
                     if wm is None:
                         continue
                     if wm.ndim == 2:
-                        wm = cv2.cvtColor(wm, cv2.COLOR_GRAY2BGRA)
+                        wm = _get_cv2().cvtColor(wm, _get_cv2().COLOR_GRAY2BGRA)
                     elif wm.shape[2] == 3:
-                        wm = cv2.cvtColor(wm, cv2.COLOR_BGR2BGRA)
+                        wm = _get_cv2().cvtColor(wm, _get_cv2().COLOR_BGR2BGRA)
                     wm_rgba = wm
                 else:
-                    data = np.fromfile(p, dtype=np.uint8)
-                    wm = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+                    data = _get_np().fromfile(p, dtype=_get_np().uint8)
+                    wm = _get_cv2().imdecode(data, _get_cv2().IMREAD_UNCHANGED)
                     if wm is None:
                         continue
                     if wm.ndim == 2:
-                        wm = cv2.cvtColor(wm, cv2.COLOR_GRAY2BGRA)
+                        wm = _get_cv2().cvtColor(wm, _get_cv2().COLOR_GRAY2BGRA)
                     elif wm.shape[2] == 3:
-                        wm = cv2.cvtColor(wm, cv2.COLOR_BGR2BGRA)
+                        wm = _get_cv2().cvtColor(wm, _get_cv2().COLOR_BGR2BGRA)
                     wm_rgba = wm
                 wh, ww = wm_rgba.shape[:2]
                 if wh <= 0 or ww <= 0:
@@ -4003,25 +4486,25 @@ class _WatermarkBatchTask(QRunnable):
                     img_scale_ratio = float(target_w) / float(max(1, ww))
                     new_w = max(1, int(round(ww * img_scale_ratio)))
                     new_h = max(1, int(round(wh * img_scale_ratio)))
-                    interp_up = cv2.INTER_CUBIC
+                    interp_up = _get_cv2().INTER_CUBIC
                     try:
                         if hasattr(cv2, "INTER_LANCZOS4"):
-                            interp_up = cv2.INTER_LANCZOS4
+                            interp_up = _get_cv2().INTER_LANCZOS4
                     except Exception:
                         pass
-                    wm_rgba = cv2.resize(wm_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA if img_scale_ratio < 1 else interp_up)
+                    wm_rgba = _get_cv2().resize(wm_rgba, (new_w, new_h), interpolation=_get_cv2().INTER_AREA if img_scale_ratio < 1 else interp_up)
                 else:
                     scale_w = float(target_w) / float(max(1, ww))
                     scale_h = float(target_h) / float(max(1, wh))
                     new_w = max(1, int(round(ww * scale_w)))
                     new_h = max(1, int(round(wh * scale_h)))
-                    interp_up = cv2.INTER_CUBIC
+                    interp_up = _get_cv2().INTER_CUBIC
                     try:
                         if hasattr(cv2, "INTER_LANCZOS4"):
-                            interp_up = cv2.INTER_LANCZOS4
+                            interp_up = _get_cv2().INTER_LANCZOS4
                     except Exception:
                         pass
-                    wm_rgba = cv2.resize(wm_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA if max(scale_w, scale_h) < 1 else interp_up)
+                    wm_rgba = _get_cv2().resize(wm_rgba, (new_w, new_h), interpolation=_get_cv2().INTER_AREA if max(scale_w, scale_h) < 1 else interp_up)
                 try:
                     if bool(getattr(st, "mirror_effect", False)):
                         wm_rgba = _apply_mirror_effect_bgra(
@@ -4036,8 +4519,8 @@ class _WatermarkBatchTask(QRunnable):
                         # 旋转方向需与预览保持一致
                         wm_rgba = _rotate_bgra_keep_bounds(wm_rgba, float(angle))
                     except Exception:
-                        M = cv2.getRotationMatrix2D((new_w / 2.0, new_h / 2.0), angle, 1.0)
-                        wm_rgba = cv2.warpAffine(wm_rgba, M, (new_w, new_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+                        M = _get_cv2().getRotationMatrix2D((new_w / 2.0, new_h / 2.0), angle, 1.0)
+                        wm_rgba = _get_cv2().warpAffine(wm_rgba, M, (new_w, new_h), flags=_get_cv2().INTER_CUBIC, borderMode=_get_cv2().BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
                 wh, ww = wm_rgba.shape[:2]
                 x0 = int(round(cx - ww / 2.0))
                 y0 = int(round(cy - wh / 2.0))
@@ -4054,15 +4537,15 @@ class _WatermarkBatchTask(QRunnable):
                 if wm_roi.shape[2] < 4:
                     continue
                 rgba = list(st.color_rgba or [255, 255, 255, 200])
-                alpha = wm_roi[:, :, 3:4].astype(np.float32) / 255.0
+                alpha = wm_roi[:, :, 3:4].astype(_get_np().float32) / 255.0
                 alpha = alpha * (float(rgba[3]) / 255.0)
-                fg = wm_roi[:, :, :3].astype(np.float32)
-                bg = roi.astype(np.float32)
+                fg = wm_roi[:, :, :3].astype(_get_np().float32)
+                bg = roi.astype(_get_np().float32)
                 comp = fg * alpha + bg * (1.0 - alpha)
-                out[iy0:iy1, ix0:ix1] = comp.astype(np.uint8)
+                out[iy0:iy1, ix0:ix1] = comp.astype(_get_np().uint8)
         return out
 
-    def _imencode_like_original(self, src_path: str, img_bgr: np.ndarray) -> tuple[bytes | None, str]:
+    def _imencode_like_original(self, src_path: str, img_bgr: _get_np().ndarray) -> tuple[bytes | None, str]:
         ext_src = os.path.splitext(str(src_path or ""))[1].lower()
         ext = str(ext_src or "")
 
@@ -4074,46 +4557,53 @@ class _WatermarkBatchTask(QRunnable):
         else:
             return None, ext
 
+        # 优先使用 Qt 编码，避免 OpenCV 编码在部分机器/图片上导致闪退
         if encode_ext == ".png":
-            ok, buf = cv2.imencode(".png", img_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            out = _qimage_encode_bytes(img_bgr, "PNG")
+            if out:
+                return out, ext
+            ok, buf = _get_cv2().imencode(".png", img_bgr, [_get_cv2().IMWRITE_PNG_COMPRESSION, 3])
             return (buf.tobytes() if ok else None), ext
         if encode_ext == ".webp":
             try:
-                ok, buf = cv2.imencode(".webp", img_bgr, [cv2.IMWRITE_WEBP_QUALITY, 95])
+                ok, buf = _get_cv2().imencode(".webp", img_bgr, [_get_cv2().IMWRITE_WEBP_QUALITY, 95])
                 return (buf.tobytes() if ok else None), ext
             except Exception:
                 return None, ext
         if encode_ext in (".bmp", ".tif", ".tiff"):
             try:
-                ok, buf = cv2.imencode(str(encode_ext), img_bgr)
+                ok, buf = _get_cv2().imencode(str(encode_ext), img_bgr)
                 return (buf.tobytes() if ok else None), ext
             except Exception:
                 return None, ext
 
-        params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+        out = _qimage_encode_bytes(img_bgr, "JPG", quality=100)
+        if out:
+            return out, ext
+        params = [_get_cv2().IMWRITE_JPEG_QUALITY, 100]
         try:
             if hasattr(cv2, "IMWRITE_JPEG_OPTIMIZE"):
-                params.extend([cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+                params.extend([_get_cv2().IMWRITE_JPEG_OPTIMIZE, 1])
         except Exception:
             pass
         try:
             if hasattr(cv2, "IMWRITE_JPEG_PROGRESSIVE"):
-                params.extend([cv2.IMWRITE_JPEG_PROGRESSIVE, 1])
+                params.extend([_get_cv2().IMWRITE_JPEG_PROGRESSIVE, 1])
         except Exception:
             pass
         try:
             if hasattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR") and hasattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444"):
-                params.extend([cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444])
+                params.extend([_get_cv2().IMWRITE_JPEG_SAMPLING_FACTOR, _get_cv2().IMWRITE_JPEG_SAMPLING_FACTOR_444])
         except Exception:
             pass
         try:
-            ok, buf = cv2.imencode(".jpg", img_bgr, params)
+            ok, buf = _get_cv2().imencode(".jpg", img_bgr, params)
             return (buf.tobytes() if ok else None), ext
         except Exception:
             return None, ext
 
     def _copy_exif(self, src_path: str, dst_path: str) -> bool:
-        exiftool = get_exiftool_path()
+        exiftool = _get_exif_utils().get_exiftool_path()
         if not exiftool or not os.path.exists(exiftool):
             try:
                 return bool(self._copy_exif_fallback(src_path, dst_path))
@@ -4131,7 +4621,7 @@ class _WatermarkBatchTask(QRunnable):
             str(dst_path),
         ]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=60)
+            r = _get_exif_utils().run_exiftool(cmd, timeout=60)
             ok = int(getattr(r, "returncode", 1) or 1) == 0
             if ok:
                 return True
@@ -4297,8 +4787,8 @@ class _WatermarkBatchTask(QRunnable):
                         continue
                 except Exception:
                     pass
-                data = np.fromfile(p, dtype=np.uint8)
-                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                data = _get_np().fromfile(p, dtype=_get_np().uint8)
+                img = _get_cv2().imdecode(data, _get_cv2().IMREAD_COLOR)
                 if img is None:
                     ok_all = False
                     bad_files.append(p)
@@ -4319,7 +4809,7 @@ class _WatermarkBatchTask(QRunnable):
                 try:
                     # 这里用像素级对比判断是否真的对图片产生了改动
                     # 目的：避免“没有改动水印但仍触发缩略图刷新/缓存失效”的体验问题
-                    is_modified = not np.array_equal(out, img)
+                    is_modified = not _get_np().array_equal(out, img)
                 except Exception:
                     is_modified = True
                 if not is_modified:
@@ -4415,383 +4905,469 @@ class _WatermarkSaveCopyTask(_WatermarkBatchTask):
         img = None
         meta = {}
         src_record = None
-        if not self.src_path or not os.path.exists(self.src_path):
-            ok = False
-            msg = "源文件不存在"
-        if ok:
-            try:
-                dst_dir = os.path.dirname(self.dst_path)
-                if dst_dir:
-                    os.makedirs(dst_dir, exist_ok=True)
-            except Exception:
-                pass
-            try:
-                shutil.copy2(self.src_path, self.dst_path)
-            except Exception:
-                ok = False
-                msg = "复制失败"
-        if ok:
-            try:
-                meta_map = _get_tags_multi_merged([self.src_path], WATERMARK_TAG_READ_LIST, timeout=20)
-                if isinstance(meta_map, dict):
-                    meta = meta_map.get(self.src_path) or {}
-            except Exception:
-                try:
-                    LogManager.instance().warning("[Watermark] 读取拍摄数据失败")
-                except Exception:
-                    pass
-                meta = {}
-            try:
-                meta = _fill_meta_from_db(self.src_path, meta)
-            except Exception:
-                pass
-            try:
-                db = BirdLibraryDB()
-                uuid_key = str(EXIF_TAG.Uuid.value)
-                fastid_key = str(EXIF_TAG.Fastid.value)
-                src_uuid = _first_non_empty(meta.get(uuid_key), meta.get("Uuid"))
-                if src_uuid:
-                    src_record = db.get_result_by_uuid(str(src_uuid).strip(), table_name="bird_results") or db.get_result_by_uuid(str(src_uuid).strip(), table_name="import_cache")
-                if not src_record:
-                    src_fastid = _first_non_empty(meta.get(fastid_key), meta.get("Fastid"), meta.get("FastId"))
-                    if not src_fastid:
-                        try:
-                            src_fastid = get_fast_id(self.src_path)
-                        except Exception:
-                            src_fastid = None
-                    if src_fastid:
-                        try:
-                            src_record = db.get_result_by_fast_id(str(src_fastid).strip(), table_name="bird_results") or db.get_result_by_fast_id(str(src_fastid).strip(), table_name="import_cache")
-                        except Exception:
-                            src_record = None
-            except Exception:
-                src_record = None
-        if ok:
-            try:
-                data = np.fromfile(self.dst_path, dtype=np.uint8)
-                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-                if img is None:
-                    ok = False
-                    msg = "图片读取失败"
-                    _trace("decode_failed")
-                else:
-                    angle_offset = 0.0
-                    try:
-                        if self.auto_rotate and self.ref_is_landscape is not None:
-                            cur_is_landscape = bool(int(img.shape[1]) >= int(img.shape[0]))
-                            if bool(cur_is_landscape) != bool(self.ref_is_landscape):
-                                angle_offset = 90.0 if bool(self.ref_is_landscape) else -90.0
-                    except Exception:
-                        angle_offset = 0.0
-                    out = self._compose_on_image(img, self.states, angle_offset=angle_offset, meta=meta)
-                    _trace("compose_ok")
-                    enc, ext = self._imencode_like_original(self.dst_path, out)
-                    if not enc:
-                        ok = False
-                        msg = "图片写入失败"
-                        _trace("encode_failed")
-                    else:
-                        _trace("encode_ok", extra=f"ext={ext}")
-                        try:
-                            tmp_dir = os.path.dirname(self.dst_path)
-                            if not tmp_dir:
-                                tmp_dir = tempfile.gettempdir()
-                        except Exception:
-                            tmp_dir = tempfile.gettempdir()
-                        tmp_fd = None
-                        tmp_path = ""
-                        try:
-                            tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext), dir=tmp_dir)
-                        except Exception:
-                            tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext))
-                        try:
-                            if tmp_fd is not None:
-                                os.close(tmp_fd)
-                        except Exception:
-                            pass
-                        with open(tmp_path, "wb") as wf:
-                            wf.write(enc)
-                        _trace("tmp_write_ok", extra=f"tmp={tmp_path}")
-                        self._copy_exif(self.src_path, tmp_path)
-                        os.replace(tmp_path, self.dst_path)
-                        _trace("replace_ok")
-            except Exception:
-                ok = False
-                msg = "图片写入失败"
-                _trace("exception")
         info = {}
-        if ok:
+        fh = None
+        try:
             try:
-                stat = os.stat(self.dst_path)
-                create_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
-                create_ts = float(stat.st_ctime)
-                size_bytes = int(getattr(stat, "st_size", 0) or 0)
+                import faulthandler
+                from datetime import datetime
+                out_dir = str(PathManager.instance().get_user_data_path() / "cache" / "logs")
+                os.makedirs(out_dir, exist_ok=True)
+                fp = os.path.join(out_dir, "watermark_save_fault.log")
+                fh = open(fp, "a", encoding="utf-8")
+                try:
+                    fh.write(f"\n[WatermarkSaveCopy] {datetime.now().isoformat()} src={self.src_path} dst={self.dst_path}\n")
+                    fh.flush()
+                except Exception:
+                    pass
+                try:
+                    faulthandler.enable(file=fh, all_threads=True)
+                except Exception:
+                    pass
             except Exception:
-                create_time = ""
-                create_ts = 0.0
-                size_bytes = 0
-            try:
-                w = int(img.shape[1]) if img is not None else 0
-                h = int(img.shape[0]) if img is not None else 0
-            except Exception:
-                w = 0
-                h = 0
-            shot_time = _meta_first(meta, "DateTimeOriginal", "CreateDate", "MediaCreateDate", "SubSecDateTimeOriginal", "FileModifyDate")
-            iso = _meta_first(meta, "ISO")
-            fnumber = _meta_first(meta, "FNumber", "Aperture", "ApertureValue")
-            shutter = _meta_first(meta, "ExposureTime", "ShutterSpeed", "ShutterSpeedValue")
-            focal_length = _meta_first(meta, "FocalLength")
-            camera_model = _meta_first(meta, "Model")
-            lens_model = _meta_first(meta, "LensModel")
-            location = _first_non_empty(meta.get(str(EXIF_TAG.Location.value)), _meta_first(meta, "Location"), meta.get("XMP:Location"))
-            order_cls = _first_non_empty(meta.get(str(EXIF_TAG.OrderCls.value)), _meta_first(meta, "OrderCls"), _meta_first(meta, "Order"))
-            family_cls = _first_non_empty(meta.get(str(EXIF_TAG.FamilyCls.value)), _meta_first(meta, "FamilyCls"), _meta_first(meta, "Family"))
-            genus_cls = _first_non_empty(meta.get(str(EXIF_TAG.GenusCls.value)), _meta_first(meta, "GenusCls"), _meta_first(meta, "Genus"))
-            species = _first_non_empty(meta.get(str(EXIF_TAG.SpeciesCls.value)), meta.get(str(EXIF_TAG.Object.value)), _meta_first(meta, "Species"))
-            label = ""
-            tags = ""
-            is_favorite = 0
-            rating = 0
-            bbox = None
-            focus_point = None
-            position = ""
-            focus_detect_json = ""
-            area_ratio = 0.0
-            pixel_count = 0
-            eye_coordinates = None
-            description = ""
-            focus_distance = ""
-            lat = 0.0
-            lng = 0.0
-            if isinstance(src_record, dict):
+                pass
+            if not self.src_path or not os.path.exists(self.src_path):
+                ok = False
+                msg = "源文件不存在"
+            if ok:
                 try:
-                    label = str(src_record.get("label") or "")
+                    dst_dir = os.path.dirname(self.dst_path)
+                    if dst_dir:
+                        os.makedirs(dst_dir, exist_ok=True)
                 except Exception:
-                    label = ""
+                    pass
+            if ok:
                 try:
-                    tags = str(src_record.get("tags") or "")
+                    meta_map = _get_tags_multi_merged([self.src_path], WATERMARK_TAG_READ_LIST, timeout=20)
+                    if isinstance(meta_map, dict):
+                        meta = meta_map.get(self.src_path) or {}
                 except Exception:
-                    tags = ""
+                    try:
+                        LogManager.instance().warning("[Watermark] 读取拍摄数据失败")
+                    except Exception:
+                        pass
+                    meta = {}
                 try:
-                    is_favorite = int(src_record.get("is_favorite") or 0)
-                except Exception:
-                    is_favorite = 0
-                try:
-                    rating = int(src_record.get("rating") or 0)
-                except Exception:
-                    rating = 0
-                try:
-                    bbox = src_record.get("bbox")
-                except Exception:
-                    bbox = None
-                try:
-                    focus_point = src_record.get("focus_point")
-                except Exception:
-                    focus_point = None
-                try:
-                    position = str(src_record.get("position") or "")
-                except Exception:
-                    position = ""
-                try:
-                    focus_detect_json = str(src_record.get("focus_detect_json") or "")
-                except Exception:
-                    focus_detect_json = ""
-                try:
-                    area_ratio = float(src_record.get("area_ratio") or 0.0)
-                except Exception:
-                    area_ratio = 0.0
-                try:
-                    pixel_count = int(src_record.get("pixel_count") or 0)
-                except Exception:
-                    pixel_count = 0
-                try:
-                    eye_coordinates = src_record.get("eye_coordinates")
-                except Exception:
-                    eye_coordinates = None
-                try:
-                    description = str(src_record.get("description") or "")
-                except Exception:
-                    description = ""
-                try:
-                    focus_distance = str(src_record.get("focus_distance") or "")
-                except Exception:
-                    focus_distance = ""
-                try:
-                    lat = float(src_record.get("latitude") or 0.0)
-                except Exception:
-                    lat = 0.0
-                try:
-                    lng = float(src_record.get("longitude") or 0.0)
-                except Exception:
-                    lng = 0.0
-                try:
-                    location = _first_non_empty(str(src_record.get("location") or ""), location)
+                    meta = _fill_meta_from_db(self.src_path, meta)
                 except Exception:
                     pass
                 try:
-                    order_cls = _first_non_empty(str(src_record.get("order_cls") or ""), order_cls)
-                    family_cls = _first_non_empty(str(src_record.get("family_cls") or ""), family_cls)
-                    genus_cls = _first_non_empty(str(src_record.get("genus_cls") or ""), genus_cls)
-                    species = _first_non_empty(str(src_record.get("species_cls") or ""), species)
+                    db = BirdLibraryDB()
+                    uuid_key = str(_get_exif_utils().EXIF_TAG.Uuid.value)
+                    fastid_key = str(_get_exif_utils().EXIF_TAG.Fastid.value)
+                    src_uuid = _first_non_empty(meta.get(uuid_key), meta.get("Uuid"))
+                    if src_uuid:
+                        src_record = db.get_result_by_uuid(str(src_uuid).strip(), table_name="bird_results") or db.get_result_by_uuid(str(src_uuid).strip(), table_name="import_cache")
+                    if not src_record:
+                        src_fastid = _first_non_empty(meta.get(fastid_key), meta.get("Fastid"), meta.get("FastId"))
+                        if not src_fastid:
+                            try:
+                                src_fastid = get_fast_id(self.src_path)
+                            except Exception:
+                                src_fastid = None
+                        if src_fastid:
+                            try:
+                                src_record = db.get_result_by_fast_id(str(src_fastid).strip(), table_name="bird_results") or db.get_result_by_fast_id(str(src_fastid).strip(), table_name="import_cache")
+                            except Exception:
+                                src_record = None
                 except Exception:
-                    pass
+                    src_record = None
+            if ok:
                 try:
-                    shot_time = _first_non_empty(str(src_record.get("shot_time") or ""), shot_time)
+                    img = None
+                    try:
+                        ext_src = os.path.splitext(str(self.src_path or ""))[1].upper()
+                    except Exception:
+                        ext_src = ""
+                    if ext_src and ext_src in raw_exts:
+                        try:
+                            img = load_image(self.src_path)
+                        except Exception:
+                            img = None
+                    if img is None:
+                        try:
+                            img = _qimage_read_bgr(self.src_path)
+                        except Exception:
+                            img = None
+                    if img is None:
+                        try:
+                            data = _get_np().fromfile(self.src_path, dtype=_get_np().uint8)
+                            img = _get_cv2().imdecode(data, _get_cv2().IMREAD_COLOR)
+                        except Exception:
+                            img = None
+                    if img is None:
+                        try:
+                            img = load_image(self.src_path)
+                        except Exception:
+                            img = None
+                    if img is None:
+                        ok = False
+                        msg = "图片读取失败"
+                        _trace("decode_failed")
+                    else:
+                        angle_offset = 0.0
+                        try:
+                            if self.auto_rotate and self.ref_is_landscape is not None:
+                                cur_is_landscape = bool(int(img.shape[1]) >= int(img.shape[0]))
+                                if bool(cur_is_landscape) != bool(self.ref_is_landscape):
+                                    angle_offset = 90.0 if bool(self.ref_is_landscape) else -90.0
+                        except Exception:
+                            angle_offset = 0.0
+                        out = self._compose_on_image(img, self.states, angle_offset=angle_offset, meta=meta)
+                        _trace("compose_ok")
+                        enc, ext = self._imencode_like_original(self.dst_path, out)
+                        if not enc:
+                            try:
+                                enc, ext = self._imencode_like_original(self.src_path, out)
+                            except Exception:
+                                enc = None
+                        if not enc:
+                            try:
+                                enc = _qimage_encode_bytes(out, "JPG", quality=100)
+                                if enc:
+                                    ext = ".jpg"
+                            except Exception:
+                                enc = None
+                        if not enc:
+                            ok = False
+                            msg = "图片写入失败"
+                            _trace("encode_failed")
+                        else:
+                            _trace("encode_ok", extra=f"ext={ext}")
+                            try:
+                                dst_ext = os.path.splitext(self.dst_path)[1].lower()
+                                if ext and dst_ext and ext.lower() != dst_ext.lower():
+                                    base = os.path.splitext(self.dst_path)[0]
+                                    if base:
+                                        self.dst_path = base + ext
+                            except Exception:
+                                pass
+                            try:
+                                tmp_dir = os.path.dirname(self.dst_path)
+                                if not tmp_dir:
+                                    tmp_dir = tempfile.gettempdir()
+                            except Exception:
+                                tmp_dir = tempfile.gettempdir()
+                            tmp_fd = None
+                            tmp_path = ""
+                            try:
+                                tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext), dir=tmp_dir)
+                            except Exception:
+                                tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext))
+                            try:
+                                if tmp_fd is not None:
+                                    os.close(tmp_fd)
+                            except Exception:
+                                pass
+                            try:
+                                with open(tmp_path, "wb") as wf:
+                                    wf.write(enc)
+                                _trace("tmp_write_ok", extra=f"tmp={tmp_path}")
+                                try:
+                                    self._copy_exif(self.src_path, tmp_path)
+                                except Exception:
+                                    pass
+                                os.replace(tmp_path, self.dst_path)
+                                _trace("replace_ok")
+                            except Exception:
+                                try:
+                                    with open(self.dst_path, "wb") as wf:
+                                        wf.write(enc)
+                                    _trace("direct_write_ok", extra=f"dst={self.dst_path}")
+                                except Exception:
+                                    raise
                 except Exception:
-                    pass
+                    ok = False
+                    msg = "图片写入失败"
+                    _trace("exception")
+            if ok:
                 try:
-                    fnumber = _first_non_empty(str(src_record.get("fnumber") or ""), fnumber)
+                    stat = os.stat(self.dst_path)
+                    create_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
+                    create_ts = float(stat.st_ctime)
+                    size_bytes = int(getattr(stat, "st_size", 0) or 0)
                 except Exception:
-                    pass
+                    create_time = ""
+                    create_ts = 0.0
+                    size_bytes = 0
                 try:
-                    shutter = _first_non_empty(str(src_record.get("shutter") or ""), shutter)
+                    w = int(img.shape[1]) if img is not None else 0
+                    h = int(img.shape[0]) if img is not None else 0
                 except Exception:
-                    pass
-                try:
-                    iso = _first_non_empty(str(src_record.get("iso") or ""), iso)
-                except Exception:
-                    pass
-                try:
-                    focal_length = _first_non_empty(str(src_record.get("focal_length") or ""), focal_length)
-                except Exception:
-                    pass
-                try:
-                    camera_model = _first_non_empty(str(src_record.get("camera_model") or ""), camera_model)
-                except Exception:
-                    pass
-                try:
-                    lens_model = _first_non_empty(str(src_record.get("lens_model") or ""), lens_model)
-                except Exception:
-                    pass
-            new_uuid = get_unique_id()
-            dst_fastid = None
-            try:
-                dst_fastid = get_fast_id(self.dst_path)
-            except Exception:
+                    w = 0
+                    h = 0
+                shot_time = _meta_first(meta, "DateTimeOriginal", "CreateDate", "MediaCreateDate", "SubSecDateTimeOriginal", "FileModifyDate")
+                iso = _meta_first(meta, "ISO")
+                fnumber = _meta_first(meta, "FNumber", "Aperture", "ApertureValue")
+                shutter = _meta_first(meta, "ExposureTime", "ShutterSpeed", "ShutterSpeedValue")
+                focal_length = _meta_first(meta, "FocalLength")
+                camera_model = _meta_first(meta, "Model")
+                lens_model = _meta_first(meta, "LensModel")
+                location = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.Location.value)), _meta_first(meta, "Location"), meta.get("XMP:Location"))
+                order_cls = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.OrderCls.value)), _meta_first(meta, "OrderCls"), _meta_first(meta, "Order"))
+                family_cls = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.FamilyCls.value)), _meta_first(meta, "FamilyCls"), _meta_first(meta, "Family"))
+                genus_cls = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.GenusCls.value)), _meta_first(meta, "GenusCls"), _meta_first(meta, "Genus"))
+                species = _first_non_empty(meta.get(str(_get_exif_utils().EXIF_TAG.SpeciesCls.value)), meta.get(str(_get_exif_utils().EXIF_TAG.Object.value)), _meta_first(meta, "Species"))
+                label = ""
+                tags = ""
+                is_favorite = 0
+                rating = 0
+                bbox = None
+                focus_point = None
+                position = ""
+                focus_detect_json = ""
+                area_ratio = 0.0
+                pixel_count = 0
+                eye_coordinates = None
+                description = ""
+                focus_distance = ""
+                lat = 0.0
+                lng = 0.0
+                if isinstance(src_record, dict):
+                    try:
+                        label = str(src_record.get("label") or "")
+                    except Exception:
+                        label = ""
+                    try:
+                        tags = str(src_record.get("tags") or "")
+                    except Exception:
+                        tags = ""
+                    try:
+                        is_favorite = int(src_record.get("is_favorite") or 0)
+                    except Exception:
+                        is_favorite = 0
+                    try:
+                        rating = int(src_record.get("rating") or 0)
+                    except Exception:
+                        rating = 0
+                    try:
+                        bbox = src_record.get("bbox")
+                    except Exception:
+                        bbox = None
+                    try:
+                        focus_point = src_record.get("focus_point")
+                    except Exception:
+                        focus_point = None
+                    try:
+                        position = str(src_record.get("position") or "")
+                    except Exception:
+                        position = ""
+                    try:
+                        focus_detect_json = str(src_record.get("focus_detect_json") or "")
+                    except Exception:
+                        focus_detect_json = ""
+                    try:
+                        area_ratio = float(src_record.get("area_ratio") or 0.0)
+                    except Exception:
+                        area_ratio = 0.0
+                    try:
+                        pixel_count = int(src_record.get("pixel_count") or 0)
+                    except Exception:
+                        pixel_count = 0
+                    try:
+                        eye_coordinates = src_record.get("eye_coordinates")
+                    except Exception:
+                        eye_coordinates = None
+                    try:
+                        description = str(src_record.get("description") or "")
+                    except Exception:
+                        description = ""
+                    try:
+                        focus_distance = str(src_record.get("focus_distance") or "")
+                    except Exception:
+                        focus_distance = ""
+                    try:
+                        lat = float(src_record.get("latitude") or 0.0)
+                    except Exception:
+                        lat = 0.0
+                    try:
+                        lng = float(src_record.get("longitude") or 0.0)
+                    except Exception:
+                        lng = 0.0
+                    try:
+                        location = _first_non_empty(str(src_record.get("location") or ""), location)
+                    except Exception:
+                        pass
+                    try:
+                        order_cls = _first_non_empty(str(src_record.get("order_cls") or ""), order_cls)
+                        family_cls = _first_non_empty(str(src_record.get("family_cls") or ""), family_cls)
+                        genus_cls = _first_non_empty(str(src_record.get("genus_cls") or ""), genus_cls)
+                        species = _first_non_empty(str(src_record.get("species_cls") or ""), species)
+                    except Exception:
+                        pass
+                    try:
+                        shot_time = _first_non_empty(str(src_record.get("shot_time") or ""), shot_time)
+                    except Exception:
+                        pass
+                    try:
+                        fnumber = _first_non_empty(str(src_record.get("fnumber") or ""), fnumber)
+                    except Exception:
+                        pass
+                    try:
+                        shutter = _first_non_empty(str(src_record.get("shutter") or ""), shutter)
+                    except Exception:
+                        pass
+                    try:
+                        iso = _first_non_empty(str(src_record.get("iso") or ""), iso)
+                    except Exception:
+                        pass
+                    try:
+                        focal_length = _first_non_empty(str(src_record.get("focal_length") or ""), focal_length)
+                    except Exception:
+                        pass
+                    try:
+                        camera_model = _first_non_empty(str(src_record.get("camera_model") or ""), camera_model)
+                    except Exception:
+                        pass
+                    try:
+                        lens_model = _first_non_empty(str(src_record.get("lens_model") or ""), lens_model)
+                    except Exception:
+                        pass
+                new_uuid = get_unique_id()
                 dst_fastid = None
-            try:
-                imported_at_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-            except Exception:
-                imported_at_now = ""
-            db = BirdLibraryDB()
-            db_err = ""
-            try:
-                db.save_results_batch(
-                    [
-                        {
-                            "uuid": new_uuid,
-                            "fast_id": dst_fastid,
-                            "path": self.dst_path,
-                            "file": os.path.basename(self.dst_path),
-                            "shot_time": shot_time,
-                            "order_cls": order_cls,
-                            "family_cls": family_cls,
-                            "genus_cls": genus_cls,
-                            "species_cls": species,
-                            "label": label,
-                            "score": 0.0,
-                            "norm_score": 0,
-                            "bbox": bbox,
-                            "position": position,
-                            "pixel_count": pixel_count,
-                            "area_ratio": area_ratio,
-                            "focus_point": focus_point,
-                            "object": species,
-                            "eye_coordinates": eye_coordinates,
-                            "description": description,
-                            "focus_detect_json": focus_detect_json,
-                            "is_favorite": is_favorite,
-                            "rating": rating,
-                            "fnumber": float(fnumber or 0.0),
-                            "shutter": shutter,
-                            "iso": float(iso or 0),
-                            "focal_length": focal_length,
-                            "camera_model": camera_model,
-                            "lens_model": lens_model,
-                            "focus_distance": focus_distance,
-                            "latitude": lat,
-                            "longitude": lng,
-                            "location": location,
-                            "tags": tags,
-                            "imported_at": imported_at_now,
-                        }
-                    ],
-                    table_name="bird_results",
-                )
-            except Exception:
                 try:
-                    import traceback
-                    db_err = traceback.format_exc()
+                    dst_fastid = get_fast_id(self.dst_path)
                 except Exception:
-                    db_err = ""
+                    dst_fastid = None
                 try:
-                    LogManager.instance().warning("[Watermark] 另存入库失败")
+                    imported_at_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
                 except Exception:
-                    pass
-            exif_err = ""
-            try:
-                worker = ExifHandleWorker.get_instance()
-            except Exception:
-                worker = None
-            if worker is not None:
+                    imported_at_now = ""
+                db = BirdLibraryDB()
+                db_err = ""
                 try:
-                    tag_map = {
-                        str(EXIF_TAG.Uuid.value): str(new_uuid),
-                        str(EXIF_TAG.Fastid.value): str(dst_fastid or ""),
-                        str(EXIF_TAG.Object.value): str(species or ""),
-                        str(EXIF_TAG.OrderCls.value): str(order_cls or ""),
-                        str(EXIF_TAG.FamilyCls.value): str(family_cls or ""),
-                        str(EXIF_TAG.GenusCls.value): str(genus_cls or ""),
-                        str(EXIF_TAG.SpeciesCls.value): str(species or ""),
-                        str(EXIF_TAG.Location.value): str(location or ""),
-                        str(EXIF_TAG.Tags.value): str(tags or ""),
-                        str(EXIF_TAG.Label.value): str(label or ""),
-                        str(EXIF_TAG.Rating.value): str(int(rating or 0)),
-                        str(EXIF_TAG.Favorite.value): str(int(is_favorite or 0)),
-                    }
-                    worker.write_tags(self.dst_path, tag_map)
+                    db.save_results_batch(
+                        [
+                            {
+                                "uuid": new_uuid,
+                                "fast_id": dst_fastid,
+                                "path": self.dst_path,
+                                "file": os.path.basename(self.dst_path),
+                                "shot_time": shot_time,
+                                "order_cls": order_cls,
+                                "family_cls": family_cls,
+                                "genus_cls": genus_cls,
+                                "species_cls": species,
+                                "label": label,
+                                "score": 0.0,
+                                "norm_score": 0,
+                                "bbox": bbox,
+                                "position": position,
+                                "pixel_count": pixel_count,
+                                "area_ratio": area_ratio,
+                                "focus_point": focus_point,
+                                "object": species,
+                                "eye_coordinates": eye_coordinates,
+                                "description": description,
+                                "focus_detect_json": focus_detect_json,
+                                "is_favorite": is_favorite,
+                                "rating": rating,
+                                "fnumber": float(fnumber or 0.0),
+                                "shutter": shutter,
+                                "iso": float(iso or 0),
+                                "focal_length": focal_length,
+                                "camera_model": camera_model,
+                                "lens_model": lens_model,
+                                "focus_distance": focus_distance,
+                                "latitude": lat,
+                                "longitude": lng,
+                                "location": location,
+                                "tags": tags,
+                                "imported_at": imported_at_now,
+                            }
+                        ],
+                        table_name="bird_results",
+                    )
                 except Exception:
                     try:
                         import traceback
-                        exif_err = traceback.format_exc()
+                        db_err = traceback.format_exc()
                     except Exception:
-                        exif_err = ""
-            if (db_err or exif_err) and not msg:
-                msg = "另存完成，但入库或Exif写入存在异常"
-            info = {
-                "path": self.dst_path,
-                "name": os.path.basename(self.dst_path),
-                "create_time": create_time,
-                "create_ts": create_ts,
-                "shot_time": shot_time,
-                "shot_ts": create_ts,
-                "size": size_bytes,
-                "width": w,
-                "height": h,
-                "position": position,
-                "score": 0,
-                "norm_score": 0,
-                "bbox": bbox,
-                "focus_point": focus_point,
-                "focus_detect_json": focus_detect_json,
-                "label": label,
-                "order": order_cls or "",
-                "family": family_cls or "",
-                "genus": genus_cls or "",
-                "species": species or os.path.basename(os.path.dirname(self.dst_path)),
-                "is_favorite": is_favorite,
-                "rating": rating,
-                "uuid": new_uuid,
-                "fnumber": fnumber,
-                "shutter": shutter,
-                "iso": iso,
-                "focal_length": focal_length,
-                "camera_model": camera_model,
-                "lens_model": lens_model,
-                "tags": tags,
-                "location": location,
-            }
-        self.signals.finished.emit(ok, msg or ("另存完成" if ok else "另存失败"), self.dst_path, info)
+                        db_err = ""
+                    try:
+                        LogManager.instance().warning("[Watermark] 另存入库失败")
+                    except Exception:
+                        pass
+                exif_err = ""
+                try:
+                    worker = _get_exif_utils().ExifHandleWorker.get_instance()
+                except Exception:
+                    worker = None
+                if worker is not None:
+                    try:
+                        tag_map = {
+                            str(_get_exif_utils().EXIF_TAG.Uuid.value): str(new_uuid),
+                            str(_get_exif_utils().EXIF_TAG.Fastid.value): str(dst_fastid or ""),
+                            str(_get_exif_utils().EXIF_TAG.Object.value): str(species or ""),
+                            str(_get_exif_utils().EXIF_TAG.OrderCls.value): str(order_cls or ""),
+                            str(_get_exif_utils().EXIF_TAG.FamilyCls.value): str(family_cls or ""),
+                            str(_get_exif_utils().EXIF_TAG.GenusCls.value): str(genus_cls or ""),
+                            str(_get_exif_utils().EXIF_TAG.SpeciesCls.value): str(species or ""),
+                            str(_get_exif_utils().EXIF_TAG.Location.value): str(location or ""),
+                            str(_get_exif_utils().EXIF_TAG.Tags.value): str(tags or ""),
+                            str(_get_exif_utils().EXIF_TAG.Label.value): str(label or ""),
+                            str(_get_exif_utils().EXIF_TAG.Rating.value): str(int(rating or 0)),
+                            str(_get_exif_utils().EXIF_TAG.Favorite.value): str(int(is_favorite or 0)),
+                        }
+                        worker.write_tags(self.dst_path, tag_map)
+                    except Exception:
+                        try:
+                            import traceback
+                            exif_err = traceback.format_exc()
+                        except Exception:
+                            exif_err = ""
+                if (db_err or exif_err) and not msg:
+                    msg = "另存完成，但入库或Exif写入存在异常"
+                info = {
+                    "path": self.dst_path,
+                    "name": os.path.basename(self.dst_path),
+                    "create_time": create_time,
+                    "create_ts": create_ts,
+                    "shot_time": shot_time,
+                    "shot_ts": create_ts,
+                    "size": size_bytes,
+                    "width": w,
+                    "height": h,
+                    "position": position,
+                    "score": 0,
+                    "norm_score": 0,
+                    "bbox": bbox,
+                    "focus_point": focus_point,
+                    "focus_detect_json": focus_detect_json,
+                    "label": label,
+                    "order": order_cls or "",
+                    "family": family_cls or "",
+                    "genus": genus_cls or "",
+                    "species": species or os.path.basename(os.path.dirname(self.dst_path)),
+                    "is_favorite": is_favorite,
+                    "rating": rating,
+                    "uuid": new_uuid,
+                    "fnumber": fnumber,
+                    "shutter": shutter,
+                    "iso": iso,
+                    "focal_length": focal_length,
+                    "camera_model": camera_model,
+                    "lens_model": lens_model,
+                    "tags": tags,
+                    "location": location,
+                }
+        except Exception:
+            ok = False
+            if not msg:
+                msg = "另存失败"
+            try:
+                LogManager.instance().warning("[Watermark] 另存异常")
+            except Exception:
+                pass
+        try:
+            if fh is not None:
+                fh.close()
+        except Exception:
+            pass
+        try:
+            self.signals.finished.emit(ok, msg or ("另存完成" if ok else "另存失败"), self.dst_path, info)
+        except Exception:
+            pass
 
 
 class _MetaLoadSignals(QObject):
@@ -4806,6 +5382,10 @@ class _MetaLoadTask(QRunnable):
 
     def run(self):
         out = {}
+        try:
+            t0 = float(time.perf_counter())
+        except Exception:
+            t0 = 0.0
         try:
             out = _get_tags_multi_merged(self.file_paths, WATERMARK_TAG_READ_LIST, timeout=20)
         except Exception:
@@ -4831,11 +5411,16 @@ class _MetaLoadTask(QRunnable):
                         pass
         except Exception:
             pass
+        try:
+            if t0 > 0:
+                LogManager.instance().debug(f"[Watermark] meta load cost={float(time.perf_counter())-t0:.4f}s files={len(self.file_paths)}")
+        except Exception:
+            pass
         self.signals.loaded.emit(out)
 
 
 class _PreviewLoadSignals(QObject):
-    loaded = pyqtSignal(str, object, object, int)
+    loaded = pyqtSignal(str, object, object, int, int, int)
 
 
 class _PreviewLoadTask(QRunnable):
@@ -4849,33 +5434,36 @@ class _PreviewLoadTask(QRunnable):
     def run(self):
         qimg = QImage()
         ref_landscape = None
+        orig_w, orig_h = 0, 0
         try:
-            qimg, ref_landscape = _load_preview_qimage(self.path, self.max_edge)
+            qimg, ref_landscape, orig_w, orig_h = _load_preview_qimage(self.path, self.max_edge)
         except Exception:
-            qimg, ref_landscape = QImage(), None
+            qimg, ref_landscape, orig_w, orig_h = QImage(), None, 0, 0
         if isinstance(qimg, QImage) and not qimg.isNull():
-            self.signals.loaded.emit(self.path, qimg, ref_landscape, self.seq)
+            self.signals.loaded.emit(self.path, qimg, ref_landscape, self.seq, orig_w, orig_h)
             return
         try:
             img = load_image(self.path)
         except Exception:
             img = None
         if img is None:
-            self.signals.loaded.emit(self.path, QImage(), ref_landscape, self.seq)
+            self.signals.loaded.emit(self.path, QImage(), ref_landscape, self.seq, 0, 0)
             return
         try:
             h, w = img.shape[:2]
+            orig_w, orig_h = w, h
             try:
                 ref_landscape = bool(int(w) >= int(h))
             except Exception:
                 ref_landscape = None
             sw, sh = _scale_long_edge(w, h, self.max_edge)
             if sw != w or sh != h:
-                img = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+                img = _get_cv2().resize(img, (sw, sh), interpolation=_get_cv2().INTER_AREA)
             qimg = _cv_to_qimage_bgr(img)
         except Exception:
             qimg = QImage()
-        self.signals.loaded.emit(self.path, qimg, ref_landscape, self.seq)
+            orig_w, orig_h = 0, 0
+        self.signals.loaded.emit(self.path, qimg, ref_landscape, self.seq, orig_w, orig_h)
 
 
 class _TextPatchRenderSignals(QObject):
@@ -4910,12 +5498,11 @@ class _TextPatchRenderTask(QRunnable):
                 shadow_range=self.payload.get("shadow_range"),
                 shadow_style=self.payload.get("shadow_style"),
                 mirror_gap_px=self.payload.get("mirror_gap_px"),
-<<<<<<< HEAD
                 mirror_angle_deg=self.payload.get("mirror_angle_deg"),
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+                shadow_tilt_angle=self.payload.get("shadow_tilt_angle"),
                 stack_count=self.payload.get("stack_count"),
                 stack_step_px=self.payload.get("stack_step_px"),
+                letter_spacing=self.payload.get("letter_spacing"),
             )
         except Exception:
             patch = None
@@ -4959,10 +5546,10 @@ class _ImageWatermarkRenderTask(QRunnable):
             if me and not qimg.isNull():
                 ptr = qimg.bits()
                 ptr.setsize(qimg.sizeInBytes())
-                arr = np.frombuffer(ptr, dtype=np.uint8).reshape((int(qimg.height()), int(qimg.width()), 4))
+                arr = _get_np().frombuffer(ptr, dtype=_get_np().uint8).reshape((int(qimg.height()), int(qimg.width()), 4))
                 bgra = arr.copy()
                 try:
-                    gap_px = int(self.payload.get("mirror_gap_px") or 0)
+                    gap_px = int(self.payload.get("mirror_gap_px") or 90)
                 except Exception:
                     gap_px = 0
                 bgra2 = _apply_mirror_effect_bgra(
@@ -4983,9 +5570,23 @@ class _ImageWatermarkRenderTask(QRunnable):
 
 class WatermarkDialog(BasePopupDialog):
     def __init__(self, parent=None, file_paths: Optional[List[str]] = None):
-        super().__init__(parent=parent, title="添加水印", size=(980, 680), translucent_background=False)
+        super().__init__(parent=parent, title="添加水印", size=(980, 680), translucent_background=True)
+        try:
+            self.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
+            self._open_t0 = float(time.perf_counter())
+        except Exception:
+            self._open_t0 = 0.0
         try:
             SettingsManager.instance().set("system/hide_subprocess_console", True)
+        except Exception:
+            pass
+        try:
+            from utils.system.subprocess_patch import patch_subprocess_no_console
+
+            patch_subprocess_no_console()
         except Exception:
             pass
         try:
@@ -5010,6 +5611,11 @@ class WatermarkDialog(BasePopupDialog):
         self._preview_need_fit_on_load = False
         self._meta_task = None
         self._save_copy_task = None
+        # 初始化原始图片尺寸
+        self._current_orig_w = 0
+        self._current_orig_h = 0
+        # 初始化 fit 状态
+        self._has_fit = False
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(150)
@@ -5048,14 +5654,49 @@ class WatermarkDialog(BasePopupDialog):
         self._syncing_ui = False
         self._preview_zoom = 1.0
         self._fit_transform = None
+        self._closing = False
         # 先隐藏预览区域，避免初始化时的黑色闪烁
         self._preview_hidden = True
+        try:
+            self._dbg_disable_meta_load = bool(SettingsManager.instance().get("debug/watermark_dialog_disable_meta_load", False))
+        except Exception:
+            self._dbg_disable_meta_load = False
+        try:
+            self._dbg_disable_preview_load = bool(SettingsManager.instance().get("debug/watermark_dialog_disable_preview_load", False))
+        except Exception:
+            self._dbg_disable_preview_load = False
+        self._dbg_trace_subprocess = bool(self._dbg_disable_meta_load) or bool(self._dbg_disable_preview_load)
+        try:
+            if bool(self._dbg_trace_subprocess):
+                from utils.system.subprocess_patch import set_subprocess_debug
+
+                set_subprocess_debug(True, limit=40, stack_limit=12)
+        except Exception:
+            pass
         self._build_ui()
+        try:
+            self._first_preview_ready = False
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "view") and self.view is not None:
+                self.view.setVisible(False)
+        except Exception:
+            pass
         self._default_font_family = self._load_default_font_family()
         ColorManager.instance().register_listener(self.apply_theme_styles)
         self.apply_theme_styles()
-        self._start_load_meta()
         self._ensure_default_watermark()
+        try:
+            LogManager.instance().debug(
+                f"[WatermarkDialog] init done files={len(self.file_paths)} disable_meta={bool(getattr(self, '_dbg_disable_meta_load', False))} disable_preview={bool(getattr(self, '_dbg_disable_preview_load', False))}"
+            )
+        except Exception:
+            pass
+        try:
+            self.setUpdatesEnabled(True)
+        except Exception:
+            pass
 
     def showEvent(self, event):
         try:
@@ -5069,6 +5710,16 @@ class WatermarkDialog(BasePopupDialog):
             return
         self._first_show_done = True
         try:
+            self.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
+            t0 = float(getattr(self, "_open_t0", 0.0) or 0.0)
+            dt = float(time.perf_counter()) - t0 if t0 > 0 else 0.0
+            LogManager.instance().debug(f"[WatermarkDialog] first show dt={dt:.4f}s")
+        except Exception:
+            pass
+        try:
             self._adjust_panel_width()
         except Exception:
             pass
@@ -5080,6 +5731,19 @@ class WatermarkDialog(BasePopupDialog):
             self._show_preview_delayed()
         except Exception:
             pass
+        try:
+            if not bool(getattr(self, "_meta_load_started", False)):
+                self._meta_load_started = True
+                QTimer.singleShot(1200, self._start_load_meta)
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(0, lambda: self.setUpdatesEnabled(True))
+        except Exception:
+            try:
+                self.setUpdatesEnabled(True)
+            except Exception:
+                pass
 
     def resizeEvent(self, event):
         """
@@ -5161,7 +5825,7 @@ class WatermarkDialog(BasePopupDialog):
         preview_layout.addWidget(zoom_bar)
 
         self.scene = QGraphicsScene(self)
-        self.view = QGraphicsView(self.scene)
+        self.view = _ZoomableGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.view.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -5174,11 +5838,16 @@ class WatermarkDialog(BasePopupDialog):
             self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+            self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
             self.view.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
-            self.view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
+            self.view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
             self.view.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontSavePainterState, True)
             self.view.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True)
+        except Exception:
+            pass
+        # 连接缩放信号
+        try:
+            self.view.zoom_changed.connect(lambda v: self._on_preview_zoom_changed_from_wheel(v))
         except Exception:
             pass
         preview_layout.addWidget(self.view, 1)
@@ -5242,7 +5911,8 @@ class WatermarkDialog(BasePopupDialog):
         self.edit_text.textChanged.connect(self._on_text_changed)
         try:
             fm = self.edit_text.fontMetrics()
-            self.edit_text.setFixedHeight(int(fm.height() * 2 + 16))
+            # 增加高度以容纳边框（2px边框 + padding）
+            self.edit_text.setFixedHeight(int(fm.height() * 2 + 20))
         except Exception:
             pass
         self._tag_items = list(WATERMARK_TAG_ITEMS)
@@ -5319,6 +5989,22 @@ class WatermarkDialog(BasePopupDialog):
         row_fs_layout.addWidget(self.btn_font_plus)
         self.btn_font_minus.clicked.connect(lambda: self.spin_font_size.setValue(int(max(self.spin_font_size.minimum(), self.spin_font_size.value() - 1))))
         self.btn_font_plus.clicked.connect(lambda: self.spin_font_size.setValue(int(min(self.spin_font_size.maximum(), self.spin_font_size.value() + 1))))
+        # 文字间隔控件
+        row_fs_layout.addSpacing(16)
+        row_fs_layout.addWidget(QLabel("间隔"))
+        self.spin_letter_spacing = QSpinBox()
+        self.spin_letter_spacing.setRange(-9999, 999999)
+        self.spin_letter_spacing.setValue(0)
+        self.spin_letter_spacing.setSuffix("")
+        self.spin_letter_spacing.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spin_letter_spacing.valueChanged.connect(self._on_letter_spacing_changed)
+        try:
+            self.spin_letter_spacing.setFixedWidth(96)
+        except Exception:
+            pass
+        # 安装滚轮事件处理
+        self.spin_letter_spacing.wheelEvent = lambda event: self._on_letter_spacing_wheel(event)
+        row_fs_layout.addWidget(self.spin_letter_spacing)
         row_fs_layout.addStretch()
         basic_layout.addWidget(self.row_font_size)
 
@@ -5443,22 +6129,6 @@ class WatermarkDialog(BasePopupDialog):
         row_shadow_layout.addWidget(row_shadow_type)
 
         row_shadow_params = QWidget()
-<<<<<<< HEAD
-        row_shadow_params_layout = QVBoxLayout(row_shadow_params)
-        row_shadow_params_layout.setContentsMargins(0, 0, 0, 0)
-        row_shadow_params_layout.setSpacing(6)
-
-        row_shadow_params_top = QWidget()
-        row_shadow_params_top_layout = QHBoxLayout(row_shadow_params_top)
-        row_shadow_params_top_layout.setContentsMargins(0, 0, 0, 0)
-        row_shadow_params_top_layout.setSpacing(8)
-        self.chk_shadow_follow = QCheckBox("跟随颜色")
-        self.chk_shadow_follow.setChecked(False)
-        self.chk_shadow_follow.stateChanged.connect(self._on_shadow_changed)
-        row_shadow_params_top_layout.addWidget(self.chk_shadow_follow)
-        self.lbl_shadow_dir = QLabel("方向")
-        row_shadow_params_top_layout.addWidget(self.lbl_shadow_dir)
-=======
         row_shadow_params_layout = QHBoxLayout(row_shadow_params)
         row_shadow_params_layout.setContentsMargins(0, 0, 0, 0)
         row_shadow_params_layout.setSpacing(8)
@@ -5466,47 +6136,20 @@ class WatermarkDialog(BasePopupDialog):
         self.chk_shadow_follow.setChecked(False)
         self.chk_shadow_follow.stateChanged.connect(self._on_shadow_changed)
         row_shadow_params_layout.addWidget(self.chk_shadow_follow)
-        self.lbl_shadow_dir = QLabel("方向")
-        row_shadow_params_layout.addWidget(self.lbl_shadow_dir)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-        self.combo_shadow_dir = QComboBox()
-        for t in ("右下", "左下", "右上", "左上", "上", "下", "左", "右"):
-            self.combo_shadow_dir.addItem(t, t)
-        try:
-            self.combo_shadow_dir.activated[int].connect(self._on_shadow_changed)
-        except Exception:
-            self.combo_shadow_dir.activated.connect(self._on_shadow_changed)
-        try:
-            self.combo_shadow_dir.setFixedWidth(84)
-        except Exception:
-            pass
-<<<<<<< HEAD
-        row_shadow_params_top_layout.addWidget(self.combo_shadow_dir)
-        self.lbl_shadow_dist = QLabel("长度")
-        row_shadow_params_top_layout.addWidget(self.lbl_shadow_dist)
-=======
-        row_shadow_params_layout.addWidget(self.combo_shadow_dir)
         self.lbl_shadow_dist = QLabel("长度")
         row_shadow_params_layout.addWidget(self.lbl_shadow_dist)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_shadow_dist = QSpinBox()
-        self.spin_shadow_dist.setRange(0, 200)
-        self.spin_shadow_dist.setValue(4)
+        self.spin_shadow_dist.setRange(0, 5000)
+        self.spin_shadow_dist.setValue(90)
         self.spin_shadow_dist.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.spin_shadow_dist.valueChanged.connect(self._on_shadow_changed)
         try:
             self.spin_shadow_dist.setFixedWidth(64)
         except Exception:
             pass
-<<<<<<< HEAD
-        row_shadow_params_top_layout.addWidget(self.spin_shadow_dist)
-        self.lbl_shadow_range = QLabel("模糊度")
-        row_shadow_params_top_layout.addWidget(self.lbl_shadow_range)
-=======
         row_shadow_params_layout.addWidget(self.spin_shadow_dist)
         self.lbl_shadow_range = QLabel("模糊度")
         row_shadow_params_layout.addWidget(self.lbl_shadow_range)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_shadow_range = QSpinBox()
         self.spin_shadow_range.setRange(0, 100)
         self.spin_shadow_range.setValue(0)
@@ -5516,15 +6159,9 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_shadow_range.setFixedWidth(64)
         except Exception:
             pass
-<<<<<<< HEAD
-        row_shadow_params_top_layout.addWidget(self.spin_shadow_range)
-        self.lbl_stack_step = QLabel("间隔")
-        row_shadow_params_top_layout.addWidget(self.lbl_stack_step)
-=======
         row_shadow_params_layout.addWidget(self.spin_shadow_range)
         self.lbl_stack_step = QLabel("间隔")
         row_shadow_params_layout.addWidget(self.lbl_stack_step)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         self.spin_stack_step = QSpinBox()
         self.spin_stack_step.setRange(0, 50)
         self.spin_stack_step.setValue(2)
@@ -5534,36 +6171,18 @@ class WatermarkDialog(BasePopupDialog):
             self.spin_stack_step.setFixedWidth(64)
         except Exception:
             pass
-<<<<<<< HEAD
-        row_shadow_params_top_layout.addWidget(self.spin_stack_step)
-        row_shadow_params_top_layout.addStretch(1)
-        row_shadow_params_layout.addWidget(row_shadow_params_top)
-
-        row_shadow_params_color = QWidget()
-        row_shadow_params_color_layout = QHBoxLayout(row_shadow_params_color)
-        row_shadow_params_color_layout.setContentsMargins(0, 0, 0, 0)
-        row_shadow_params_color_layout.setSpacing(8)
-        self.lbl_mirror_angle = QLabel("镜像夹角")
-        row_shadow_params_color_layout.addWidget(self.lbl_mirror_angle)
-        self.spin_mirror_angle = QSpinBox()
-        self.spin_mirror_angle.setRange(0, 180)
-        self.spin_mirror_angle.setValue(180)
-        self.spin_mirror_angle.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.spin_mirror_angle.valueChanged.connect(self._on_shadow_changed)
-        try:
-            self.spin_mirror_angle.setFixedWidth(64)
-        except Exception:
-            pass
-        row_shadow_params_color_layout.addWidget(self.spin_mirror_angle)
-        self.btn_pick_shadow_color = QPushButton("阴影颜色")
-        self.btn_pick_shadow_color.clicked.connect(self._pick_shadow_color)
-        row_shadow_params_color_layout.addWidget(self.btn_pick_shadow_color)
-=======
         row_shadow_params_layout.addWidget(self.spin_stack_step)
+        row_shadow_params_layout.addStretch(1)
+        row_shadow_layout.addWidget(row_shadow_params)
+
+        # 阴影颜色和角度放在第二行
+        row_shadow_color_angle = QWidget()
+        row_shadow_color_angle_layout = QHBoxLayout(row_shadow_color_angle)
+        row_shadow_color_angle_layout.setContentsMargins(0, 0, 0, 0)
+        row_shadow_color_angle_layout.setSpacing(8)
         self.btn_pick_shadow_color = QPushButton("阴影颜色")
         self.btn_pick_shadow_color.clicked.connect(self._pick_shadow_color)
-        row_shadow_params_layout.addWidget(self.btn_pick_shadow_color)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+        row_shadow_color_angle_layout.addWidget(self.btn_pick_shadow_color)
         self.shadow_preview = QLabel("")
         self.shadow_preview.setFixedSize(22, 22)
         try:
@@ -5573,15 +6192,23 @@ class WatermarkDialog(BasePopupDialog):
             self.btn_pick_shadow_color.setStyleSheet("border:none; background:transparent; padding:0px;")
         except Exception:
             pass
-<<<<<<< HEAD
-        row_shadow_params_color_layout.addWidget(self.shadow_preview)
-        row_shadow_params_color_layout.addStretch(1)
-        row_shadow_params_layout.addWidget(row_shadow_params_color)
-=======
-        row_shadow_params_layout.addWidget(self.shadow_preview)
-        row_shadow_params_layout.addStretch(1)
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
-        row_shadow_layout.addWidget(row_shadow_params)
+        row_shadow_color_angle_layout.addWidget(self.shadow_preview)
+        # 镜像角度：0-180，0 会与本体重叠，180 为标准倒影
+        self.lbl_mirror_fold_angle = QLabel("镜像角度")
+        row_shadow_color_angle_layout.addWidget(self.lbl_mirror_fold_angle)
+        self.spin_mirror_fold_angle = QSpinBox()
+        self.spin_mirror_fold_angle.setRange(0, 180)
+        self.spin_mirror_fold_angle.setValue(180)
+        self.spin_mirror_fold_angle.setSuffix("°")
+        self.spin_mirror_fold_angle.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spin_mirror_fold_angle.valueChanged.connect(self._on_shadow_changed)
+        try:
+            self.spin_mirror_fold_angle.setFixedWidth(64)
+        except Exception:
+            pass
+        row_shadow_color_angle_layout.addWidget(self.spin_mirror_fold_angle)
+        row_shadow_color_angle_layout.addStretch(1)
+        row_shadow_layout.addWidget(row_shadow_color_angle)
         self.lbl_shadow = QLabel("")
         try:
             self.lbl_shadow.setWordWrap(True)
@@ -5814,6 +6441,10 @@ class WatermarkDialog(BasePopupDialog):
         self.btn_save_copy = QPushButton("另存")
         apply_btn = QPushButton("保存")
         try:
+            self.btn_write = apply_btn
+        except Exception:
+            self.btn_write = None
+        try:
             cancel_btn.setFixedSize(110, 36)
             self.btn_save_copy.setFixedSize(110, 36)
             apply_btn.setFixedSize(110, 36)
@@ -5843,7 +6474,6 @@ class WatermarkDialog(BasePopupDialog):
             self.combo_kind,
             self.combo_tag_insert,
             self.combo_effect,
-            self.combo_shadow_dir,
             self.spin_font_size,
             getattr(self, "slider_preview_zoom", None),
             self.slider_opacity,
@@ -5947,20 +6577,22 @@ class WatermarkDialog(BasePopupDialog):
         return ""
 
     def _preset_dir(self) -> str:
-        try:
-            base = str(PathManager.instance().get_user_data_path() / "watermark")
-        except Exception:
-            base = os.path.join(os.getcwd(), "data", "watermark")
+        base = str(PathManager.instance().get_user_setting_dir() / "watermark")
         try:
             os.makedirs(base, exist_ok=True)
         except Exception:
             pass
         try:
-            legacy = str(PathManager.instance().get_app_data_path() / "watermark")
+            legacy_dirs = [
+                str(PathManager.instance().get_user_data_path() / "watermark"),
+                str(PathManager.instance().get_app_data_path() / "watermark"),
+            ]
         except Exception:
-            legacy = os.path.join(os.getcwd(), "data", "watermark")
+            legacy_dirs = []
         try:
-            if os.path.isdir(legacy):
+            for legacy in (legacy_dirs or []):
+                if not legacy or not os.path.isdir(legacy):
+                    continue
                 for name in os.listdir(legacy):
                     if not str(name).lower().endswith(".bwm"):
                         continue
@@ -6042,6 +6674,10 @@ class WatermarkDialog(BasePopupDialog):
             except Exception:
                 pass
         self._states = list(new_states or [])
+        # 加载水印配置时，当前图片就是水印的模板图片
+        # 设置所有水印的 template_image_index 为当前图片索引
+        for s in (self._states or []):
+            s.template_image_index = self._index
         self.list_layers.clear()
         for s in (self._states or []):
             item = QListWidgetItem(str(s.name or "水印"))
@@ -6101,8 +6737,9 @@ class WatermarkDialog(BasePopupDialog):
         scrollbar_bg = cm.get("settings.shortcut_table.header.background", "#F5F5F5")
         scrollbar_handle = cm.get("settings.shortcut_table.header.border", "#D0D0D0")
         scrollbar_hover = cm.get("settings.shortcut_table.row.hover_border", "#D7E3F5")
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(text)
         for g in (self.group_type, self.group_preset, self.group_basic, self.group_adv, self.group_batch, self.group_layers):
             g["root"].setStyleSheet(f"QFrame{{background:{panel_bg}; border:1px solid {border}; border-radius:8px;}}")
             g["header"].setStyleSheet(
@@ -6308,15 +6945,49 @@ class WatermarkDialog(BasePopupDialog):
     def _start_load_meta(self):
         if not self.file_paths:
             return
+        try:
+            if bool(getattr(self, "_closing", False)):
+                return
+        except Exception:
+            return
+        try:
+            if bool(getattr(self, "_dbg_disable_meta_load", False)):
+                LogManager.instance().debug("[WatermarkDialog] meta load disabled")
+                return
+        except Exception:
+            pass
+        try:
+            LogManager.instance().debug(f"[WatermarkDialog] start meta load files={len(self.file_paths)}")
+        except Exception:
+            pass
+        try:
+            self._meta_load_seq = int(getattr(self, "_meta_load_seq", 0) or 0) + 1
+        except Exception:
+            self._meta_load_seq = 1
+        seq = int(getattr(self, "_meta_load_seq", 1) or 1)
         task = _MetaLoadTask(self.file_paths)
         self._meta_task = task
-        task.signals.loaded.connect(self._on_meta_loaded)
+        task.signals.loaded.connect(lambda m, s=seq: self._on_meta_loaded(s, m))
         self._thread_pool.start(task)
 
-    def _on_meta_loaded(self, meta_map: dict):
+    def _on_meta_loaded(self, seq: int, meta_map: dict):
+        try:
+            if bool(getattr(self, "_closing", False)):
+                return
+        except Exception:
+            return
+        try:
+            if int(seq) != int(getattr(self, "_meta_load_seq", 0) or 0):
+                return
+        except Exception:
+            return
         if not isinstance(meta_map, dict):
             meta_map = {}
         self._meta_cache = meta_map
+        try:
+            LogManager.instance().debug(f"[WatermarkDialog] meta loaded count={len(meta_map)}")
+        except Exception:
+            pass
         self._apply_text_mode_controls()
         self._schedule_preview_update()
 
@@ -6448,6 +7119,22 @@ class WatermarkDialog(BasePopupDialog):
         except Exception:
             pass
 
+    def _on_preview_zoom_changed_from_wheel(self, value: int):
+        """处理鼠标滚轮触发的缩放变化"""
+        try:
+            # 更新滑块位置
+            self.slider_preview_zoom.blockSignals(True)
+            self.slider_preview_zoom.setValue(value)
+            self.slider_preview_zoom.blockSignals(False)
+            # 调用原有的缩放处理函数
+            self._on_preview_zoom_changed(value)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        # Ctrl+滚轮缩放由 _ZoomableGraphicsView.wheelEvent 处理，不在此处处理
+        return super().eventFilter(obj, event)
+
     def _on_text_changed(self):
         if bool(getattr(self, "_syncing_ui", False)):
             return
@@ -6534,6 +7221,33 @@ class WatermarkDialog(BasePopupDialog):
         st.font_point_size = int(new_size)
         self._update_current_item_fast(resolve_text=True)
 
+    def _on_letter_spacing_changed(self, _v):
+        """文字间隔改变时的处理函数"""
+        if bool(getattr(self, "_syncing_ui", False)):
+            return
+        st = self._current_state()
+        if st is None or str(getattr(st, "kind", "text") or "text") != "text":
+            return
+        try:
+            st.letter_spacing = int(self.spin_letter_spacing.value())
+        except Exception:
+            st.letter_spacing = 0
+        self._update_current_item_fast(resolve_text=True)
+
+    def _on_letter_spacing_wheel(self, event):
+        """处理文字间隔的鼠标滚轮事件"""
+        try:
+            delta = event.angleDelta().y()
+            current = self.spin_letter_spacing.value()
+            if delta > 0:
+                new_val = min(int(self.spin_letter_spacing.maximum()), int(current) + 1)
+            else:
+                new_val = max(int(self.spin_letter_spacing.minimum()), int(current) - 1)
+            self.spin_letter_spacing.setValue(new_val)
+            event.accept()
+        except Exception:
+            pass
+
     def _on_font_style_changed(self, _v):
         if bool(getattr(self, "_syncing_ui", False)):
             return
@@ -6599,7 +7313,13 @@ class WatermarkDialog(BasePopupDialog):
             self._syncing_ui = False
         if mode == "mirror":
             try:
-                st.mirror_gap_px = int(getattr(st, "mirror_gap_px", 0) or 0)
+                v = getattr(st, "mirror_gap_px", 0)
+                if v is None:
+                    v = 0
+            except Exception:
+                v = 0
+            try:
+                st.mirror_gap_px = int(max(0, int(v)))
             except Exception:
                 st.mirror_gap_px = 0
             try:
@@ -6842,25 +7562,25 @@ class WatermarkDialog(BasePopupDialog):
                 self.chk_font_underline.setChecked(bool(getattr(st, "font_underline", False)))
             except Exception:
                 pass
+            # 设置文字间隔
+            try:
+                self.spin_letter_spacing.setValue(int(getattr(st, "letter_spacing", 0) or 0))
+            except Exception:
+                pass
             try:
                 self.chk_auto_color.setChecked(str(getattr(st, "color_mode", "custom") or "custom") == "auto")
                 self.chk_stroke.setChecked(bool(getattr(st, "stroke_enabled", False)))
                 self.spin_stroke_width.setValue(int(getattr(st, "stroke_width", 2) or 0))
                 self.chk_shadow_follow.setChecked(bool(getattr(st, "shadow_follow_color", True)))
-                cur_dir = str(getattr(st, "shadow_dir", "右下") or "右下")
-                idx2 = int(self.combo_shadow_dir.findData(cur_dir))
-                if idx2 >= 0:
-                    self.combo_shadow_dir.setCurrentIndex(idx2)
+                # 镜像角度：0-180，0 会重叠，180 为标准倒影
+                fold_angle = int(getattr(st, "shadow_tilt_angle", 180) or 0)
+                self.spin_mirror_fold_angle.setValue(int(max(0, min(180, fold_angle))))
                 try:
                     mode0 = str(getattr(st, "effect_mode", "none") or "none").strip().lower()
                 except Exception:
                     mode0 = "none"
                 if mode0 == "mirror":
                     self.spin_shadow_dist.setValue(int(getattr(st, "mirror_gap_px", 0) or 0))
-<<<<<<< HEAD
-                    self.spin_mirror_angle.setValue(int(getattr(st, "mirror_angle_deg", 180) or 180))
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 elif mode0 == "stack":
                     self.spin_shadow_dist.setValue(int(getattr(st, "stack_count", 3) or 3))
                     self.spin_stack_step.setValue(int(getattr(st, "stack_step_px", 2) or 0))
@@ -6991,19 +7711,16 @@ class WatermarkDialog(BasePopupDialog):
             pass
         try:
             self.chk_shadow_follow.setVisible(True)
-            self.lbl_shadow_dir.setVisible(True)
-            self.combo_shadow_dir.setVisible(True)
+            # 镜像阴影角度和阴影倾斜角度只在镜像模式下显示
+            is_mirror = (effect_mode == "mirror")
+            self.lbl_mirror_fold_angle.setVisible(is_mirror)
+            self.spin_mirror_fold_angle.setVisible(is_mirror)
             self.lbl_shadow_dist.setVisible(True)
             self.spin_shadow_dist.setVisible(True)
             self.lbl_shadow_range.setVisible(True)
             self.spin_shadow_range.setVisible(True)
             self.lbl_stack_step.setVisible(False)
             self.spin_stack_step.setVisible(False)
-<<<<<<< HEAD
-            self.lbl_mirror_angle.setVisible(False)
-            self.spin_mirror_angle.setVisible(False)
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             self.btn_pick_shadow_color.setVisible(True)
             self.shadow_preview.setVisible(True)
             self.lbl_shadow.setVisible(True)
@@ -7012,8 +7729,8 @@ class WatermarkDialog(BasePopupDialog):
         if effect_mode == "none":
             try:
                 self.chk_shadow_follow.setVisible(False)
-                self.lbl_shadow_dir.setVisible(False)
-                self.combo_shadow_dir.setVisible(False)
+                self.lbl_mirror_fold_angle.setVisible(False)
+                self.spin_mirror_fold_angle.setVisible(False)
                 self.lbl_shadow_dist.setVisible(False)
                 self.spin_shadow_dist.setVisible(False)
                 self.lbl_shadow_range.setVisible(False)
@@ -7051,7 +7768,7 @@ class WatermarkDialog(BasePopupDialog):
             except Exception:
                 pass
             try:
-                self.spin_shadow_dist.setRange(0, 200)
+                self.spin_shadow_dist.setRange(0, 50000)
             except Exception:
                 pass
             try:
@@ -7061,14 +7778,6 @@ class WatermarkDialog(BasePopupDialog):
             except Exception:
                 pass
             try:
-<<<<<<< HEAD
-                self.lbl_mirror_angle.setVisible(True)
-                self.spin_mirror_angle.setVisible(True)
-            except Exception:
-                pass
-            try:
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 self._adjust_panel_width()
             except Exception:
                 pass
@@ -7153,7 +7862,7 @@ class WatermarkDialog(BasePopupDialog):
         except Exception:
             pass
         rgba = list(st.color_rgba or [255, 255, 255, 200])
-        c = ThemedColorDialog.get_color(self, "选择颜色", rgba, show_alpha=True)
+        c = _get_themed_color_dialog().get_color(self, "选择颜色", rgba, show_alpha=True)
         if c is None or not isinstance(c, QColor):
             return
         st.color_rgba = [int(c.red()), int(c.green()), int(c.blue()), int(c.alpha())]
@@ -7244,14 +7953,10 @@ class WatermarkDialog(BasePopupDialog):
                 pass
             return
         follow = bool(getattr(st, "shadow_follow_color", False))
-        dir_name = str(getattr(st, "shadow_dir", "右下") or "右下")
+        angle_val = int(getattr(st, "shadow_angle", 45) or 45)
         dist = int(getattr(st, "shadow_distance", 4) or 0)
         blur = int(getattr(st, "shadow_range", 0) or 0)
         gap_px = int(getattr(st, "mirror_gap_px", 0) or 0)
-<<<<<<< HEAD
-        angle_deg = int(getattr(st, "mirror_angle_deg", 180) or 180)
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
         stack_count = int(getattr(st, "stack_count", 3) or 3)
         stack_step = int(getattr(st, "stack_step_px", 2) or 0)
         if follow:
@@ -7259,11 +7964,7 @@ class WatermarkDialog(BasePopupDialog):
                 if mode == "beam":
                     self.lbl_shadow.setText(f"光束阴影  跟随颜色  {dir_name}  长度{dist}  模糊{blur}")
                 elif mode == "mirror":
-<<<<<<< HEAD
-                    self.lbl_shadow.setText(f"镜像阴影  跟随颜色  {dir_name}  间隔{gap_px}  夹角{angle_deg}")
-=======
                     self.lbl_shadow.setText(f"镜像阴影  跟随颜色  {dir_name}  间隔{gap_px}")
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
                 elif mode == "stack":
                     self.lbl_shadow.setText(f"叠字阴影  跟随颜色  {dir_name}  数量{stack_count}  间隔{stack_step}")
                 else:
@@ -7291,11 +7992,7 @@ class WatermarkDialog(BasePopupDialog):
             if mode == "beam":
                 self.lbl_shadow.setText(f"光束阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  长度{dist}  模糊{blur}")
             elif mode == "mirror":
-<<<<<<< HEAD
-                self.lbl_shadow.setText(f"镜像阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  间隔{gap_px}  夹角{angle_deg}")
-=======
-                self.lbl_shadow.setText(f"镜像阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  间隔{gap_px}")
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
+                self.lbl_shadow.setText(f"镜像阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  间隔{gap_px}  角度{mirror_angle}°")
             elif mode == "stack":
                 self.lbl_shadow.setText(f"叠字阴影  {hex_rgb}  {alpha_pct}%  {dir_name}  数量{stack_count}  间隔{stack_step}")
             else:
@@ -7366,17 +8063,17 @@ class WatermarkDialog(BasePopupDialog):
         except Exception:
             st.shadow_follow_color = True
         try:
-            st.shadow_dir = str(self.combo_shadow_dir.currentData() or "右下")
+            st.mirror_angle_deg = 90
         except Exception:
-            st.shadow_dir = str(getattr(st, "shadow_dir", "右下") or "右下")
+            pass
+        try:
+            st.shadow_tilt_angle = int(self.spin_mirror_fold_angle.value())
+        except Exception:
+            st.shadow_tilt_angle = int(getattr(st, "shadow_tilt_angle", 180) or 180)
         try:
             v0 = int(self.spin_shadow_dist.value())
             if mode == "mirror":
                 st.mirror_gap_px = int(v0)
-<<<<<<< HEAD
-                st.mirror_angle_deg = int(self.spin_mirror_angle.value())
-=======
->>>>>>> af13f1a07498e6b1821fd8630804deaf4d11af0a
             elif mode == "stack":
                 st.stack_count = int(v0)
             else:
@@ -7415,7 +8112,7 @@ class WatermarkDialog(BasePopupDialog):
         if not rgba:
             base_a = int(list(st.color_rgba or [255, 255, 255, 200])[3])
             rgba = [0, 0, 0, base_a]
-        c = ThemedColorDialog.get_color(self, "边框颜色", rgba, show_alpha=True)
+        c = _get_themed_color_dialog().get_color(self, "边框颜色", rgba, show_alpha=True)
         if c is None or not isinstance(c, QColor):
             return
         st.stroke_rgba = [int(c.red()), int(c.green()), int(c.blue()), int(c.alpha())]
@@ -7461,7 +8158,7 @@ class WatermarkDialog(BasePopupDialog):
             base = list(st.color_rgba or [255, 255, 255, 200])
             r0, g0, b0, a0 = [int(max(0, min(255, v))) for v in base[:4]]
             rgba = [r0, g0, b0, int(max(0, min(255, round(a0 * 0.6))))]
-        c = ThemedColorDialog.get_color(self, "阴影颜色", rgba, show_alpha=True)
+        c = _get_themed_color_dialog().get_color(self, "阴影颜色", rgba, show_alpha=True)
         if c is None or not isinstance(c, QColor):
             return
         st.shadow_rgba = [int(c.red()), int(c.green()), int(c.blue()), int(c.alpha())]
@@ -7561,7 +8258,7 @@ class WatermarkDialog(BasePopupDialog):
         st.shadow_enabled = False
         st.shadow_follow_color = False
         st.shadow_rgba = []
-        st.shadow_dir = "右下"
+        st.shadow_angle = 45
         st.shadow_distance = 4
         st.shadow_range = 0
         st.effect_mode = "none"
@@ -7570,6 +8267,15 @@ class WatermarkDialog(BasePopupDialog):
         st.stack_count = 3
         st.stack_step_px = 2
         st.image_path = ""
+        # 设置参考图片尺寸为当前预览图片的原始尺寸
+        cur_orig_w = int(getattr(self, "_current_orig_w", 0) or 0)
+        cur_orig_h = int(getattr(self, "_current_orig_h", 0) or 0)
+        if cur_orig_w > 0 and cur_orig_h > 0:
+            st.ref_image_w = cur_orig_w
+            st.ref_image_h = cur_orig_h
+        # 设置模板图片索引为当前图片索引
+        # 这样只有在当前图片上调整位置时才会更新边距记录
+        st.template_image_index = self._index
         if k == "text" and getattr(self, "_default_font_family", ""):
             st.font_family = str(self._default_font_family)
         self._states.append(st)
@@ -7639,6 +8345,36 @@ class WatermarkDialog(BasePopupDialog):
         """
         关闭窗口时保存当前水印方案，避免删除/调整后未点击写入导致方案未持久化。
         """
+        try:
+            self._closing = True
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_debounce_timer") and self._debounce_timer is not None:
+                self._debounce_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_text_debounce_timer") and self._text_debounce_timer is not None:
+                self._text_debounce_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_text_patch_timer") and self._text_patch_timer is not None:
+                self._text_patch_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._preview_loading_seq = int(getattr(self, "_preview_loading_seq", 0) or 0) + 1
+        except Exception:
+            pass
+        try:
+            if bool(getattr(self, "_dbg_trace_subprocess", False)):
+                from utils.system.subprocess_patch import set_subprocess_debug
+
+                set_subprocess_debug(False)
+        except Exception:
+            pass
         try:
             self._refresh_layer_list()
         except Exception:
@@ -7738,6 +8474,23 @@ class WatermarkDialog(BasePopupDialog):
         if not self.file_paths:
             return
         path = self.file_paths[self._index]
+        try:
+            is_raw = False
+            try:
+                ext = os.path.splitext(str(path or ""))[1].upper()
+            except Exception:
+                ext = ""
+            if ext and ext in raw_exts:
+                is_raw = True
+            btn_write = getattr(self, "btn_write", None)
+            if btn_write is not None:
+                btn_write.setEnabled(not is_raw)
+                if is_raw:
+                    btn_write.setToolTip("RAW 文件添加水印不支持覆盖保存，请使用“另存”")
+                else:
+                    btn_write.setToolTip("")
+        except Exception:
+            pass
         prev_render_path = str(getattr(self, "_render_path", "") or "")
         need_fit = (prev_render_path != str(path or "")) or (not bool(getattr(self, "_has_fit", False)))
         meta = self._meta_cache.get(path, {}) if isinstance(self._meta_cache, dict) else {}
@@ -7772,6 +8525,8 @@ class WatermarkDialog(BasePopupDialog):
                 try:
                     it.setVisible(bool(st2.visible))
                     it.setZValue(10 + i)
+                    # 更新水印项的当前图片索引，确保 is_template_image 判断正确
+                    it._current_image_index = self._index
                     it._update_from_state()
                 except Exception:
                     pass
@@ -7809,6 +8564,24 @@ class WatermarkDialog(BasePopupDialog):
         p = str(path or "")
         if not p:
             return
+        try:
+            if bool(getattr(self, "_dbg_disable_preview_load", False)):
+                try:
+                    self.scene.clear()
+                except Exception:
+                    pass
+                try:
+                    tip = QGraphicsTextItem("预览已禁用(调试)")
+                    self.scene.addItem(tip)
+                except Exception:
+                    pass
+                try:
+                    LogManager.instance().debug("[WatermarkDialog] preview load disabled")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         if str(getattr(self, "_preview_loading_path", "") or "") == p and int(getattr(self, "_preview_loading_seq", 0) or 0) > 0 and self._base_pixmap_item is None:
             return
         self._preview_load_seq = int(getattr(self, "_preview_load_seq", 0) or 0) + 1
@@ -7816,11 +8589,20 @@ class WatermarkDialog(BasePopupDialog):
         self._preview_loading_seq = seq
         self._preview_loading_path = p
         self._preview_need_fit_on_load = bool(need_fit)
+        try:
+            LogManager.instance().debug(f"[WatermarkDialog] start preview load seq={seq} path={os.path.basename(p)}")
+        except Exception:
+            pass
         task = _PreviewLoadTask(p, int(self._preview_max_edge), seq)
         task.signals.loaded.connect(self._on_preview_loaded)
         self._thread_pool.start(task)
 
-    def _on_preview_loaded(self, path: str, qimg: object, ref_landscape: object, seq: int):
+    def _on_preview_loaded(self, path: str, qimg: object, ref_landscape: object, seq: int, orig_w: int, orig_h: int):
+        try:
+            if bool(getattr(self, "_closing", False)):
+                return
+        except Exception:
+            return
         try:
             if int(seq) != int(getattr(self, "_preview_loading_seq", 0) or 0):
                 return
@@ -7832,9 +8614,14 @@ class WatermarkDialog(BasePopupDialog):
             cur_path = ""
         if str(cur_path or "") != str(path or ""):
             return
-        self._apply_loaded_preview_qimage(path, qimg, ref_landscape, bool(getattr(self, "_preview_need_fit_on_load", False)))
+        try:
+            ok = isinstance(qimg, QImage) and not qimg.isNull()
+            LogManager.instance().debug(f"[WatermarkDialog] preview loaded seq={int(seq)} ok={ok}")
+        except Exception:
+            pass
+        self._apply_loaded_preview_qimage(path, qimg, ref_landscape, bool(getattr(self, "_preview_need_fit_on_load", False)), orig_w, orig_h)
 
-    def _apply_loaded_preview_qimage(self, path: str, qimg: object, ref_landscape: object, need_fit: bool):
+    def _apply_loaded_preview_qimage(self, path: str, qimg: object, ref_landscape: object, need_fit: bool, orig_w: int = 0, orig_h: int = 0):
         try:
             self.scene.clear()
         except Exception:
@@ -7849,6 +8636,12 @@ class WatermarkDialog(BasePopupDialog):
                 self.scene.addItem(err)
             except Exception:
                 pass
+            try:
+                if hasattr(self, "view") and self.view is not None:
+                    self.view.setVisible(True)
+                self._first_preview_ready = True
+            except Exception:
+                pass
             return
         try:
             self._preview_qimg = qimg.convertToFormat(QImage.Format.Format_ARGB32)
@@ -7861,6 +8654,18 @@ class WatermarkDialog(BasePopupDialog):
         self.scene.setSceneRect(0, 0, pix.width(), pix.height())
         self._preview_image_size = QSize(int(pix.width()), int(pix.height()))
         self._render_path = str(path or "")
+        # 保存当前原始图片尺寸，用于新增水印时设置参考尺寸
+        self._current_orig_w = int(orig_w) if orig_w > 0 else int(pix.width())
+        self._current_orig_h = int(orig_h) if orig_h > 0 else int(pix.height())
+        # 为所有水印状态设置参考图片尺寸（如果尚未设置）
+        # 同时为旧水印设置 template_image_index（如果未设置，默认为第一张图片索引0）
+        for st in (self._states or []):
+            if int(getattr(st, "ref_image_w", 0) or 0) <= 0 or int(getattr(st, "ref_image_h", 0) or 0) <= 0:
+                st.ref_image_w = self._current_orig_w
+                st.ref_image_h = self._current_orig_h
+            # 如果 template_image_index 未设置，默认为0（第一张图片）
+            if not hasattr(st, "template_image_index") or int(getattr(st, "template_image_index", -1) or -1) < 0:
+                st.template_image_index = 0
 
         def _on_any_item_changed():
             self._refresh_layer_list()
@@ -7870,6 +8675,7 @@ class WatermarkDialog(BasePopupDialog):
                 try:
                     self.edit_text.blockSignals(True)
                     self.spin_font_size.blockSignals(True)
+                    self.spin_letter_spacing.blockSignals(True)
                     self.slider_opacity.blockSignals(True)
                     self.slider_rotate.blockSignals(True)
                     self.spin_rotate.blockSignals(True)
@@ -7884,7 +8690,6 @@ class WatermarkDialog(BasePopupDialog):
                         self.chk_stroke.blockSignals(True)
                         self.spin_stroke_width.blockSignals(True)
                         self.chk_shadow_follow.blockSignals(True)
-                        self.combo_shadow_dir.blockSignals(True)
                         self.spin_shadow_dist.blockSignals(True)
                         self.spin_shadow_range.blockSignals(True)
                         self.spin_stack_step.blockSignals(True)
@@ -7906,15 +8711,16 @@ class WatermarkDialog(BasePopupDialog):
                         self.chk_font_underline.setChecked(bool(getattr(cur_state, "font_underline", False)))
                     except Exception:
                         pass
+                    # 设置文字间隔
+                    try:
+                        self.spin_letter_spacing.setValue(int(getattr(cur_state, "letter_spacing", 0) or 0))
+                    except Exception:
+                        pass
                     try:
                         self.chk_auto_color.setChecked(str(getattr(cur_state, "color_mode", "custom") or "custom") == "auto")
                         self.chk_stroke.setChecked(bool(getattr(cur_state, "stroke_enabled", False)))
                         self.spin_stroke_width.setValue(int(getattr(cur_state, "stroke_width", 2) or 0))
                         self.chk_shadow_follow.setChecked(bool(getattr(cur_state, "shadow_follow_color", True)))
-                        cur_dir = str(getattr(cur_state, "shadow_dir", "右下") or "右下")
-                        idx = int(self.combo_shadow_dir.findData(cur_dir))
-                        if idx >= 0:
-                            self.combo_shadow_dir.setCurrentIndex(idx)
                         try:
                             mode = str(getattr(cur_state, "effect_mode", "none") or "none")
                         except Exception:
@@ -7960,6 +8766,7 @@ class WatermarkDialog(BasePopupDialog):
                 finally:
                     self.edit_text.blockSignals(False)
                     self.spin_font_size.blockSignals(False)
+                    self.spin_letter_spacing.blockSignals(False)
                     self.slider_opacity.blockSignals(False)
                     self.slider_rotate.blockSignals(False)
                     self.spin_rotate.blockSignals(False)
@@ -7974,7 +8781,6 @@ class WatermarkDialog(BasePopupDialog):
                         self.chk_stroke.blockSignals(False)
                         self.spin_stroke_width.blockSignals(False)
                         self.chk_shadow_follow.blockSignals(False)
-                        self.combo_shadow_dir.blockSignals(False)
                         self.spin_shadow_dist.blockSignals(False)
                         self.spin_shadow_range.blockSignals(False)
                         self.spin_stack_step.blockSignals(False)
@@ -7996,6 +8802,8 @@ class WatermarkDialog(BasePopupDialog):
                 on_interaction=self._on_scene_interaction,
                 bg_qimg=getattr(self, "_preview_qimg", None),
                 render_requester=self,
+                orig_image_size=QSize(self._current_orig_w, self._current_orig_h),
+                current_image_index=self._index,
             )
             it.setVisible(bool(st2.visible))
             it.setZValue(10 + len(self._wm_items))
@@ -8008,6 +8816,12 @@ class WatermarkDialog(BasePopupDialog):
         except Exception:
             pass
         if need_fit:
+            # 确保 view 可见后再调用 fitInView，否则 view 尺寸可能不正确
+            try:
+                if hasattr(self, "view") and self.view is not None:
+                    self.view.setVisible(True)
+            except Exception:
+                pass
             self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             try:
                 self._fit_transform = self.view.transform()
@@ -8017,6 +8831,13 @@ class WatermarkDialog(BasePopupDialog):
             self._apply_preview_zoom()
         try:
             self._adjust_preview_area_width()
+        except Exception:
+            pass
+        try:
+            if not bool(getattr(self, "_first_preview_ready", False)):
+                self._first_preview_ready = True
+                if hasattr(self, "view") and self.view is not None:
+                    self.view.setVisible(True)
         except Exception:
             pass
         self._apply_text_mode_controls()
@@ -8164,6 +8985,12 @@ class WatermarkDialog(BasePopupDialog):
         base, ext = os.path.splitext(src_path)
         if not ext:
             ext = ".jpg"
+        else:
+            try:
+                if str(ext).upper() in raw_exts:
+                    ext = ".jpg"
+            except Exception:
+                pass
         dst_path = f"{base}_watermark{ext}"
         if os.path.exists(dst_path):
             idx = 2
@@ -8189,6 +9016,17 @@ class WatermarkDialog(BasePopupDialog):
     def _write_clicked(self):
         if not self.file_paths:
             return
+        try:
+            for p in (self.file_paths or []):
+                try:
+                    ext = os.path.splitext(str(p or ""))[1].upper()
+                except Exception:
+                    ext = ""
+                if ext and ext in raw_exts:
+                    NotificationManager.instance().show_warning("提示", "RAW 文件添加水印不支持覆盖保存，请使用“另存”")
+                    return
+        except Exception:
+            pass
         self._refresh_layer_list()
         # 用户点击“保存/应用”才允许触发父页面的缩略图刷新逻辑
         try:

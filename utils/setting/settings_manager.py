@@ -79,11 +79,12 @@ class SettingsManager(QObject):
         "geolocation/coord_format": {"default": "decimal", "type": str, "label": "坐标显示格式"},
         "geolocation/tianditu_last_call_ts": {"default": 0, "type": float, "label": "天地图接口最后调用时间戳"},
         "track_match/max_time_diff_seconds": {"default": 60, "type": int, "label": "轨迹匹配的最大容差时间"},
+        "image_detail/all_info_overlay_collapsed": {"default": False, "type": bool, "label": "大图信息浮窗折叠"},
         "log/level": {"default": "info", "type": str, "label": "日志等级"},
         "log/max_bytes": {"default": 2147483648, "type": int, "label": "日志目录最大占用字节"},
         "log/cleanup_target_bytes": {"default": 1073741824, "type": int, "label": "日志清理目标占用字节"},
         "log/print_to_console": {"default": False, "type": bool, "label": "日志输出到控制台"},
-        "recognizer/service": {"default": "doubao", "type": str, "label": "物种识别服务"},
+        "recognizer/service": {"default": "local", "type": str, "label": "物种识别服务"},
         "recognizer/doubao_api_key": {"default": "", "type": str, "label": "豆包 API Key"},
         "recognizer/dongniao_last_call_ts": {"default": 0, "type": float, "label": "懂鸟接口最后调用时间戳"},
         # Import Page Settings
@@ -111,6 +112,8 @@ class SettingsManager(QObject):
         "focus_detect/use_gpu": {"default": True, "type": bool, "label": "对焦检测使用GPU加速"},
         "focus_detect/multi_check": {"default": True, "type": bool, "label": "对焦检测多次检测"},
         "focus_detect/exp_frame_check": {"default": True, "type": bool, "label": "对焦检测爆框检测"},
+        "focus_detect/enable_eye_detect": {"default": True, "type": bool, "label": "对焦检测鸟眼检测"},
+        "focus_detect/enable_af_point_detect": {"default": True, "type": bool, "label": "对焦检测识别对焦点"},
         "focus_detect/append_detect": {"default": False, "type": bool, "label": "对焦检测追加检测"},
         "focus_detect/no_db_write": {"default": False, "type": bool, "label": "对焦检测不写入数据库"},
         "focus_detect/no_exif_write": {"default": False, "type": bool, "label": "对焦检测不写入EXIF信息"},
@@ -128,8 +131,8 @@ class SettingsManager(QObject):
         "focus_detect/initial_conf": {"default": 0.15, "type": float, "label": "对焦检测初始置信度"},
         "focus_detect_ui/show_subject_rect": {"default": True, "type": bool, "label": "对焦虚拟视图显示主体框"},
         "focus_detect_ui/show_focus_point": {"default": True, "type": bool, "label": "对焦虚拟视图显示对焦点"},
-        "focus_detect_ui/sharp_threshold": {"default": 200, "type": int, "label": "对焦虚拟视图锐度阈值"},
-        "focus_detect_ui/norm_sharp_threshold": {"default": 80, "type": int, "label": "对焦虚拟视图归一化锐度阈值"},
+        "focus_detect_ui/sharp_threshold": {"default": 80, "type": int, "label": "对焦虚拟视图锐度阈值"},
+        "focus_detect_ui/norm_sharp_threshold": {"default": 130, "type": int, "label": "对焦虚拟视图归一化锐度阈值"},
         "focus_detect_ui/normal_contrast_threshold": {"default": 0.8, "type": float, "label": "对焦虚拟视图普通对比阈值"},
         "focus_detect_ui/conf_threshold": {"default": 0.1, "type": float, "label": "对焦虚拟视图置信度阈值"},
         "focus_detect_ui/minimal_area_threshold": {"default": 0.001, "type": float, "label": "对焦虚拟视图极小占比阈值"},
@@ -144,6 +147,8 @@ class SettingsManager(QObject):
         "debug/focus_save_output": {"default": False, "type": bool, "label": "对焦检测保存调试输出"},
         "debug/focus_save_output_dir": {"default": "", "type": str, "label": "对焦检测调试输出目录"},
         "debug/charts_web_debug": {"default": False, "type": bool, "label": "数据图表 Web 调试"},
+        "debug/watermark_dialog_disable_meta_load": {"default": False, "type": bool, "label": "调试：添加水印禁用元数据加载"},
+        "debug/watermark_dialog_disable_preview_load": {"default": False, "type": bool, "label": "调试：添加水印禁用预览加载"},
         "charts/theme": {"default": "follow", "type": str, "label": "数据图表主题"},
         "charts/display_options_json": {"default": "{}", "type": str, "label": "数据图表显示选项(JSON)"},
         "charts/gpu_rendering_enabled": {"default": False, "type": bool, "label": "数据图表 GPU 渲染"},
@@ -160,7 +165,7 @@ class SettingsManager(QObject):
         "charts/window_style": {"default": "acrylic", "type": str, "label": "数据图表窗口样式"},
         "charts/ignore_empty_dates": {"default": False, "type": bool, "label": "数据图表忽略无图片日期"},
         "exif/disable_write": {"default": False, "type": bool, "label": "禁用 EXIF 写入"},
-        "exif/write_mode": {"default": "file", "type": str, "label": "EXIF写入方式"},
+        "exif/write_mode": {"default": "xmp", "type": str, "label": "EXIF写入方式"},
         "system/hide_subprocess_console": {"default": True, "type": bool, "label": "隐藏外部命令行窗口"},
         "debug/test_guide_overlay": {"default": False, "type": bool, "label": "测试引导遮罩"},
     }
@@ -437,18 +442,29 @@ class SettingsManager(QObject):
         """强制写入磁盘/注册表"""
         self.settings.sync()
 
+    def _read_config_parser(self, config_path):
+        parser = configparser.ConfigParser()
+        parser.optionxform = str
+        if not config_path.exists():
+            return parser, False
+        try:
+            parser.read(config_path, encoding="utf-8")
+            return parser, False
+        except (configparser.DuplicateSectionError, configparser.DuplicateOptionError, configparser.ParsingError):
+            parser2 = configparser.ConfigParser(strict=False)
+            parser2.optionxform = str
+            parser2.read(config_path, encoding="utf-8")
+            return parser2, True
+
     def _init_config_file(self):
         config_path = PathManager.instance().get_user_config_path()
         config_dir = config_path.parent
         if not config_dir.exists():
             os.makedirs(config_dir, exist_ok=True)
 
-        parser = configparser.ConfigParser()
-        parser.optionxform = str
-        if config_path.exists():
-            parser.read(config_path, encoding="utf-8")
+        parser, repaired = self._read_config_parser(config_path)
 
-        changed = False
+        changed = bool(repaired)
 
         for key, meta in self.SETTINGS_DEFINITIONS.items():
             section, sep, name = key.partition("/")
@@ -482,10 +498,7 @@ class SettingsManager(QObject):
         config_dir = config_path.parent
         if not config_dir.exists():
             os.makedirs(config_dir, exist_ok=True)
-        parser = configparser.ConfigParser()
-        parser.optionxform = str
-        if key is not None and config_path.exists():
-            parser.read(config_path, encoding="utf-8")
+        parser, repaired = self._read_config_parser(config_path)
 
         def _write_value_to_parser(k):
             section, sep, name = k.partition("/")
@@ -519,9 +532,7 @@ class SettingsManager(QObject):
         config_path = PathManager.instance().get_user_config_path()
         if not config_path.exists():
             return
-        parser = configparser.ConfigParser()
-        parser.optionxform = str
-        parser.read(config_path, encoding="utf-8")
+        parser, repaired = self._read_config_parser(config_path)
         for section in parser.sections():
             for name, value in parser.items(section):
                 if section == "DEFAULT":
@@ -532,6 +543,12 @@ class SettingsManager(QObject):
         if parser.defaults():
             for name, value in parser.defaults().items():
                 self.settings.setValue(name, value)
+        if repaired:
+            try:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    parser.write(f)
+            except Exception:
+                pass
         self.sync()
 
     def restore_defaults(self, exclude_keys=None):

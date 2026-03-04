@@ -3,6 +3,41 @@ import numpy as np
 from PyQt6.QtGui import QImage
 
 
+_build_flavor_cache: str | None = None
+
+
+def _get_build_flavor() -> str:
+    global _build_flavor_cache
+    if _build_flavor_cache is not None:
+        return str(_build_flavor_cache)
+    if not bool(getattr(__import__("sys"), "frozen", False)):
+        _build_flavor_cache = "dev"
+        return "dev"
+    try:
+        from utils.paths import PathManager
+
+        root = PathManager.instance().get_project_root()
+        marker = root / "build_flavor.txt"
+        try:
+            txt = marker.read_text(encoding="utf-8", errors="ignore").strip().lower()
+        except Exception:
+            txt = ""
+        if txt in ("cpu", "gpu"):
+            _build_flavor_cache = txt
+            return txt
+    except Exception:
+        pass
+    _build_flavor_cache = "cpu"
+    return "cpu"
+
+
+def is_gpu_build() -> bool:
+    try:
+        return str(_get_build_flavor()).lower() == "gpu"
+    except Exception:
+        return False
+
+
 def get_gpu_summary() -> str:
     parts = []
     try:
@@ -29,36 +64,77 @@ def get_gpu_summary() -> str:
     return " | ".join([p for p in parts if p])
 
 
+# 缓存 torch CUDA 检查结果，避免重复检查导致卡顿
+_torch_cuda_cache: bool | None = None
+_torch_cuda_checked: bool = False
+
+def reset_torch_cuda_cache():
+    """重置 torch CUDA 检查缓存，下次调用时会重新检查"""
+    global _torch_cuda_cache, _torch_cuda_checked
+    _torch_cuda_cache = None
+    _torch_cuda_checked = False
+
 def is_torch_cuda_usable() -> bool:
+    global _torch_cuda_cache, _torch_cuda_checked
+    
+    # 如果已经检查过，直接返回缓存结果
+    if _torch_cuda_checked:
+        return bool(_torch_cuda_cache)
+
+    try:
+        if not bool(is_gpu_build()):
+            _torch_cuda_cache = False
+            _torch_cuda_checked = True
+            return False
+    except Exception:
+        _torch_cuda_cache = False
+        _torch_cuda_checked = True
+        return False
+    
     try:
         import torch
     except Exception:
+        _torch_cuda_cache = False
+        _torch_cuda_checked = True
         return False
+    
     try:
-        ok = bool(torch.cuda.is_available())
+        # 使用超时机制避免长时间等待
+        import threading
+        result = [False]
+        
+        def _check_cuda():
+            try:
+                ok = bool(torch.cuda.is_available())
+                if not ok:
+                    result[0] = False
+                    return
+                if int(getattr(torch.cuda, "device_count", lambda: 0)() or 0) <= 0:
+                    result[0] = False
+                    return
+                torch.cuda.current_device()
+                try:
+                    torch.cuda.get_device_name(0)
+                except Exception:
+                    pass
+                _ = torch.empty((1,), device="cuda")
+                del _
+                result[0] = True
+            except Exception:
+                result[0] = False
+        
+        # 在后台线程执行 CUDA 检查，避免阻塞主线程
+        t = threading.Thread(target=_check_cuda)
+        t.daemon = True
+        t.start()
+        t.join(timeout=3.0)  # 最多等待3秒
+        
+        _torch_cuda_cache = result[0] if not t.is_alive() else False
     except Exception:
-        return False
-    if not ok:
-        return False
-    try:
-        if int(getattr(torch.cuda, "device_count", lambda: 0)() or 0) <= 0:
-            return False
-    except Exception:
-        return False
-    try:
-        torch.cuda.current_device()
-        try:
-            torch.cuda.get_device_name(0)
-        except Exception:
-            pass
-    except Exception:
-        return False
-    try:
-        _ = torch.empty((1,), device="cuda")
-        del _
-    except Exception:
-        return False
-    return True
+        _torch_cuda_cache = False
+    
+    _torch_cuda_checked = True
+    return bool(_torch_cuda_cache)
 
 
 def is_opencv_cuda_usable() -> bool:
@@ -78,6 +154,11 @@ class GPUScaler:
 
     @classmethod
     def is_available(cls):
+        try:
+            if not bool(is_gpu_build()):
+                return False
+        except Exception:
+            return False
         try:
             if bool(getattr(cls, "_suspended", False)):
                 return False

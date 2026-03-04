@@ -258,11 +258,12 @@ class IntroPage(QWidget):
         exif_label.setStyleSheet(f"color: {path_text}; font-size: 14px;")
         
         self.exif_mode_combo = QComboBox()
-        self.exif_mode_combo.addItem("写入原始文件(推荐)", "file")
-        self.exif_mode_combo.addItem("写入同名XMP文件", "xmp")
+        self.exif_mode_combo.addItem("写入同名XMP文件(推荐)", "xmp")
+        self.exif_mode_combo.addItem("写入原始文件", "file")
         self.exif_mode_combo.addItem("不写入任何信息", "none")
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(path_text)
         self.exif_mode_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 4px 10px;
@@ -295,13 +296,13 @@ class IntroPage(QWidget):
         # 初始化值
         try:
             disable = self.settings_manager.get("exif/disable_write", False)
-            mode = self.settings_manager.get("exif/write_mode", "file")
+            mode = self.settings_manager.get("exif/write_mode", "xmp")
             if disable:
                 idx = 2 # none
             elif mode == "xmp":
-                idx = 1
-            else:
                 idx = 0
+            else:
+                idx = 1
             self.exif_mode_combo.setCurrentIndex(idx)
         except Exception:
             self.exif_mode_combo.setCurrentIndex(0)

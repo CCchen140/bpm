@@ -20,6 +20,4 @@ dist/*
 build/installer/*
 build/_pyi_work/*
 models/*
-cache/pictures/*
-cache/logs/*
 .git-backup1/*

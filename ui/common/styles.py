@@ -1,4 +1,5 @@
 # 通用样式定义
+from ui.common.icon_utils import get_arrow_down_svg_base64
 
 # 工具栏按钮样式
 TOOLBAR_BTN_STYLE = """
@@ -16,34 +17,35 @@ TOOLBAR_BTN_STYLE = """
     }
 """
 
-# 统一下拉框样式
-COMBO_STYLE = """
-    QComboBox {
+# 统一下拉框样式（使用Base64编码的SVG箭头，避免中文路径问题）
+_arrow_url = get_arrow_down_svg_base64("#333333")
+COMBO_STYLE = f"""
+    QComboBox {{
         padding: 4px 8px;
         border: 1px solid #d0d0d0;
         background-color: #ffffff;
         font-size: 12px;
         min-width: 70px;
-    }
-    QComboBox:hover {
+    }}
+    QComboBox:hover {{
         border: 1px solid #2196f3;
-    }
-    QComboBox::drop-down {
+    }}
+    QComboBox::drop-down {{
         border: none;
         width: 20px;
         background: transparent;
-    }
-    QComboBox::down-arrow {
-        image: url(data/icon/line/箭头下_arrow-down.svg);
+    }}
+    QComboBox::down-arrow {{
+        image: url({_arrow_url});
         width: 12px;
         height: 12px;
         margin-right: 5px;
-    }
-    QComboBox QAbstractItemView {
+    }}
+    QComboBox QAbstractItemView {{
         border: 1px solid #d0d0d0;
         background-color: #ffffff;
         selection-background-color: #e3f2fd;
-    }
+    }}
 """
 
 # 滚动区域样式

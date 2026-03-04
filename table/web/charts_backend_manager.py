@@ -13,6 +13,13 @@ from utils.sql.data_base import BirdLibraryDB
 from table.chart_types import CHART_TYPES, CHART_TYPE_TITLE_MAP
 from table.web.data_query_service import ChartsDataService
 
+# 允许选择的图表类型列表（不在此列表中的将被禁用）
+ENABLED_CHART_TYPES = {"number", "bar", "line", "pie", "scatter", "tree"}
+
+# 导入新的图表类型注册系统
+# 这会触发所有 @register_chart 装饰器，自动注册所有图表类型
+from table.charts.types import ChartRegistry
+
 
 def _project_root() -> str:
     try:
@@ -286,10 +293,11 @@ class ChartsBackendManager:
         except Exception:
             tags = []
         return {
-            "chart_types": [{"id": t.chart_type, "title": t.title} for t in CHART_TYPES],
+            "chart_types": [{"id": t.chart_type, "title": t.title, "disabled": t.chart_type not in ENABLED_CHART_TYPES} for t in CHART_TYPES],
             "tags": [{"id": t, "title": t} for t in tags],
             "fields": [
                 {"id": "score", "title": "评分"},
+                {"id": "rating", "title": "评星"},
                 {"id": "iso", "title": "ISO"},
                 {"id": "shutter", "title": "快门"},
                 {"id": "fnumber", "title": "光圈"},
@@ -396,6 +404,12 @@ class ChartsBackendManager:
         self._data.update_user_field_batch(table_name, str(field_name or ""), field_value, list(file_paths or []))
 
     def build_chart_payload(self, chart: dict) -> dict:
+        """
+        构建图表数据载荷
+
+        使用新的图表类型注册系统，自动查找并调用对应的图表数据构建器
+        如果新系统无法处理，则回退到旧的直接方法调用
+        """
         cfg = dict(chart or {})
         chart_id = str(cfg.get("chart_id") or "")
         config = dict(cfg.get("config") or cfg)
@@ -405,14 +419,20 @@ class ChartsBackendManager:
         options = dict(config.get("options") or {})
 
         try:
-            if t in ("bar", "line", "timelineLine") and str(options.get("bar_x_kind") or "").strip():
-                return self._payload_bar_custom(table_name, options, chart_type=t)
-            if t in ("bar", "line", "timelineLine", "bar3D"):
-                return self._payload_xy(t, table_name, options)
-            if t == "pie":
-                return self._payload_pie(table_name, options)
-            if t == "scatter":
-                return self._payload_scatter(table_name, options)
+            # 首先尝试使用新的注册系统
+            # 处理特殊图表类型映射
+            chart_type_for_registry = self._map_chart_type_for_registry(t, options)
+
+            # 从注册表获取对应的图表数据构建器
+            builder = ChartRegistry.get_builder(chart_type_for_registry, self._data, self._display_options)
+
+            if builder is not None:
+                # 使用新的构建器生成数据
+                result = builder.build_payload(table_name, options, chart_type=t)
+                return result
+
+            # 如果新系统无法处理，回退到旧的直接方法调用（向后兼容）
+            # 注意：这些旧方法将在后续版本中逐步移除
             if t in ("tree", "treemap", "sunburst"):
                 return self._payload_taxonomy_tree(table_name)
             if t in ("map", "geo", "geoGraph", "lines", "globe3D"):
@@ -427,10 +447,61 @@ class ChartsBackendManager:
                 return self._payload_calendar(table_name)
             if t in ("scrollLegend", "timelineGallery"):
                 return self._payload_gallery(table_name)
+
         except Exception as e:
             self._log_warning(f"构建图表数据失败({t}): {e}")
 
         return {"kind": "empty", "message": "暂无可用数据"}
+
+    def _map_chart_type_for_registry(self, chart_type: str, options: dict) -> str:
+        """
+        将图表类型映射为注册表中的类型标识
+
+        某些图表类型需要根据配置选项进一步区分，例如：
+        - bar/line/timelineLine 可能需要根据 bar_x_kind 选择不同的构建器
+
+        参数:
+            chart_type: 原始图表类型
+            options: 图表配置选项
+
+        返回:
+            注册表中的类型标识
+        """
+        t = chart_type
+
+        # 柱状图自定义模式（带X轴维度选择）
+        if t in ("bar", "line", "timelineLine") and str(options.get("bar_x_kind") or "").strip():
+            return "bar"
+
+        # 折线图/柱状图基础模式
+        if t in ("bar", "line", "timelineLine", "bar3D"):
+            return "line"  # 使用 line 构建器处理基础XY图表
+
+        # 地理相关图表
+        if t in ("map", "geo", "geoGraph", "lines", "globe3D"):
+            return "geo"
+
+        # 树形相关图表
+        if t in ("tree", "treemap", "sunburst"):
+            return "tree"
+
+        # 仪表盘相关
+        if t in ("gauge", "customGauge"):
+            return "gauge"
+
+        # 雷达图相关
+        if t in ("radar", "radarCustom", "radarMulti"):
+            return "radar"
+
+        # 日历相关
+        if t in ("calendar", "calendarH"):
+            return "calendar"
+
+        # 图库相关
+        if t in ("scrollLegend", "timelineGallery"):
+            return "gallery"
+
+        return t
 
     def _payload_xy(self, chart_type: str, table_name: str, options: dict) -> dict:
         x_field = str(options.get("x_field") or "")
@@ -472,6 +543,15 @@ class ChartsBackendManager:
         rows = self._query(sql, params)
         if not rows:
             return {"kind": "empty", "message": "暂无数据"}
+
+        # 处理隐藏无数据时间的选项，优先使用图表配置中的设置
+        ignore_empty = bool(options.get("bar_ignore_empty_dates", self._display_options.get("ignore_empty_dates", False)))
+        if ignore_empty:
+            # 过滤掉数值为0的数据点
+            filtered_rows = [r for r in rows if _safe_float(r.get("y"), 0.0) > 0]
+            if not filtered_rows:
+                return {"kind": "empty", "message": "暂无数据"}
+            rows = filtered_rows
 
         if group_expr:
             groups: Dict[str, Dict[str, float]] = {}
@@ -534,7 +614,15 @@ class ChartsBackendManager:
         extra_params: list = []
 
         if kind == "time":
-            time_col = "COALESCE(NULLIF(imported_at,''), created_at)"
+            # 根据时间类型选择使用的时间列，默认为拍摄时间
+            time_type = str(options.get("bar_time_type") or "shot_time")
+            if time_type == "imported_at":
+                # imported_at 可能为空字符串，使用 COALESCE 回退到 created_at
+                time_col = "COALESCE(NULLIF(imported_at,''), created_at)"
+            elif time_type == "created_at":
+                time_col = "created_at"
+            else:  # 默认为拍摄时间
+                time_col = "COALESCE(NULLIF(shot_time,''), created_at)"
             unit = str(options.get("bar_time_unit") or "day")
             try:
                 step = int(options.get("bar_time_step") or 1)
@@ -542,16 +630,21 @@ class ChartsBackendManager:
                 step = 1
             step = max(1, min(3650, step))
             if unit == "month":
-                idx = f"(CAST(strftime('%Y',{time_col}) AS INTEGER) * 12 + CAST(strftime('%m',{time_col}) AS INTEGER) - 1)"
+                # 使用 substr 提取年月，格式为 YYYY-MM-01
+                year_expr = f"CAST(substr({time_col}, 1, 4) AS INTEGER)"
+                month_expr = f"CAST(substr({time_col}, 6, 2) AS INTEGER)"
+                idx = f"({year_expr} * 12 + {month_expr} - 1)"
                 bucket = f"(CAST(CAST(({idx})/{step} AS INTEGER) * {step} AS INTEGER))"
                 group_expr = f"printf('%04d-%02d-01', CAST(({bucket})/12 AS INTEGER), (({bucket}) % 12) + 1)"
             elif unit == "year":
-                yv = f"CAST(strftime('%Y',{time_col}) AS INTEGER)"
+                # 使用 substr 提取年份
+                yv = f"CAST(substr({time_col}, 1, 4) AS INTEGER)"
                 by = f"(CAST(CAST(({yv})/{step} AS INTEGER) * {step} AS INTEGER))"
                 group_expr = f"printf('%04d-01-01', {by})"
             else:
+                # 按日分组，使用 substr 提取日期部分 YYYY-MM-DD
                 seconds = 86400 * step
-                group_expr = f"date(CAST(CAST(strftime('%s',{time_col}) AS INTEGER) / {seconds} AS INTEGER) * {seconds}, 'unixepoch')"
+                group_expr = f"date(CAST(CAST(strftime('%s', substr({time_col}, 1, 10)) AS INTEGER) / {seconds} AS INTEGER) * {seconds}, 'unixepoch')"
             extra.append(f"{time_col} IS NOT NULL AND {time_col} != ''")
             preset = str(options.get("bar_time_preset") or "").strip().lower()
             start = str(options.get("bar_time_start") or "").strip()
@@ -601,16 +694,23 @@ class ChartsBackendManager:
                 all_where.append("(" + " AND ".join(extra) + ")")
             final_where = " AND ".join(all_where)
             final_params = list(params or []) + list(extra_params or [])
-            rows = self._data.query_group_agg(table_name, group_expr, y_expr, final_where, final_params, order_by="x ASC", limit=2000).rows or []
+
+            # 加新次数的特殊处理：统计在当前时段内首次添加到图库的物种数量
+            if y_kind == "new_species":
+                rows = self._query_new_species_by_time(table_name, group_expr, final_where, final_params, unit, step, time_type)
+            else:
+                rows = self._data.query_group_agg(table_name, group_expr, y_expr, final_where, final_params, order_by="x ASC", limit=2000).rows or []
             m: Dict[str, float] = {}
             for r in rows:
                 x = str(r.get("x") or "")
                 if not x:
                     continue
                 m[x] = _safe_float(r.get("y"), 0.0)
-            ignore_empty_dates = bool(self._display_options.get("ignore_empty_dates", False))
+            # 优先使用图表配置中的 ignore_empty_dates，如果没有则使用全局设置
+            ignore_empty_dates = bool(options.get("bar_ignore_empty_dates", self._display_options.get("ignore_empty_dates", False)))
             if ignore_empty_dates:
-                xs = [str(r.get("x") or "") for r in rows if str(r.get("x") or "")]
+                # 只返回有数据且值大于0的日期
+                xs = [str(r.get("x") or "") for r in rows if str(r.get("x") or "") and _safe_float(r.get("y"), 0.0) > 0]
                 if not xs:
                     return {"kind": "empty", "message": "暂无数据"}
                 ys = [m.get(x, 0.0) for x in xs]
@@ -748,14 +848,16 @@ class ChartsBackendManager:
             final_where = " AND ".join(all_where)
             final_params = list(params or []) + list(extra_params or [])
             rows = self._data.query_group_agg(table_name, group_expr, y_expr, final_where, final_params, order_by="y DESC", limit=30).rows or []
-            order = ["Green", "Blue", "Yellow", "Red", "Purple", "White", "Orange", "Pink", "Black", "None"]
+            # 色标顺序，不包含 None（无标签的图片不显示在色标统计中）
+            order = ["Green", "Blue", "Yellow", "Red", "Purple", "White", "Orange", "Pink", "Black"]
             m: Dict[str, float] = {}
             for r in rows:
                 k = str(r.get("x") or "").strip()
-                if not k:
+                # 跳过空标签和 None 标签
+                if not k or k == "None":
                     continue
                 m[k] = _safe_float(r.get("y"), 0.0)
-            xs = [x for x in order if x in m] + [k for k in m.keys() if k not in order]
+            xs = [x for x in order if x in m] + [k for k in m.keys() if k not in order and k != "None"]
             if not xs:
                 return {"kind": "empty", "message": "暂无数据"}
             ys = [m.get(x, 0.0) for x in xs]
@@ -765,6 +867,68 @@ class ChartsBackendManager:
             return {"kind": "empty", "message": "地点统计暂未实现(仅提供 UI)"}
 
         return {"kind": "empty", "message": "暂无数据"}
+
+    def _query_new_species_by_time(
+        self,
+        table_name: str,
+        group_expr: str,
+        where_expr: str,
+        params: list,
+        unit: str,
+        step: int,
+        time_type: str = "shot_time"
+    ) -> list:
+        """
+        查询加新次数：统计在每个时段内首次添加到图库的物种数量
+
+        逻辑：
+        1. 首先查询每个物种的最早添加时间
+        2. 然后按时段分组，统计每个时段内有多少物种的最早添加时间落在该时段
+        """
+        # 根据时间类型选择使用的时间列，默认为拍摄时间
+        # 对于 imported_at 和 created_at，需要处理空字符串的情况
+        if time_type == "imported_at":
+            # imported_at 可能为空字符串，使用 COALESCE 和 NULLIF 处理
+            time_col = "COALESCE(NULLIF(imported_at,''), created_at)"
+        elif time_type == "created_at":
+            time_col = "created_at"
+        else:  # 默认为拍摄时间
+            time_col = "COALESCE(NULLIF(shot_time,''), created_at)"
+        where_sql = f"WHERE {where_expr}" if where_expr else ""
+
+        # 构建时段分组表达式（用于最早记录的时间分组）
+        # 使用 substr 提取日期部分，避免 strftime 解析问题
+        if unit == "month":
+            # 按月分组：格式为 YYYY-MM-01
+            bucket_expr = f"substr(MIN({time_col}), 1, 7) || '-01'"
+        elif unit == "year":
+            # 按年分组：格式为 YYYY-01-01
+            bucket_expr = f"substr(MIN({time_col}), 1, 4) || '-01-01'"
+        else:
+            # 按日分组
+            seconds = 86400 * step
+            bucket_expr = f"date(CAST(CAST(strftime('%s', substr(MIN({time_col}), 1, 10)) AS INTEGER) / {seconds} AS INTEGER) * {seconds}, 'unixepoch')"
+
+        # 查询每个物种的最早添加时间所属的时段
+        # 注意：需要确保时间列不为空
+        time_not_empty = f"AND {time_col} IS NOT NULL AND {time_col} != ''"
+
+        sql = f"""
+            SELECT x, COUNT(*) AS y
+            FROM (
+                SELECT {bucket_expr} AS x
+                FROM {table_name}
+                {where_sql}
+                AND species_cls IS NOT NULL AND species_cls != ''
+                {time_not_empty}
+                GROUP BY species_cls
+            )
+            GROUP BY x
+            ORDER BY x ASC
+        """
+
+        result = self._query(sql, params or [])
+        return result or []
 
     def _payload_pie(self, table_name: str, options: dict) -> dict:
         cat = str(options.get("category_field") or "")
@@ -940,6 +1104,111 @@ class ChartsBackendManager:
         rows = self._query(sql, [])
         items = [{"path": str(r.get("p") or ""), "time": str(r.get("t") or "")} for r in rows if str(r.get("p") or "")]
         return {"kind": "gallery", "items": items}
+
+    def _payload_number(self, table_name: str, options: dict) -> dict:
+        """
+        数据图：显示单个数字统计
+        支持的数据类型：图片数量、鸟种数、加新数量
+        """
+        number_type = str(options.get("number_type") or "count")
+        time_type = str(options.get("number_time_type") or "shot_time")
+
+        # 根据时间类型选择使用的时间列
+        if time_type == "imported_at":
+            time_col = "COALESCE(NULLIF(imported_at,''), created_at)"
+        elif time_type == "created_at":
+            time_col = "created_at"
+        else:  # 默认为拍摄时间
+            time_col = "COALESCE(NULLIF(shot_time,''), created_at)"
+
+        # 构建时间范围筛选
+        time_start = str(options.get("number_time_start") or "").strip()
+        time_end = str(options.get("number_time_end") or "").strip()
+        time_end_now = bool(options.get("number_time_end_now", False))
+
+        extra = []
+        extra_params = []
+
+        if time_start:
+            extra.append(f"{time_col} >= ?")
+            extra_params.append(time_start)
+        if time_end and not time_end_now:
+            extra.append(f"{time_col} <= ?")
+            extra_params.append(time_end)
+
+        # 构建筛选条件
+        filters = options.get("number_filters") or []
+        if filters:
+            try:
+                filter_sql, filter_params = self._data.build_where_from_conditions(filters, exclude_fields=set())
+                if filter_sql:
+                    extra.append(filter_sql)
+                    extra_params.extend(filter_params)
+            except Exception:
+                pass
+
+        # 构建 WHERE 子句
+        where_parts = [f"{time_col} IS NOT NULL AND {time_col} != ''"]
+        if extra:
+            where_parts.extend(extra)
+        where_sql = " AND ".join(where_parts)
+
+        # 根据数据类型计算数值
+        if number_type == "species_count":
+            # 鸟种数：统计不同的物种数量
+            sql = f"""
+                SELECT COUNT(DISTINCT species_cls) as value
+                FROM {table_name}
+                WHERE {where_sql}
+                AND species_cls IS NOT NULL AND species_cls != ''
+            """
+            title = "鸟种数"
+        elif number_type == "new_species":
+            # 加新数量：统计在当前时间范围内首次出现的物种数量
+            sql = f"""
+                SELECT COUNT(*) as value
+                FROM (
+                    SELECT species_cls
+                    FROM {table_name}
+                    WHERE {where_sql}
+                    AND species_cls IS NOT NULL AND species_cls != ''
+                    GROUP BY species_cls
+                    HAVING MIN({time_col}) >= ?
+                )
+            """
+            # 加新数量需要起始时间
+            if time_start:
+                extra_params.insert(0, time_start)
+            else:
+                # 如果没有起始时间，查询所有时间
+                sql = f"""
+                    SELECT COUNT(DISTINCT species_cls) as value
+                    FROM {table_name}
+                    WHERE {where_sql}
+                    AND species_cls IS NOT NULL AND species_cls != ''
+                """
+            title = "加新数量"
+        else:
+            # 默认：图片数量
+            sql = f"""
+                SELECT COUNT(*) as value
+                FROM {table_name}
+                WHERE {where_sql}
+            """
+            title = "图片数量"
+
+        result = self._query(sql, extra_params)
+        value = int(result[0].get("value", 0)) if result else 0
+
+        return {
+            "kind": "number",
+            "value": value,
+            "title": title,
+            "meta": {
+                "number_type": number_type,
+                "time_type": time_type
+            }
+        }
 
     def _query(self, sql: str, params: list) -> List[dict]:
         return (self._data.query(sql, params).rows or []) if self._data is not None else []

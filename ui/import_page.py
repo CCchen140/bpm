@@ -2578,11 +2578,7 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
             
-            # 立即触发可见区域加载
-            try:
-                QTimer.singleShot(0, self._load_visible_thumbnails)
-            except Exception:
-                pass
+            # 先更新request_id和清理状态，再触发加载
             try:
                 if old_max <= 0 or new_max <= 0:
                     if isinstance(old_size, (tuple, list)):
@@ -2593,18 +2589,30 @@ class ImportPage(BaseImageBrowserPage):
                         new_max = max(int(self._pending_thumb_size[0]), int(self._pending_thumb_size[1]))
                     else:
                         new_max = int(self._pending_thumb_size)
+                # 尺寸变化较大时，增加request_id并清理缓存
                 if new_max > 0 and abs(new_max - old_max) >= 16:
                     try:
                         self.cache_manager.clear()
                     except Exception:
                         pass
-                    try:
-                        self._load_request_id += 1
-                        self._visible_load_force_cancel = True
-                        self.thumbnail_loader.cancel_pending()
-                        self._requested_paths = set()
-                    except Exception:
-                        pass
+            except Exception:
+                pass
+            
+            # 增加request_id，确保loader使用新的ID
+            try:
+                self._load_request_id += 1
+                self._visible_load_force_cancel = True
+                self.thumbnail_loader.cancel_pending()
+                self._requested_paths = set()
+                self._requested_retry_ts = {}
+                self._pending_visible_paths = set()
+                self._loaded_paths = set()
+            except Exception:
+                pass
+            
+            # 立即触发可见区域加载（使用新的request_id）
+            try:
+                QTimer.singleShot(0, self._load_visible_thumbnails)
             except Exception:
                 pass
             self._schedule_visible_load(immediate=True)
@@ -2632,6 +2640,7 @@ class ImportPage(BaseImageBrowserPage):
             self._apply_thumbnail_resize()
 
     def on_thumbnail_clicked_proxy(self, index, modifiers):
+        """处理缩略图点击"""
         thumbnails = self.grid_view.thumbnails
         if index < len(thumbnails):
             thumb = thumbnails[index]
@@ -2648,10 +2657,6 @@ class ImportPage(BaseImageBrowserPage):
                     if isinstance(thumb.image_info, dict):
                         p = thumb.image_info.get("path") or thumb.image_info.get("file_path")
                     self._schedule_preview(p)
-                except Exception:
-                    self._schedule_preview(thumb.image_info.get('path') if isinstance(thumb.image_info, dict) else None)
-                try:
-                    self._print_focus_detect_result(thumb.image_info.get("path"), thumb.image_info)
                 except Exception:
                     pass
                 try:
@@ -2672,10 +2677,6 @@ class ImportPage(BaseImageBrowserPage):
                     pass
                 try:
                     self._schedule_preview(img_info.get("path") or img_info.get("file_path"))
-                except Exception:
-                    self._schedule_preview(img_info.get("path"))
-                try:
-                    self._print_focus_detect_result(img_info.get("path"), img_info)
                 except Exception:
                     pass
                 try:
@@ -2767,7 +2768,11 @@ class ImportPage(BaseImageBrowserPage):
                     new_path = os.path.join(dir_path, new_name)
                     counter += 1
             try:
-                os.rename(old_path, new_path)
+                try:
+                    from utils.file.file_utils import rename_with_sidecar
+                    rename_with_sidecar(old_path, new_path)
+                except Exception:
+                    os.rename(old_path, new_path)
                 try:
                     self.db.update_file_path(old_path, new_path, os.path.basename(new_path), table_name="import_cache")
                 except Exception:
@@ -2860,6 +2865,12 @@ class ImportPage(BaseImageBrowserPage):
             val = 1 if bool(value) else 0
             self._update_virtual_db_user_field(paths, "is_favorite", val)
             self._update_status_in_memory(paths, "is_favorite", val)
+            try:
+                from utils.exif.exif_utils import EXIF_TAG
+                tags = {EXIF_TAG.Favorite.value: "True" if bool(value) else "False"}
+                self._enqueue_exif_update_tasks([(str(p), tags) for p in (paths or []) if p])
+            except Exception:
+                pass
         elif t == "label":
             try:
                 l = str(value or "")
@@ -2867,6 +2878,12 @@ class ImportPage(BaseImageBrowserPage):
                 l = ""
             self._update_virtual_db_user_field(paths, "label", l)
             self._update_status_in_memory(paths, "label", l)
+            try:
+                from utils.exif.exif_utils import EXIF_TAG
+                tags = {EXIF_TAG.Label.value: l}
+                self._enqueue_exif_update_tasks([(str(p), tags) for p in (paths or []) if p])
+            except Exception:
+                pass
         elif t == "rating":
             try:
                 r = max(0, min(5, int(value or 0)))
@@ -2874,6 +2891,12 @@ class ImportPage(BaseImageBrowserPage):
                 r = 0
             self._update_virtual_db_user_field(paths, "rating", r)
             self._update_status_in_memory(paths, "rating", r)
+            try:
+                from utils.exif.exif_utils import EXIF_TAG
+                tags = {EXIF_TAG.Rating.value: str(r)}
+                self._enqueue_exif_update_tasks([(str(p), tags) for p in (paths or []) if p])
+            except Exception:
+                pass
         elif t == "stash":
             self._set_stash_for_paths(paths, bool(value))
         elif t == "tag":
@@ -2919,6 +2942,11 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         pass
                 self._update_status_in_memory(paths, "tags", tags_str)
+                try:
+                    from utils.exif.exif_utils import EXIF_TAG
+                    self._enqueue_exif_update_tasks([(str(p), {EXIF_TAG.Tags.value: str(merged_by_path.get(p) or "")}) for p in (paths or []) if p])
+                except Exception:
+                    pass
             else:
                 try:
                     self.db.update_tags_batch_for_table(paths, tags_str, table_name="import_cache")
@@ -2926,6 +2954,11 @@ class ImportPage(BaseImageBrowserPage):
                     NotificationManager.instance().show_warning("错误", f"更新标签失败: {e}")
                     return
                 self._update_status_in_memory(paths, "tags", tags_str)
+                try:
+                    from utils.exif.exif_utils import EXIF_TAG
+                    self._enqueue_exif_update_tasks([(str(p), {EXIF_TAG.Tags.value: tags_str}) for p in (paths or []) if p])
+                except Exception:
+                    pass
 
     def on_spray_cancel_requested(self):
         try:
@@ -3313,181 +3346,256 @@ class ImportPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("错误", f"打开导入图库窗口失败: {e}")
 
     def preview_image_file(self, image_path):
+        """预览图片 - 优化版本，数据库查询放后台"""
         self.current_preview_path = image_path
         if hasattr(self, 'preview_panel'):
             self.preview_panel.load_image(image_path)
+            
+            # 立即显示基本信息（从缩略图缓存获取，不查询数据库）
             fav = False
             rating = 0
             label = ""
             bbox = None
             focus_point = None
+            eye_coordinates = None
             orig_size = None
             fdj_for_overlay = None
-            dbg_cur = ""
-            dbg_info_bbox = None
-            dbg_info_fp = None
-            dbg_db_bbox = None
-            dbg_db_fp = None
-            try:
-                info = self._find_image_info_by_path(image_path) if image_path else None
-                if isinstance(info, dict):
-                    fav = bool(int(info.get("is_favorite") or info.get("favorite") or 0) == 1)
-                    rating = int(info.get("rating") or 0)
-                    label = str(info.get("label") or "")
-                    bbox = info.get("bbox")
-                    focus_point = info.get("focus_point")
-                    try:
-                        dbg_info_bbox = bbox
-                        dbg_info_fp = focus_point
-                    except Exception:
-                        pass
-                    try:
-                        w0 = info.get("width")
-                        h0 = info.get("height")
-                        if w0 and h0:
-                            orig_size = (int(w0), int(h0))
-                    except Exception:
-                        orig_size = None
-                    if orig_size is None:
-                        try:
-                            fdj = info.get("focus_detect_json")
-                            if isinstance(fdj, str) and fdj.strip():
-                                fdj = json.loads(fdj)
-                            if isinstance(fdj, dict):
-                                fdj_for_overlay = fdj
-                                ow = fdj.get("orig_w")
-                                oh = fdj.get("orig_h")
-                                if ow and oh:
-                                    orig_size = (int(ow), int(oh))
-                        except Exception:
-                            orig_size = None
-                    if fdj_for_overlay is None and (bbox is None or focus_point is None):
-                        try:
-                            fdj = info.get("focus_detect_json")
-                            if isinstance(fdj, str) and fdj.strip():
-                                fdj = json.loads(fdj)
-                            if isinstance(fdj, dict):
-                                fdj_for_overlay = fdj
-                        except Exception:
-                            fdj_for_overlay = None
-
-                if image_path and (bbox is None or focus_point is None):
-                    rec = None
-                    try:
-                        if hasattr(self, "db") and self.db is not None and isinstance(info, dict):
-                            fid0 = info.get("fast_id")
-                            if fid0 and hasattr(self.db, "get_results_by_fast_ids"):
-                                m = self.db.get_results_by_fast_ids([str(fid0)], table_name="import_cache") or {}
-                                rec = m.get(str(fid0)) if isinstance(m, dict) else None
-                            if rec is None:
-                                u0 = info.get("uuid")
-                                if u0 and hasattr(self.db, "get_result_by_uuid"):
-                                    rec = self.db.get_result_by_uuid(str(u0), table_name="import_cache")
-                    except Exception:
-                        rec = None
-                    if rec is None:
-                        try:
-                            recs = self.db.get_results_by_paths([str(image_path)], table_name="import_cache") if hasattr(self, "db") else {}
-                        except Exception:
-                            recs = {}
-                        try:
-                            rec = recs.get(str(image_path))
-                        except Exception:
-                            rec = None
-                        if not isinstance(rec, dict):
-                            rec = None
-                    if rec is not None:
-                        try:
-                            fav = bool(int(rec.get("is_favorite") or 0) == 1)
-                        except Exception:
-                            pass
-                        try:
-                            rating = int(rec.get("rating") or 0)
-                        except Exception:
-                            pass
-                        try:
-                            label = str(rec.get("label") or "")
-                        except Exception:
-                            pass
-                        try:
-                            bbox = rec.get("bbox")
-                        except Exception:
-                            pass
-                        try:
-                            focus_point = rec.get("focus_point")
-                        except Exception:
-                            pass
-                        try:
-                            dbg_db_bbox = bbox
-                            dbg_db_fp = focus_point
-                        except Exception:
-                            pass
-                        if orig_size is None:
+            
+            # 优先从缩略图缓存获取信息（快速，不阻塞UI）
+            if image_path:
+                try:
+                    key = self._normalize_path_key(image_path)
+                    thumbs = self._thumb_by_path.get(key, [])
+                    if thumbs:
+                        info = getattr(thumbs[0], "image_info", None)
+                        if isinstance(info, dict):
+                            fav = bool(int(info.get("is_favorite") or info.get("favorite") or 0)) == 1
+                            rating = int(info.get("rating") or 0)
+                            label = str(info.get("label") or "")
+                            bbox = info.get("bbox")
+                            focus_point = info.get("focus_point")
+                            eye_coordinates = info.get("eye_coordinates")
                             try:
-                                fdj = rec.get("focus_detect_json")
-                                if isinstance(fdj, str) and fdj.strip():
-                                    fdj = json.loads(fdj)
-                                if isinstance(fdj, dict):
-                                    fdj_for_overlay = fdj
-                                    ow = fdj.get("orig_w")
-                                    oh = fdj.get("orig_h")
-                                    if ow and oh:
-                                        orig_size = (int(ow), int(oh))
-                            except Exception:
-                                orig_size = None
-                        if fdj_for_overlay is None and (bbox is None or focus_point is None):
-                            try:
-                                fdj = rec.get("focus_detect_json")
-                                if isinstance(fdj, str) and fdj.strip():
-                                    fdj = json.loads(fdj)
-                                if isinstance(fdj, dict):
-                                    fdj_for_overlay = fdj
+                                w0 = info.get("width")
+                                h0 = info.get("height")
+                                if w0 and h0:
+                                    orig_size = (int(w0), int(h0))
                             except Exception:
                                 pass
-            except Exception:
-                fav = False
-                rating = 0
-                label = ""
-                bbox = None
-                focus_point = None
-                orig_size = None
-                fdj_for_overlay = None
-
-            if bbox is None and isinstance(fdj_for_overlay, dict):
-                if bbox is None:
-                    try:
-                        bbox = fdj_for_overlay.get("bbox_orig") or fdj_for_overlay.get("bbox")
-                    except Exception:
-                        pass
-            try:
-                if bool(getattr(self, "is_virtual_mode", False)):
-                    try:
-                        dbg_cur = str(getattr(self, "_current_folder_path", "") or "")
-                    except Exception:
-                        dbg_cur = ""
-                    if dbg_cur.startswith("virtual://focus_detect?") or dbg_cur.startswith("virtual://focus_detect_burst?"):
-                        from utils.log_manager import LogManager
-                        LogManager.instance().info(
-                            f"[FocusDetectUI] click path={str(image_path)} cur={dbg_cur} "
-                            f"info_bbox={repr(dbg_info_bbox)[:160]} info_fp={repr(dbg_info_fp)[:160]} "
-                            f"db_bbox={repr(dbg_db_bbox)[:160]} db_fp={repr(dbg_db_fp)[:160]} "
-                            f"final_bbox={repr(bbox)[:160]} final_fp={repr(focus_point)[:160]} orig_size={repr(orig_size)}"
-                        )
-            except Exception:
-                pass
+                            try:
+                                fdj = info.get("focus_detect_json")
+                                if isinstance(fdj, str) and fdj.strip():
+                                    fdj = json.loads(fdj)
+                                if isinstance(fdj, dict):
+                                    fdj_for_overlay = fdj
+                                    if orig_size is None:
+                                        ow = fdj.get("orig_w")
+                                        oh = fdj.get("orig_h")
+                                        if ow and oh:
+                                            orig_size = (int(ow), int(oh))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            
+            # 立即更新UI（不等待数据库查询）
             self.preview_panel.set_favorite(bool(fav))
             self.preview_panel.set_rating(int(rating))
             self.preview_panel.set_label(str(label))
             try:
                 if hasattr(self.preview_panel, "set_overlays"):
-                    self.preview_panel.set_overlays(bbox=bbox, focus_point=focus_point, orig_size=orig_size)
+                    self.preview_panel.set_overlays(bbox=bbox, focus_point=focus_point, eye_coordinates=eye_coordinates, orig_size=orig_size)
             except Exception:
                 pass
-        self._update_info_panel(image_path)
-        try:
-            QTimer.singleShot(0, self._backfill_visible_thumbnails_from_import_cache)
-        except Exception:
-            pass
+            
+            # 后台加载详细信息（数据库查询）
+            if image_path:
+                self._load_preview_details_async(image_path, fav, rating, label, bbox, focus_point, eye_coordinates, orig_size, fdj_for_overlay)
+    
+    def _load_preview_details_async(self, image_path, current_fav, current_rating, current_label, current_bbox, current_fp, current_eye, current_orig_size, current_fdj):
+        """后台加载预览详情"""
+        from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
+        
+        class Signals(QObject):
+            finished = pyqtSignal(object, dict)
+        
+        class Worker(QRunnable):
+            def __init__(self, parent, image_path):
+                super().__init__()
+                self.parent = parent
+                self.image_path = image_path
+                self.signals = Signals()
+            
+            def run(self):
+                try:
+                    result = self._load_details()
+                    self.signals.finished.emit(self.image_path, result)
+                except Exception:
+                    pass
+            
+            def _load_details(self):
+                result = {
+                    "fav": False, "rating": 0, "label": "",
+                    "bbox": None, "focus_point": None, "eye_coordinates": None,
+                    "orig_size": None, "fdj_for_overlay": None
+                }
+                
+                # 从内存缓存获取
+                info = None
+                try:
+                    key = self.parent._normalize_path_key(self.image_path)
+                    thumbs = self.parent._thumb_by_path.get(key, [])
+                    if thumbs:
+                        info = getattr(thumbs[0], "image_info", None)
+                except Exception:
+                    pass
+                
+                if isinstance(info, dict):
+                    result["fav"] = bool(int(info.get("is_favorite") or info.get("favorite") or 0)) == 1
+                    result["rating"] = int(info.get("rating") or 0)
+                    result["label"] = str(info.get("label") or "")
+                    result["bbox"] = info.get("bbox")
+                    result["focus_point"] = info.get("focus_point")
+                    result["eye_coordinates"] = info.get("eye_coordinates")
+                    try:
+                        w0 = info.get("width")
+                        h0 = info.get("height")
+                        if w0 and h0:
+                            result["orig_size"] = (int(w0), int(h0))
+                    except Exception:
+                        pass
+                    try:
+                        fdj = info.get("focus_detect_json")
+                        if isinstance(fdj, str) and fdj.strip():
+                            fdj = json.loads(fdj)
+                        if isinstance(fdj, dict):
+                            result["fdj_for_overlay"] = fdj
+                            if result["orig_size"] is None:
+                                ow = fdj.get("orig_w")
+                                oh = fdj.get("orig_h")
+                                if ow and oh:
+                                    result["orig_size"] = (int(ow), int(oh))
+                    except Exception:
+                        pass
+                
+                # 如果内存中没有，查询数据库
+                if info is None or (result["bbox"] is None or result["focus_point"] is None):
+                    try:
+                        recs = self.parent.db.get_results_by_paths([str(self.image_path)], table_name="import_cache") if hasattr(self.parent, "db") else {}
+                        rec = recs.get(str(self.image_path)) if isinstance(recs, dict) else None
+                        if isinstance(rec, dict):
+                            if result["bbox"] is None:
+                                result["bbox"] = rec.get("bbox")
+                            if result["focus_point"] is None:
+                                result["focus_point"] = rec.get("focus_point")
+                            if result["eye_coordinates"] is None:
+                                result["eye_coordinates"] = rec.get("eye_coordinates")
+                            if result["fdj_for_overlay"] is None:
+                                try:
+                                    fdj = rec.get("focus_detect_json")
+                                    if isinstance(fdj, str) and fdj.strip():
+                                        fdj = json.loads(fdj)
+                                    if isinstance(fdj, dict):
+                                        result["fdj_for_overlay"] = fdj
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                
+                return result
+        
+        def _on_finished(path, result):
+            # 检查当前预览路径是否已改变
+            try:
+                if str(getattr(self, "current_preview_path", "")) != str(path):
+                    return
+            except Exception:
+                return
+            
+            # 更新UI
+            try:
+                self.preview_panel.set_favorite(bool(result.get("fav", False)))
+                self.preview_panel.set_rating(int(result.get("rating", 0)))
+                self.preview_panel.set_label(str(result.get("label", "")))
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(self.preview_panel, "set_overlays"):
+                    self.preview_panel.set_overlays(
+                        bbox=result.get("bbox"),
+                        focus_point=result.get("focus_point"),
+                        eye_coordinates=result.get("eye_coordinates"),
+                        orig_size=result.get("orig_size")
+                    )
+            except Exception:
+                pass
+        
+            worker = Worker(self, image_path)
+            worker.signals.finished.connect(_on_finished)
+            QThreadPool.globalInstance().start(worker)
+    
+    def _is_missing_fp(self, v) -> bool:
+        """检查对焦点是否缺失"""
+        if v is None:
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return True
+            s2 = s.lower()
+            if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                return True
+            try:
+                obj = json.loads(s)
+            except Exception:
+                return False
+            return self._is_missing_fp(obj)
+        if isinstance(v, (list, tuple)):
+            return len(v) < 2
+        if isinstance(v, dict):
+            if "x" in v and "y" in v:
+                try:
+                    float(v.get("x"))
+                    float(v.get("y"))
+                    return False
+                except Exception:
+                    return True
+            return True
+        return False
+    
+    def _is_missing_xy(self, v) -> bool:
+        """检查XY坐标是否缺失"""
+        if v is None:
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return True
+            s2 = s.lower()
+            if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                return True
+            try:
+                obj = json.loads(s)
+            except Exception:
+                return False
+            return self._is_missing_xy(obj)
+        if isinstance(v, (list, tuple)):
+            return len(v) < 2
+        if isinstance(v, dict):
+            if "x" in v and "y" in v:
+                try:
+                    float(v.get("x"))
+                    float(v.get("y"))
+                    return False
+                except Exception:
+                    return True
+            return True
+        return False
+    
+    def _old_preview_image_file(self, image_path):
+        """旧的预览方法（保留用于参考）"""
+        pass
 
     def _refresh_current_preview_overlays_from_import_cache(self):
         try:
@@ -3508,8 +3616,63 @@ class ImportPage(BaseImageBrowserPage):
             info = None
         bbox = None
         focus_point = None
+        eye_coordinates = None
         orig_size = None
         fdj = None
+        def _is_missing_fp(v) -> bool:
+            if v is None:
+                return True
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return True
+                s2 = s.lower()
+                if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                    return True
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return False
+                return _is_missing_fp(obj)
+            if isinstance(v, (list, tuple)):
+                return len(v) < 2
+            if isinstance(v, dict):
+                if "x" in v and "y" in v:
+                    try:
+                        float(v.get("x"))
+                        float(v.get("y"))
+                        return False
+                    except Exception:
+                        return True
+                return True
+            return False
+        def _is_missing_xy(v) -> bool:
+            if v is None:
+                return True
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return True
+                s2 = s.lower()
+                if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                    return True
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return False
+                return _is_missing_xy(obj)
+            if isinstance(v, (list, tuple)):
+                return len(v) < 2
+            if isinstance(v, dict):
+                if "x" in v and "y" in v:
+                    try:
+                        float(v.get("x"))
+                        float(v.get("y"))
+                        return False
+                    except Exception:
+                        return True
+                return True
+            return False
         if isinstance(info, dict):
             try:
                 bbox = info.get("bbox")
@@ -3519,6 +3682,10 @@ class ImportPage(BaseImageBrowserPage):
                 focus_point = info.get("focus_point")
             except Exception:
                 focus_point = None
+            try:
+                eye_coordinates = info.get("eye_coordinates")
+            except Exception:
+                eye_coordinates = None
             try:
                 w0 = info.get("width")
                 h0 = info.get("height")
@@ -3535,7 +3702,7 @@ class ImportPage(BaseImageBrowserPage):
             except Exception:
                 fdj = None
 
-        if (bbox is None or focus_point is None) and fdj is None:
+        if (bbox is None or _is_missing_fp(focus_point) or _is_missing_xy(eye_coordinates)) and fdj is None:
             rec = None
             try:
                 if hasattr(self, "db") and self.db is not None and isinstance(info, dict):
@@ -3565,6 +3732,11 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
                 try:
+                    if eye_coordinates is None:
+                        eye_coordinates = rec.get("eye_coordinates")
+                except Exception:
+                    pass
+                try:
                     raw_fdj = rec.get("focus_detect_json")
                     if isinstance(raw_fdj, str) and raw_fdj.strip():
                         raw_fdj = json.loads(raw_fdj)
@@ -3587,9 +3759,84 @@ class ImportPage(BaseImageBrowserPage):
                     bbox = fdj.get("bbox_orig") or fdj.get("bbox")
                 except Exception:
                     pass
+        if _is_missing_fp(focus_point) and isinstance(fdj, dict):
+            try:
+                focus_point = fdj.get("focus_point")
+            except Exception:
+                focus_point = focus_point
+        if eye_coordinates is None and isinstance(fdj, dict):
+            try:
+                eye_coordinates = fdj.get("eye_coordinates") or fdj.get("eye")
+            except Exception:
+                pass
 
         try:
-            panel.set_overlays(bbox=bbox, focus_point=focus_point, orig_size=orig_size)
+            panel.set_overlays(bbox=bbox, focus_point=focus_point, eye_coordinates=eye_coordinates, orig_size=orig_size)
+        except Exception:
+            pass
+
+        try:
+            need_fp = False
+            try:
+                show_fp = bool(self.settings_manager.get("focus_detect_ui/show_focus_point", True))
+            except Exception:
+                show_fp = True
+            try:
+                need_fp = bool(show_fp) and bool(getattr(self, "is_virtual_mode", False)) and _is_missing_fp(focus_point)
+            except Exception:
+                need_fp = False
+            if need_fp:
+                try:
+                    inflight = getattr(self, "_af_point_inflight", None)
+                except Exception:
+                    inflight = None
+                if not isinstance(inflight, set):
+                    inflight = set()
+                    try:
+                        self._af_point_inflight = inflight
+                    except Exception:
+                        pass
+                if str(p) not in inflight:
+                    inflight.add(str(p))
+                    def _worker():
+                        fp_payload = None
+                        try:
+                            from utils.exif.camera_af_point import get_camera_af_center_point_or_none
+                            fp_payload = get_camera_af_center_point_or_none(str(p or ""))
+                        except Exception:
+                            fp_payload = None
+                        def _apply():
+                            try:
+                                inflight.discard(str(p))
+                            except Exception:
+                                pass
+                            if not fp_payload:
+                                return
+                            try:
+                                if str(getattr(self, "current_preview_path", "") or "") != str(p):
+                                    return
+                            except Exception:
+                                return
+                            try:
+                                if isinstance(info, dict):
+                                    info["focus_point"] = fp_payload
+                            except Exception:
+                                pass
+                            try:
+                                panel.set_overlays(bbox=bbox, focus_point=fp_payload, eye_coordinates=eye_coordinates, orig_size=orig_size)
+                            except Exception:
+                                pass
+                            try:
+                                from utils.log_manager import LogManager
+                                LogManager.instance().info(f"[FocusDetectUI] fp_backfill path={str(p)} fp={repr(fp_payload)[:160]}")
+                            except Exception:
+                                pass
+                        try:
+                            QTimer.singleShot(0, _apply)
+                        except Exception:
+                            _apply()
+                    import threading
+                    threading.Thread(target=_worker, daemon=True).start()
         except Exception:
             pass
 
@@ -3646,6 +3893,21 @@ class ImportPage(BaseImageBrowserPage):
             if exp:
                 return "对焦点落在鸟框内，判为锐利；同时爆框，归为爆框"
             return "对焦点落在鸟框内，按设置强制判为锐利"
+        if r0 == "focus_point_in_eye_override":
+            exp = bool(debug.get("exp_frame", False))
+            try:
+                dist = float(debug.get("distance") or 0.0)
+            except Exception:
+                dist = 0.0
+            if exp:
+                return f"对焦点落在鸟眼上（距离{dist:.1f}px），判为锐利；同时爆框，归为爆框"
+            return f"对焦点落在鸟眼上（距离{dist:.1f}px），按设置强制判为锐利"
+        if r0 == "absolute_blur_detected":
+            try:
+                conf = float(debug.get("abs_blur_confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            return f"绝对模糊检测置信度{conf:.2f}≥0.5，强制判为虚焦"
 
         try:
             score = float(debug.get("score") or 0.0)
@@ -3691,6 +3953,11 @@ class ImportPage(BaseImageBrowserPage):
         return base or "-"
 
     def _update_info_panel(self, image_path):
+        """更新信息面板 - 极速版本，避免任何阻塞操作"""
+        import time
+        import traceback
+        t_start = time.time()
+        
         try:
             panel = getattr(self, "info_panel", None)
             if panel is None:
@@ -3698,111 +3965,225 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             return
 
-        ctx = None
         try:
-            p0 = str(image_path or "")
-        except Exception:
-            p0 = ""
-        p1 = p0.strip()
-        try:
-            s = p1.replace("\r", "").strip()
-            if "路径:" in s:
-                s = s.split("路径:")[-1].strip()
-            if "原图片的路径" in s:
-                s = s.split("原图片的路径")[-1].strip()
-            if s.startswith(":"):
-                s = s[1:].strip()
-            low = s.lower()
-            if low.startswith("file:///"):
-                s = s[8:]
-            elif low.startswith("file://"):
-                s = s[7:]
-            s = s.strip().strip('"').strip("'").strip()
-            p1 = s
-        except Exception:
-            p1 = p1.strip()
-        if not p1:
-            try:
-                selected = self.get_selected_files() or []
-            except Exception:
-                selected = []
-            if len(selected) == 1 and isinstance(selected[0], dict):
+            # 快速路径：直接使用传入的路径，不做复杂解析
+            p1 = ""
+            if image_path:
                 try:
-                    p1 = str(selected[0].get("path") or selected[0].get("file_path") or "").strip()
+                    p1 = str(image_path).strip()
+                    # 只处理最简单的file://前缀
+                    if p1.lower().startswith("file:///"):
+                        p1 = p1[8:]
+                    elif p1.lower().startswith("file://"):
+                        p1 = p1[7:]
                 except Exception:
                     p1 = ""
-        if not p1:
-            try:
-                idx = int(getattr(self.grid_view, "last_selected_index", -1))
-            except Exception:
-                idx = -1
-            try:
-                thumbs = getattr(self.grid_view, "thumbnails", []) or []
-            except Exception:
-                thumbs = []
-            if 0 <= idx < len(thumbs):
+            
+            # 如果传入的路径为空，尝试从grid_view获取（避免get_selected_files）
+            if not p1:
                 try:
-                    info = getattr(thumbs[idx], "image_info", None)
+                    idx = int(getattr(self.grid_view, "last_selected_index", -1))
+                    thumbs = getattr(self.grid_view, "thumbnails", []) or []
+                    if 0 <= idx < len(thumbs):
+                        info = getattr(thumbs[idx], "image_info", None)
+                        if isinstance(info, dict):
+                            p1 = str(info.get("path") or info.get("file_path") or "").strip()
                 except Exception:
-                    info = None
-                if isinstance(info, dict):
+                    pass
+            
+            # 立即更新基本信息（不阻塞UI）
+            try:
+                panel.update_info(p1, None)
+            except Exception as e:
+                print(f"[ERROR] _update_info_panel panel.update_info failed: {e}")
+                traceback.print_exc()
+            
+            # 虚拟文件模式下，耗时计算放后台线程
+            try:
+                cur = str(getattr(self, "_current_folder_path", "") or "")
+            except Exception:
+                cur = ""
+            
+            if p1 and bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?")):
+                # 初始化缓存
+                if not hasattr(self, "_info_panel_cache"):
+                    self._info_panel_cache = {}
+                
+                cache_key = f"{p1}_{cur}"
+                current_time = int(__import__('time').time())
+                
+                # 检查缓存（2秒内有效）
+                cached = self._info_panel_cache.get(cache_key)
+                if cached and (current_time - cached.get("time", 0)) < 2:
+                    ctx = cached.get("ctx")
+                    # 使用缓存数据更新
                     try:
-                        p1 = str(info.get("path") or info.get("file_path") or "").strip()
+                        panel.update_info(p1, ctx)
                     except Exception:
-                        p1 = ""
-        try:
-            cur = str(getattr(self, "_current_folder_path", "") or "")
+                        pass
+                else:
+                    # 启动后台线程计算
+                    self._start_info_panel_update_worker(p1, cur, cache_key, current_time)
+            
         except Exception:
-            cur = ""
-        if p1 and bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?")):
-            try:
-                rec = self.db.get_result_by_path(p1, table_name="import_cache") if hasattr(self, "db") else None
-            except Exception:
-                rec = None
-            if not isinstance(rec, dict):
-                rec = self._find_image_info_by_path(p1) if hasattr(self, "_find_image_info_by_path") else None
-            if not isinstance(rec, dict):
-                rec = {}
-            try:
-                thresholds = self._get_focus_detect_ui_thresholds()
-            except Exception:
-                thresholds = {}
-            try:
-                st, dbg = self._compute_focus_status_and_debug(rec, thresholds)
-            except Exception:
-                st, dbg = "NoBird", {"reason": "no_focus_detect"}
-            try:
-                ctx = {
-                    "focus_status": f"{self._focus_status_label(st)}（{str(st or '')}）" if str(st or "") else "-",
-                    "focus_reason": self._format_focus_classification_reason(st, dbg),
-                }
-            except Exception:
-                ctx = None
-            if isinstance(ctx, dict):
-                try:
-                    ctx["score"] = rec.get("score")
-                except Exception:
-                    pass
-                try:
-                    ctx["norm_score"] = rec.get("norm_score")
-                except Exception:
-                    pass
-                try:
-                    ctx["area_ratio"] = rec.get("area_ratio")
-                except Exception:
-                    pass
-                try:
-                    ctx["rating"] = rec.get("rating")
-                except Exception:
-                    pass
+            pass
 
+    def _start_info_panel_update_worker(self, p1: str, cur: str, cache_key: str, current_time: int):
+        """启动后台线程更新信息面板 - 使用防抖机制避免任务堆积"""
+        # 使用防抖机制：如果已有待处理的任务，取消旧的
+        if not hasattr(self, "_info_panel_pending"):
+            self._info_panel_pending = {}
+        
+        # 标记当前路径有待处理更新
+        self._info_panel_pending[cache_key] = {
+            "p1": p1, "cur": cur, "cache_key": cache_key, "current_time": current_time
+        }
+        
+        # 延迟启动，避免连续点击时产生大量任务
         try:
-            panel.update_info(p1, ctx)
+            if hasattr(self, "_info_panel_timer") and self._info_panel_timer is not None:
+                self._info_panel_timer.stop()
         except Exception:
-            try:
-                panel.update_info(p1)
-            except Exception:
-                pass
+            pass
+        
+        from PyQt6.QtCore import QTimer
+        self._info_panel_timer = QTimer(self)
+        self._info_panel_timer.setSingleShot(True)
+        self._info_panel_timer.timeout.connect(lambda: self._execute_info_panel_update())
+        self._info_panel_timer.start(100)  # 延迟100ms执行
+    
+    def _execute_info_panel_update(self):
+        """执行信息面板更新（防抖后）"""
+        if not hasattr(self, "_info_panel_pending") or not self._info_panel_pending:
+            return
+        
+        # 只处理最后一个待更新的
+        items = list(self._info_panel_pending.items())
+        self._info_panel_pending.clear()
+        
+        if not items:
+            return
+        
+        # 获取最后一个（最新的）
+        _, params = items[-1]
+        p1 = params["p1"]
+        cur = params["cur"]
+        cache_key = params["cache_key"]
+        current_time = params["current_time"]
+        
+        # 使用线程池执行
+        from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
+        
+        class WorkerSignals(QObject):
+            finished = pyqtSignal(str, dict, str, int)
+        
+        class InfoPanelWorker(QRunnable):
+            def __init__(self, parent, p1, cur, cache_key, current_time):
+                super().__init__()
+                self.parent = parent
+                self.p1 = p1
+                self.cur = cur
+                self.cache_key = cache_key
+                self.current_time = current_time
+                self.signals = WorkerSignals()
+            
+            def run(self):
+                try:
+                    ctx = self._compute_context()
+                    self.signals.finished.emit(self.p1, ctx, self.cache_key, self.current_time)
+                except Exception:
+                    pass
+            
+            def _compute_context(self):
+                # 使用缩略图缓存快速获取信息
+                rec = None
+                try:
+                    key = self.parent._normalize_path_key(self.p1)
+                    thumbs = self.parent._thumb_by_path.get(key, [])
+                    if thumbs:
+                        rec = getattr(thumbs[0], "image_info", None)
+                except Exception:
+                    rec = None
+                
+                # 回退到数据库查询
+                if not isinstance(rec, dict):
+                    try:
+                        rec = self.parent.db.get_result_by_path(self.p1, table_name="import_cache") if hasattr(self.parent, "db") else None
+                    except Exception:
+                        rec = None
+                
+                if not isinstance(rec, dict):
+                    rec = {}
+                
+                # 获取阈值（使用类级别缓存）
+                thresholds = getattr(self.parent, "_cached_focus_thresholds", None)
+                if thresholds is None:
+                    try:
+                        thresholds = self.parent._get_focus_detect_ui_thresholds()
+                        self.parent._cached_focus_thresholds = thresholds
+                    except Exception:
+                        thresholds = {}
+                
+                try:
+                    st, dbg = self.parent._compute_focus_status_and_debug(rec, thresholds)
+                except Exception:
+                    st, dbg = "NoBird", {"reason": "no_focus_detect"}
+                
+                try:
+                    ctx = {
+                        "focus_status": f"{self.parent._focus_status_label(st)}（{str(st or '')}）" if str(st or "") else "-",
+                        "focus_reason": self.parent._format_focus_classification_reason(st, dbg),
+                    }
+                except Exception:
+                    return None
+                
+                if isinstance(ctx, dict):
+                    try:
+                        ctx["score"] = rec.get("score")
+                    except Exception:
+                        pass
+                    try:
+                        ctx["norm_score"] = rec.get("norm_score")
+                    except Exception:
+                        pass
+                    try:
+                        ctx["area_ratio"] = rec.get("area_ratio")
+                    except Exception:
+                        pass
+                    try:
+                        ctx["rating"] = rec.get("rating")
+                    except Exception:
+                        pass
+                
+                return ctx
+        
+        # 创建并启动工作线程
+        worker = InfoPanelWorker(self, p1, cur, cache_key, current_time)
+        worker.signals.finished.connect(self._on_info_panel_worker_finished)
+        QThreadPool.globalInstance().start(worker)
+    
+    def _on_info_panel_worker_finished(self, p1: str, ctx: dict, cache_key: str, current_time: int):
+        """后台线程完成回调"""
+        # 更新缓存
+        if not hasattr(self, "_info_panel_cache"):
+            self._info_panel_cache = {}
+        
+        self._info_panel_cache[cache_key] = {"ctx": ctx, "time": current_time}
+        
+        # 清理过期缓存（保留最近100个）
+        if len(self._info_panel_cache) > 100:
+            sorted_keys = sorted(self._info_panel_cache.keys(), 
+                               key=lambda k: self._info_panel_cache[k].get("time", 0))
+            for old_key in sorted_keys[:-100]:
+                del self._info_panel_cache[old_key]
+        
+        # 更新UI
+        try:
+            panel = getattr(self, "info_panel", None)
+            if panel is not None:
+                panel.update_info(p1, ctx)
+        except Exception:
+            pass
 
     def clear_preview(self):
         self.current_preview_path = None
@@ -3901,6 +4282,8 @@ class ImportPage(BaseImageBrowserPage):
                     status_sel = str(status or "All") or "All"
 
                     def run_scan():
+                        import time
+                        t_start = time.time()
                         items = []
                         bird_map_norm = {}
                         try:
@@ -3944,6 +4327,9 @@ class ImportPage(BaseImageBrowserPage):
                                     st = self._compute_focus_status_for_item(r, thresholds)
                                 except Exception:
                                     st = "NoBird"
+                                # 注意：不在扫描时根据状态筛选文件
+                                # 状态筛选在 _filter_files_for_display 中进行
+                                # 这样可以确保 _all_image_files 包含所有文件，用于正确的计数
                                 try:
                                     stat = os.stat(fp)
                                     file_size = int(stat.st_size)
@@ -4069,6 +4455,7 @@ class ImportPage(BaseImageBrowserPage):
                                         "area_ratio": r.get("area_ratio"),
                                         "bbox": r.get("bbox"),
                                         "focus_point": r.get("focus_point"),
+                                        "eye_coordinates": r.get("eye_coordinates"),
                                         "position": r.get("position"),
                                         "object": r.get("object"),
                                         "iso": iso,
@@ -4171,6 +4558,8 @@ class ImportPage(BaseImageBrowserPage):
                         return v.strip()
 
                     def run_scan():
+                        import time
+                        t_start = time.time()
                         items = []
                         try:
                             rows = self.db.list_import_cache_by_folder(folder, limit=100000)
@@ -4228,6 +4617,19 @@ class ImportPage(BaseImageBrowserPage):
                                 fp = str(r.get("file_path") or "")
                                 if not fp:
                                     continue
+                                # 检查文件是否在子文件夹中
+                                try:
+                                    fp_dir = self._normalize_folder_key(os.path.dirname(fp))
+                                    folder_norm = self._normalize_folder_key(folder)
+                                    if folder_norm and not folder_norm.endswith(os.sep):
+                                        folder_norm = folder_norm + os.sep
+                                    # 如果文件在子文件夹中，跳过
+                                    if fp_dir != folder_norm.rstrip(os.sep):
+                                        # 只有在指定了 sub_sel 时才包含子文件夹中的文件
+                                        if not sub_sel:
+                                            continue
+                                except Exception:
+                                    pass
                                 if sub_sel:
                                     try:
                                         base = self._normalize_folder_key(folder)
@@ -4254,6 +4656,9 @@ class ImportPage(BaseImageBrowserPage):
                                     st = self._compute_focus_status_for_item(r, thresholds)
                                 except Exception:
                                     st = "NoBird"
+                                # 注意：不在扫描时根据状态筛选文件
+                                # 状态筛选在 _filter_files_for_display 中进行
+                                # 这样可以确保 _all_image_files 包含所有文件，用于正确的计数
                                 try:
                                     stat = os.stat(fp)
                                     file_size = int(stat.st_size)
@@ -4442,6 +4847,7 @@ class ImportPage(BaseImageBrowserPage):
                                         "area_ratio": r.get("area_ratio"),
                                         "bbox": r.get("bbox"),
                                         "focus_point": r.get("focus_point"),
+                                        "eye_coordinates": r.get("eye_coordinates"),
                                         "position": r.get("position"),
                                         "object": r.get("object"),
                                         "iso": iso,
@@ -4457,6 +4863,7 @@ class ImportPage(BaseImageBrowserPage):
                                 continue
                         if request_id != self._folder_load_request_id:
                             return
+                        t_total = (time.time() - t_start) * 1000
                         self.scanResultsReady.emit(request_id, items)
 
                     Thread(target=run_scan, daemon=True, name=f"ImportVirtualScan-{request_id}").start()
@@ -4814,6 +5221,17 @@ class ImportPage(BaseImageBrowserPage):
                         )
                     QTimer.singleShot(0, self._backfill_visible_thumbnails_from_import_cache)
                     QTimer.singleShot(0, self._refresh_current_preview_overlays_from_import_cache)
+                elif cur.startswith("virtual://focus_detect_burst?"):
+                    folder, first_name, _ = self._parse_focus_detect_burst_virtual_path(cur)
+                    if folder and first_name:
+                        QTimer.singleShot(
+                            0,
+                            lambda f=str(folder), fn=str(first_name): self._update_focus_detect_burst_virtual_group_counts(
+                                f, fn, getattr(self, "_all_image_files", []) or []
+                            ),
+                        )
+                    QTimer.singleShot(0, self._backfill_visible_thumbnails_from_import_cache)
+                    QTimer.singleShot(0, self._refresh_current_preview_overlays_from_import_cache)
         except Exception:
             pass
 
@@ -4850,11 +5268,6 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
             self.image_files.append(info)
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)) and self.image_files:
-                self._schedule_focus_point_backfill(self.image_files)
-        except Exception:
-            pass
         try:
             if bool(getattr(self, "is_virtual_mode", False)) and self.image_files:
                 cur = str(getattr(self, "_current_folder_path", "") or "")
@@ -4947,47 +5360,7 @@ class ImportPage(BaseImageBrowserPage):
             pass
 
     def _schedule_focus_point_backfill(self, file_list):
-        try:
-            from utils.worker.focus_point_backfill import FocusPointBackfillService
-        except Exception:
-            return
-        try:
-            bridge = getattr(self, "_focus_point_backfill_bridge", None)
-        except Exception:
-            bridge = None
-        if bridge is None:
-            try:
-                class _FocusPointBackfillBridge(QObject):
-                    updated = pyqtSignal(object)
-
-                bridge = _FocusPointBackfillBridge()
-                bridge.updated.connect(lambda u: self._apply_exif_updates(u))
-                self._focus_point_backfill_bridge = bridge
-            except Exception:
-                bridge = None
-        paths = []
-        try:
-            for it in (file_list or [])[:800]:
-                if not isinstance(it, dict):
-                    continue
-                fp = it.get("focus_point")
-                if not bool(self._is_missing_focus_point_value(fp)):
-                    continue
-                p = it.get("path")
-                if p:
-                    paths.append(str(p))
-        except Exception:
-            paths = []
-        if not paths:
-            return
-        try:
-            FocusPointBackfillService.instance().submit(
-                paths,
-                table_name="import_cache",
-                callback=(lambda updates: bridge.updated.emit(updates)) if bridge is not None else None,
-            )
-        except Exception:
-            pass
+        return
 
     def _normalize_folder_key(self, folder_path: str) -> str:
         if not folder_path:
@@ -5373,13 +5746,13 @@ class ImportPage(BaseImageBrowserPage):
     def _get_focus_detect_ui_thresholds(self) -> dict:
         out = {}
         try:
-            out["sharp_threshold"] = int(self.settings_manager.get("focus_detect_ui/sharp_threshold", 60) or 60)
+            out["sharp_threshold"] = int(self.settings_manager.get("focus_detect_ui/sharp_threshold", 80) or 80)
         except Exception:
-            out["sharp_threshold"] = 60
+            out["sharp_threshold"] = 80
         try:
-            out["norm_sharp_threshold"] = int(self.settings_manager.get("focus_detect_ui/norm_sharp_threshold", 110) or 110)
+            out["norm_sharp_threshold"] = int(self.settings_manager.get("focus_detect_ui/norm_sharp_threshold", 130) or 130)
         except Exception:
-            out["norm_sharp_threshold"] = 110
+            out["norm_sharp_threshold"] = 130
         try:
             out["normal_contrast_threshold"] = float(self.settings_manager.get("focus_detect_ui/normal_contrast_threshold", 0.8) or 0.8)
         except Exception:
@@ -5401,17 +5774,13 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             out["hf_margin_threshold"] = 5.0
         try:
-            out["texture_ratio_threshold"] = float(self.settings_manager.get("focus_detect_ui/texture_ratio_threshold", 1.1) or 1.1)
-        except Exception:
-            out["texture_ratio_threshold"] = 1.1
-        try:
-            out["texture_weight"] = float(self.settings_manager.get("focus_detect_ui/texture_weight", 0.0) or 0.0)
-        except Exception:
-            out["texture_weight"] = 0.0
-        try:
             out["focus_point_in_bird_sharp"] = bool(self.settings_manager.get("focus_detect_ui/focus_point_in_bird_sharp", True))
         except Exception:
             out["focus_point_in_bird_sharp"] = True
+        try:
+            out["focus_point_in_eye_sharp"] = bool(self.settings_manager.get("focus_detect_ui/focus_point_in_eye_sharp", True))
+        except Exception:
+            out["focus_point_in_eye_sharp"] = True
         return out
 
     def _create_focus_threshold_panel(self):
@@ -5451,9 +5820,9 @@ class ImportPage(BaseImageBrowserPage):
                 ]
             )
         )
-        panel.setFixedHeight(76)
+        panel.setFixedHeight(90)
         layout = QHBoxLayout(panel)
-        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(14)
 
         slider_style = f"""
@@ -5579,17 +5948,13 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             init_hf_margin = 5.0
         try:
-            init_tex_ratio = float(self.settings_manager.get("focus_detect_ui/texture_ratio_threshold", 1.1) or 1.1)
-        except Exception:
-            init_tex_ratio = 1.1
-        try:
-            init_tex_weight = float(self.settings_manager.get("focus_detect_ui/texture_weight", 0.0) or 0.0)
-        except Exception:
-            init_tex_weight = 0.0
-        try:
             init_fp_in_bird_sharp = bool(self.settings_manager.get("focus_detect_ui/focus_point_in_bird_sharp", True))
         except Exception:
             init_fp_in_bird_sharp = True
+        try:
+            init_fp_in_eye_sharp = bool(self.settings_manager.get("focus_detect_ui/focus_point_in_eye_sharp", True))
+        except Exception:
+            init_fp_in_eye_sharp = True
 
         add_slider(
             "锐度阈值",
@@ -5654,24 +6019,6 @@ class ImportPage(BaseImageBrowserPage):
             fmt=lambda x: f"{x:.0f}",
             on_set=lambda s: setattr(self, "_focus_slider_hf_margin", s),
         )
-        add_slider(
-            "纹理比例",
-            key="focus_detect_ui/texture_ratio_threshold",
-            min_v=0,
-            max_v=300,
-            init_v=max(0, min(300, int(round(float(init_tex_ratio) * 100.0)))),
-            fmt=lambda x: f"{x/100.0:.2f}",
-            on_set=lambda s: setattr(self, "_focus_slider_tex_ratio", s),
-        )
-        add_slider(
-            "纹理权重",
-            key="focus_detect_ui/texture_weight",
-            min_v=0,
-            max_v=100,
-            init_v=max(0, min(100, int(round(float(init_tex_weight) * 100.0)))),
-            fmt=lambda x: f"{x/100.0:.2f}",
-            on_set=lambda s: setattr(self, "_focus_slider_tex_weight", s),
-        )
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -5690,7 +6037,17 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
         self._focus_cb_fp_in_bird_sharp = fp_cb
-        right_layout.addWidget(fp_cb, 0, Qt.AlignmentFlag.AlignRight)
+        right_layout.addWidget(fp_cb, 0, Qt.AlignmentFlag.AlignLeft)
+
+        fp_eye_cb = QCheckBox("对焦点在鸟眼上时默认锐利")
+        fp_eye_cb.setChecked(bool(init_fp_in_eye_sharp))
+        fp_eye_cb.setStyleSheet(f"QCheckBox {{ color: {text}; font-size: 12px; padding-left: 4px; }}")
+        try:
+            fp_eye_cb.toggled.connect(self._on_focus_point_in_eye_sharp_toggled)
+        except Exception:
+            pass
+        self._focus_cb_fp_in_eye_sharp = fp_eye_cb
+        right_layout.addWidget(fp_eye_cb, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addStretch(1)
 
         reset_btn = QPushButton("恢复默认")
@@ -5798,17 +6155,13 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             hf_margin = None
         try:
-            tex_ratio = float(int(getattr(self, "_focus_slider_tex_ratio", None).value())) / 100.0 if getattr(self, "_focus_slider_tex_ratio", None) is not None else None
-        except Exception:
-            tex_ratio = None
-        try:
-            tex_weight = float(int(getattr(self, "_focus_slider_tex_weight", None).value())) / 100.0 if getattr(self, "_focus_slider_tex_weight", None) is not None else None
-        except Exception:
-            tex_weight = None
-        try:
             fp_in_bird_sharp = bool(getattr(self, "_focus_cb_fp_in_bird_sharp", None).isChecked()) if getattr(self, "_focus_cb_fp_in_bird_sharp", None) is not None else None
         except Exception:
             fp_in_bird_sharp = None
+        try:
+            fp_in_eye_sharp = bool(getattr(self, "_focus_cb_fp_in_eye_sharp", None).isChecked()) if getattr(self, "_focus_cb_fp_in_eye_sharp", None) is not None else None
+        except Exception:
+            fp_in_eye_sharp = None
 
         try:
             if sharp is not None:
@@ -5825,12 +6178,10 @@ class ImportPage(BaseImageBrowserPage):
                 self.settings_manager.set("focus_detect_ui/hf_ratio_threshold", float(hf_ratio))
             if hf_margin is not None:
                 self.settings_manager.set("focus_detect_ui/hf_margin_threshold", float(hf_margin))
-            if tex_ratio is not None:
-                self.settings_manager.set("focus_detect_ui/texture_ratio_threshold", float(tex_ratio))
-            if tex_weight is not None:
-                self.settings_manager.set("focus_detect_ui/texture_weight", float(tex_weight))
             if fp_in_bird_sharp is not None:
                 self.settings_manager.set("focus_detect_ui/focus_point_in_bird_sharp", bool(fp_in_bird_sharp))
+            if fp_in_eye_sharp is not None:
+                self.settings_manager.set("focus_detect_ui/focus_point_in_eye_sharp", bool(fp_in_eye_sharp))
             self.settings_manager.sync()
         except Exception:
             pass
@@ -5914,19 +6265,19 @@ class ImportPage(BaseImageBrowserPage):
 
     def _reset_focus_thresholds_to_default(self):
         defaults = {
-            "sharp_threshold": 60,
-            "norm_sharp_threshold": 110,
+            "sharp_threshold": 80,
+            "norm_sharp_threshold": 130,
             "normal_contrast_threshold": 0.8,
             "conf_threshold": 0.1,
             "minimal_area_threshold": 0.001,
             "hf_ratio_threshold": 1.15,
             "hf_margin_threshold": 5.0,
-            "texture_ratio_threshold": 1.1,
-            "texture_weight": 0.0,
             "focus_point_in_bird_sharp": True,
+            "focus_point_in_eye_sharp": True,
         }
         try:
             self.settings_manager.set("focus_detect_ui/focus_point_in_bird_sharp", bool(defaults["focus_point_in_bird_sharp"]))
+            self.settings_manager.set("focus_detect_ui/focus_point_in_eye_sharp", bool(defaults["focus_point_in_eye_sharp"]))
             self.settings_manager.sync()
         except Exception:
             pass
@@ -6015,34 +6366,18 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
         try:
-            s = getattr(self, "_focus_slider_tex_ratio", None)
-            if s is not None:
-                s.blockSignals(True)
-                s.setValue(int(round(float(defaults["texture_ratio_threshold"]) * 100.0)))
-                try:
-                    getattr(s, "_sync_label_func", None) and s._sync_label_func(int(s.value()))
-                except Exception:
-                    pass
-                s.blockSignals(False)
-        except Exception:
-            pass
-        try:
-            s = getattr(self, "_focus_slider_tex_weight", None)
-            if s is not None:
-                s.blockSignals(True)
-                s.setValue(int(round(float(defaults["texture_weight"]) * 100.0)))
-                try:
-                    getattr(s, "_sync_label_func", None) and s._sync_label_func(int(s.value()))
-                except Exception:
-                    pass
-                s.blockSignals(False)
-        except Exception:
-            pass
-        try:
             cb = getattr(self, "_focus_cb_fp_in_bird_sharp", None)
             if cb is not None:
                 cb.blockSignals(True)
                 cb.setChecked(bool(defaults["focus_point_in_bird_sharp"]))
+                cb.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            cb = getattr(self, "_focus_cb_fp_in_eye_sharp", None)
+            if cb is not None:
+                cb.blockSignals(True)
+                cb.setChecked(bool(defaults["focus_point_in_eye_sharp"]))
                 cb.blockSignals(False)
         except Exception:
             pass
@@ -6051,6 +6386,17 @@ class ImportPage(BaseImageBrowserPage):
     def _on_focus_point_in_bird_sharp_toggled(self, checked: bool):
         try:
             self.settings_manager.set("focus_detect_ui/focus_point_in_bird_sharp", bool(checked))
+            self.settings_manager.sync()
+        except Exception:
+            pass
+        try:
+            self._apply_focus_thresholds_change()
+        except Exception:
+            pass
+
+    def _on_focus_point_in_eye_sharp_toggled(self, checked: bool):
+        try:
+            self.settings_manager.set("focus_detect_ui/focus_point_in_eye_sharp", bool(checked))
             self.settings_manager.sync()
         except Exception:
             pass
@@ -6102,22 +6448,68 @@ class ImportPage(BaseImageBrowserPage):
             folder_item = None
         if folder_item is None:
             return
-        def _count_by_status(src_items: list) -> tuple[dict, int]:
-            counts0 = {"Sharp": 0, "Normal": 0, "Blurry": 0, "Minimal": 0, "ExpFrame": 0, "NoBird": 0}
+        def _count_by_status(src_items: list) -> tuple[dict, int, dict]:
+            """统计各状态的图片数量
+            返回: (全部计数, 全部总数, 非连拍计数)
+            全部计数包含所有图片（包括连拍），非连拍计数只包含非连拍图片
+            """
+            counts0 = {"FocusOnEye": 0, "FocusOnBird": 0, "Sharp": 0, "Normal": 0, "Blurry": 0, "Minimal": 0, "ExpFrame": 0, "NoBird": 0}
+            counts_non_burst = {"FocusOnEye": 0, "FocusOnBird": 0, "Sharp": 0, "Normal": 0, "Blurry": 0, "Minimal": 0, "ExpFrame": 0, "NoBird": 0}
             total0 = 0
+            
             for it in (src_items or []):
                 if not isinstance(it, dict):
                     continue
                 total0 += 1
                 st0 = str(it.get("focus_status") or "")
-                if st0 not in counts0:
-                    st0 = "NoBird"
-                counts0[st0] = int(counts0.get(st0, 0) or 0) + 1
-            return counts0, int(total0)
+                
+                # 检查是否是连拍图片
+                is_burst = False
+                try:
+                    fd = self._extract_focus_detect_info(it)
+                    if fd and str(fd.get("burst_first_file") or "").strip():
+                        is_burst = True
+                except Exception:
+                    pass
+                
+                # 统计全部计数（锐利程度状态）
+                if st0 in counts0:
+                    counts0[st0] = int(counts0.get(st0, 0) or 0) + 1
+                
+                # 统计非连拍计数（锐利程度状态）
+                if not is_burst and st0 in counts_non_burst:
+                    counts_non_burst[st0] = int(counts_non_burst.get(st0, 0) or 0) + 1
+                
+                # 检查是否对焦点在鸟眼上或鸟上
+                try:
+                    fd = self._extract_focus_detect_info(it)
+                    if fd:
+                        if fd.get("focus_hit_eye"):
+                            counts0["FocusOnEye"] = int(counts0.get("FocusOnEye", 0) or 0) + 1
+                            if not is_burst:
+                                counts_non_burst["FocusOnEye"] = int(counts_non_burst.get("FocusOnEye", 0) or 0) + 1
+                        if fd.get("focus_hit_bird"):
+                            counts0["FocusOnBird"] = int(counts0.get("FocusOnBird", 0) or 0) + 1
+                            if not is_burst:
+                                counts_non_burst["FocusOnBird"] = int(counts_non_burst.get("FocusOnBird", 0) or 0) + 1
+                except Exception:
+                    pass
+            
+            return counts0, int(total0), counts_non_burst
 
-        def _update_status_children(parent_item, counts0: dict, total0: int, tooltip0: str):
+        def _update_status_children(parent_item, counts0: dict, total0: int, tooltip0: str, counts_non_burst: dict = None):
+            """更新状态子节点的计数显示
+            参数:
+                parent_item: 父节点
+                counts0: 全部计数（包含连拍）
+                total0: 全部总数
+                tooltip0: 提示文本
+                counts_non_burst: 非连拍计数，如果提供则用于非"全部"状态的显示
+            """
             status_name = {
                 "All": "全部",
+                "FocusOnEye": "对焦点在鸟眼上",
+                "FocusOnBird": "对焦点在鸟上",
                 "Sharp": "锐利",
                 "Normal": "普通",
                 "Blurry": "虚焦",
@@ -6138,8 +6530,15 @@ class ImportPage(BaseImageBrowserPage):
                     label = status_name.get(st, st)
                     if st == "All":
                         cnt = int(total0)
-                    else:
+                    elif st in ("FocusOnEye", "FocusOnBird"):
+                        # "对焦点在鸟眼上"和"对焦点在鸟上"显示所有图片（包括连拍）
                         cnt = int(counts0.get(st, 0) or 0)
+                    else:
+                        # 其他状态使用非连拍计数（如果提供），否则使用全部计数
+                        if counts_non_burst is not None:
+                            cnt = int(counts_non_burst.get(st, 0) or 0)
+                        else:
+                            cnt = int(counts0.get(st, 0) or 0)
                     si.setText(0, f"{label}（{cnt}）")
                     si.setToolTip(0, tooltip0)
             except Exception:
@@ -6179,22 +6578,22 @@ class ImportPage(BaseImageBrowserPage):
             if target_sub_item is None:
                 return
 
-            counts2, total2 = _count_by_status(items)
+            counts2, total2, counts_non_burst2 = _count_by_status(items)
             try:
                 target_sub_item.setText(0, f"{sub}（{int(total2)}）")
             except Exception:
                 pass
-            _update_status_children(target_sub_item, counts2, total2, os.path.join(fp, sub))
+            _update_status_children(target_sub_item, counts2, total2, os.path.join(fp, sub), counts_non_burst2)
             return
 
-        counts, total = _count_by_status(items)
+        counts, total, counts_non_burst = _count_by_status(items)
         name = os.path.basename(fp) or fp
         try:
             folder_item.setText(0, f"{name}（{int(total)}）")
             folder_item.setToolTip(0, fp)
         except Exception:
             pass
-        _update_status_children(folder_item, counts, total, fp)
+        _update_status_children(folder_item, counts, total, fp, counts_non_burst)
 
         try:
             sub_root = None
@@ -6309,9 +6708,8 @@ class ImportPage(BaseImageBrowserPage):
                 continue
             total0 += 1
             st0 = str(it.get("focus_status") or "")
-            if st0 not in counts0:
-                st0 = "NoBird"
-            counts0[st0] = int(counts0.get(st0, 0) or 0) + 1
+            if st0 in counts0:
+                counts0[st0] = int(counts0.get(st0, 0) or 0) + 1
 
         display = first
         try:
@@ -6354,6 +6752,9 @@ class ImportPage(BaseImageBrowserPage):
             pass
 
     def _extract_focus_detect_info(self, item: dict) -> dict:
+        """从item中提取对焦检测信息
+        优先从focus_detect_json字段提取，如果没有则从独立字段构建
+        """
         if not isinstance(item, dict):
             return {}
         raw = item.get("focus_detect_json")
@@ -6365,16 +6766,79 @@ class ImportPage(BaseImageBrowserPage):
             if isinstance(data, dict):
                 return data
         desc = item.get("description") or ""
-        if not isinstance(desc, str) or "focus_detect" not in desc:
-            return {}
+        if isinstance(desc, str) and "focus_detect" in desc:
+            try:
+                data = json.loads(desc)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                fd = data.get("focus_detect")
+                if isinstance(fd, dict):
+                    return fd
+        
+        # 如果没有从focus_detect_json或description中获取到数据
+        # 尝试从独立字段构建对焦检测数据
+        result = {}
+        
+        # 检查是否有鸟类检测相关数据
+        has_bird = False
         try:
-            data = json.loads(desc)
+            # 如果有bbox或score字段，认为有鸟
+            if item.get("bbox") is not None or item.get("score") is not None:
+                has_bird = True
         except Exception:
+            pass
+        
+        if not has_bird:
             return {}
-        if not isinstance(data, dict):
-            return {}
-        fd = data.get("focus_detect")
-        return fd if isinstance(fd, dict) else {}
+        
+        result["has_bird"] = True
+        
+        # 从独立字段获取数据
+        try:
+            if item.get("score") is not None:
+                result["score"] = float(item.get("score"))
+        except Exception:
+            pass
+        
+        try:
+            if item.get("norm_score") is not None:
+                result["norm_score"] = float(item.get("norm_score"))
+        except Exception:
+            pass
+        
+        try:
+            if item.get("area_ratio") is not None:
+                result["area"] = float(item.get("area_ratio"))
+        except Exception:
+            pass
+        
+        try:
+            if item.get("bbox") is not None:
+                result["bbox"] = item.get("bbox")
+                result["bbox_orig"] = item.get("bbox")
+        except Exception:
+            pass
+        
+        try:
+            if item.get("eye_coordinates") is not None:
+                result["eye_coordinates"] = item.get("eye_coordinates")
+                result["eye"] = item.get("eye_coordinates")
+        except Exception:
+            pass
+        
+        try:
+            if item.get("focus_point") is not None:
+                result["focus_point"] = item.get("focus_point")
+        except Exception:
+            pass
+        
+        # 设置默认值
+        result["conf"] = 1.0
+        result["exp_frame"] = False
+        result["is_minimal"] = False
+        
+        return result if result.get("has_bird") else {}
 
     def _compute_focus_status_and_debug(self, item: dict, thresholds: dict) -> tuple[str, dict]:
         fd = self._extract_focus_detect_info(item)
@@ -6459,15 +6923,15 @@ class ImportPage(BaseImageBrowserPage):
 
         conf_th = float((thresholds or {}).get("conf_threshold", 0.0) or 0.0)
         if (not has_bird) or (score <= 0.0 and norm_score <= 0.0):
-            return "NoBird", {"reason": "no_bird_or_zero_score"}
+            return "NoBird", {"reason": "no_bird_or_zero_score", "score": score, "norm_score": norm_score}
         if conf_th > 0.0 and conf_present and conf < conf_th:
-            return "NoBird", {"reason": "conf_below_threshold", "conf": conf, "conf_th": conf_th}
+            return "NoBird", {"reason": "conf_below_threshold", "conf": conf, "conf_th": conf_th, "score": score, "norm_score": norm_score}
 
         minimal_th = float((thresholds or {}).get("minimal_area_threshold", 0.001) or 0.001)
         if area > 0.0 and area < minimal_th:
             is_minimal = True
         if is_minimal:
-            return "Minimal", {"reason": "minimal_area", "area": area, "minimal_th": minimal_th}
+            return "Minimal", {"reason": "minimal_area", "area": area, "minimal_th": minimal_th, "score": score, "norm_score": norm_score}
 
         fp_override = False
         fp_in_bird = False
@@ -6475,10 +6939,15 @@ class ImportPage(BaseImageBrowserPage):
             fp_override = bool((thresholds or {}).get("focus_point_in_bird_sharp", False))
         except Exception:
             fp_override = False
-        if fp_override:
+        try:
+            fp_eye_override = bool((thresholds or {}).get("focus_point_in_eye_sharp", False))
+        except Exception:
+            fp_eye_override = False
+        if fp_override or fp_eye_override:
             fp = _parse_xy(item.get("focus_point"))
             bbox = _parse_bbox(fd.get("bbox_orig") or fd.get("bbox") or item.get("bbox_orig") or item.get("bbox"))
-            if fp is not None and bbox is not None:
+            eye_xy = _parse_xy(fd.get("eye_coordinates") or fd.get("eye"))
+            if fp is not None:
                 fx, fy = fp
                 try:
                     iw = float(item.get("width") or 0)
@@ -6492,21 +6961,54 @@ class ImportPage(BaseImageBrowserPage):
                             fy = float(fy) * ih
                     except Exception:
                         pass
-                x1, y1, x2, y2 = bbox
-                fp_in_bird = (fx >= min(x1, x2) and fx <= max(x1, x2) and fy >= min(y1, y2) and fy <= max(y1, y2))
-                if fp_in_bird:
-                    st = "Sharp"
-                    if exp_frame:
-                        st = "ExpFrame"
-                    return st, {
-                        "reason": "focus_point_in_bird_override",
-                        "focus_point": (fx, fy),
-                        "bbox": (x1, y1, x2, y2),
-                        "exp_frame": bool(exp_frame),
-                    }
+                # 检查对焦点是否在鸟眼上
+                if fp_eye_override and eye_xy is not None:
+                    ex, ey = eye_xy
+                    # 将归一化坐标转换为像素坐标
+                    if iw > 1 and ih > 1:
+                        try:
+                            if 0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0:
+                                ex = float(ex) * iw
+                                ey = float(ey) * ih
+                        except Exception:
+                            pass
+                    # 计算对焦点与鸟眼的距离（阈值设为50像素）
+                    try:
+                        dist = ((fx - ex) ** 2 + (fy - ey) ** 2) ** 0.5
+                        if dist < 50.0:
+                            st = "Sharp"
+                            if exp_frame:
+                                st = "ExpFrame"
+                            return st, {
+                                "reason": "focus_point_in_eye_override",
+                                "focus_point": (fx, fy),
+                                "eye_point": (ex, ey),
+                                "distance": dist,
+                                "exp_frame": bool(exp_frame),
+                                "score": score,
+                                "norm_score": norm_score,
+                            }
+                    except Exception:
+                        pass
+                # 检查对焦点是否在鸟上
+                if fp_override and bbox is not None:
+                    x1, y1, x2, y2 = bbox
+                    fp_in_bird = (fx >= min(x1, x2) and fx <= max(x1, x2) and fy >= min(y1, y2) and fy <= max(y1, y2))
+                    if fp_in_bird:
+                        st = "Sharp"
+                        if exp_frame:
+                            st = "ExpFrame"
+                        return st, {
+                            "reason": "focus_point_in_bird_override",
+                            "focus_point": (fx, fy),
+                            "bbox": (x1, y1, x2, y2),
+                            "exp_frame": bool(exp_frame),
+                            "score": score,
+                            "norm_score": norm_score,
+                        }
 
-        sharp_th = float((thresholds or {}).get("sharp_threshold", 60) or 60)
-        norm_sharp_th = float((thresholds or {}).get("norm_sharp_threshold", 110) or 110)
+        sharp_th = float((thresholds or {}).get("sharp_threshold", 80) or 80)
+        norm_sharp_th = float((thresholds or {}).get("norm_sharp_threshold", 130) or 130)
         sharp_ratio = score / max(float(sharp_th), 1e-6)
         norm_ratio = norm_score / max(float(norm_sharp_th), 1e-6)
         abs_ratio = min(float(sharp_ratio), float(norm_ratio))
@@ -6552,31 +7054,6 @@ class ImportPage(BaseImageBrowserPage):
         hf_margin_score = hf_margin_eff / max(float(hf_margin_th), 1e-6)
         contrast_score = max(float(ratio_score), float(hf_ratio_score), float(hf_margin_score))
 
-        texture_ratio_th = float((thresholds or {}).get("texture_ratio_threshold", 1.1) or 1.1)
-        texture_weight = float((thresholds or {}).get("texture_weight", 0.0) or 0.0)
-        texture_edge_density_ratio = 1.0
-        texture_entropy_ratio = 1.0
-        try:
-            texture_edge_density_ratio = float(fd.get("texture_edge_density_ratio") or 1.0)
-        except Exception:
-            texture_edge_density_ratio = 1.0
-        try:
-            texture_entropy_ratio = float(fd.get("texture_entropy_ratio") or 1.0)
-        except Exception:
-            texture_entropy_ratio = 1.0
-        try:
-            tw = max(0.0, min(1.0, float(texture_weight)))
-        except Exception:
-            tw = 0.0
-        if tw > 0.0 and texture_ratio_th > 0.0:
-            try:
-                tex_ratio_eff = max(float(texture_edge_density_ratio), float(texture_entropy_ratio))
-                tex_score_raw = float(tex_ratio_eff) / max(float(texture_ratio_th), 1e-6)
-                tex_score = 1.0 + (float(tex_score_raw) - 1.0) * float(tw)
-                contrast_score = max(float(contrast_score), float(tex_score))
-            except Exception:
-                pass
-
         try:
             raw_bg_score = float(fd.get("raw_bg_score") or 0.0)
         except Exception:
@@ -6585,6 +7062,37 @@ class ImportPage(BaseImageBrowserPage):
             bg_score = float(fd.get("bg_score") or 0.0)
         except Exception:
             bg_score = 0.0
+
+        # 获取绝对模糊检测指标
+        blur_metrics = fd.get("blur_metrics") or {}
+        try:
+            is_absolutely_blur = bool(blur_metrics.get("is_absolutely_blur", False))
+        except Exception:
+            is_absolutely_blur = False
+        try:
+            abs_blur_confidence = float(blur_metrics.get("abs_blur_confidence", 0.0))
+        except Exception:
+            abs_blur_confidence = 0.0
+        try:
+            abs_blur_penalty = float(fd.get("abs_blur_penalty") or 1.0)
+        except Exception:
+            abs_blur_penalty = 1.0
+
+        # 绝对模糊强制判定 - 如果置信度>=0.5，强制判定为Blurry
+        if is_absolutely_blur and abs_blur_confidence >= 0.5:
+            status = "Blurry"
+            debug = {
+                "score": score,
+                "norm_score": norm_score,
+                "sharp_th": sharp_th,
+                "norm_sharp_th": norm_sharp_th,
+                "abs_ratio": abs_ratio,
+                "is_absolutely_blur": True,
+                "abs_blur_confidence": abs_blur_confidence,
+                "abs_blur_penalty": abs_blur_penalty,
+                "reason": "absolute_blur_detected",
+            }
+            return status, debug
 
         bg_tail_heavy = False
         try:
@@ -6611,6 +7119,24 @@ class ImportPage(BaseImageBrowserPage):
             except Exception:
                 pass
 
+        # 检查对焦点是否在鸟眼或鸟上（仅用于debug信息，不再作为独立状态返回）
+        try:
+            focus_hit_eye = fd.get("focus_hit_eye", False)
+            if isinstance(focus_hit_eye, str):
+                focus_hit_eye = focus_hit_eye.lower() in ('true', '1', 'yes', 'on')
+            else:
+                focus_hit_eye = bool(focus_hit_eye)
+        except Exception:
+            focus_hit_eye = False
+        try:
+            focus_hit_bird = fd.get("focus_hit_bird", False)
+            if isinstance(focus_hit_bird, str):
+                focus_hit_bird = focus_hit_bird.lower() in ('true', '1', 'yes', 'on')
+            else:
+                focus_hit_bird = bool(focus_hit_bird)
+        except Exception:
+            focus_hit_bird = False
+
         if focus_score >= 1.0 and abs_ratio >= 1.0 and contrast_score >= 1.0:
             status = "Sharp"
         elif focus_score >= 0.65 and abs_ratio >= 0.75:
@@ -6621,6 +7147,7 @@ class ImportPage(BaseImageBrowserPage):
         if exp_frame and status in ("Sharp", "Normal"):
             status = "ExpFrame"
 
+        # 构建 debug 字典
         debug = {
             "score": score,
             "norm_score": norm_score,
@@ -6644,10 +7171,6 @@ class ImportPage(BaseImageBrowserPage):
             "hf_margin_robust": hf_margin_robust,
             "hf_margin_eff": hf_margin_eff,
             "hf_margin_score": hf_margin_score,
-            "texture_edge_density_ratio": texture_edge_density_ratio,
-            "texture_entropy_ratio": texture_entropy_ratio,
-            "texture_ratio_th": texture_ratio_th,
-            "texture_weight": texture_weight,
             "contrast_score": contrast_score,
             "raw_bg_score": raw_bg_score,
             "bg_score": bg_score,
@@ -6660,6 +7183,11 @@ class ImportPage(BaseImageBrowserPage):
             "conf": conf if conf_present else None,
             "conf_th": conf_th if conf_present else None,
             "focus_score": focus_score,
+            "focus_hit_eye": bool(focus_hit_eye),
+            "focus_hit_bird": bool(focus_hit_bird),
+            "is_absolutely_blur": bool(is_absolutely_blur),
+            "abs_blur_confidence": float(abs_blur_confidence),
+            "abs_blur_penalty": float(abs_blur_penalty),
         }
         return status, debug
 
@@ -6668,6 +7196,7 @@ class ImportPage(BaseImageBrowserPage):
         return st
 
     def _print_focus_detect_result(self, image_path: str, image_info: dict | None = None):
+        """打印对焦检测结果 - 防抖版本，避免连续点击时阻塞UI"""
         try:
             p0 = str(image_path or "")
         except Exception:
@@ -6681,25 +7210,116 @@ class ImportPage(BaseImageBrowserPage):
         if not (isinstance(cur, str) and cur.startswith("virtual://focus_detect?")):
             return
 
+        # 使用防抖机制：延迟执行，合并连续点击
+        if not hasattr(self, "_focus_detect_print_pending"):
+            self._focus_detect_print_pending = {}
+        
+        cache_key = f"{p0}_{cur}"
+        current_time = int(__import__('time').time())
+        
+        # 检查缓存（3秒内有效）
+        if not hasattr(self, "_focus_detect_print_cache"):
+            self._focus_detect_print_cache = {}
+        
+        cached = self._focus_detect_print_cache.get(cache_key)
+        if cached and (current_time - cached.get("time", 0)) < 3:
+            out = cached.get("out")
+            if out:
+                try:
+                    print(json.dumps(out, ensure_ascii=False, default=str))
+                except Exception:
+                    pass
+            return
+        
+        # 标记待处理
+        self._focus_detect_print_pending[cache_key] = {
+            "p0": p0, "cur": cur, "cache_key": cache_key, 
+            "current_time": current_time, "image_info": image_info
+        }
+        
+        # 延迟执行
+        try:
+            if hasattr(self, "_focus_detect_print_timer") and self._focus_detect_print_timer is not None:
+                self._focus_detect_print_timer.stop()
+        except Exception:
+            pass
+        
+        from PyQt6.QtCore import QTimer
+        self._focus_detect_print_timer = QTimer(self)
+        self._focus_detect_print_timer.setSingleShot(True)
+        self._focus_detect_print_timer.timeout.connect(lambda: self._execute_focus_detect_print())
+        self._focus_detect_print_timer.start(150)  # 延迟150ms执行
+    
+    def _execute_focus_detect_print(self):
+        """执行对焦检测结果打印（防抖后）"""
+        if not hasattr(self, "_focus_detect_print_pending") or not self._focus_detect_print_pending:
+            return
+        
+        # 只处理最后一个
+        items = list(self._focus_detect_print_pending.items())
+        self._focus_detect_print_pending.clear()
+        
+        if not items:
+            return
+        
+        _, params = items[-1]
+        p0 = params["p0"]
+        cur = params["cur"]
+        cache_key = params["cache_key"]
+        current_time = params["current_time"]
+        image_info = params["image_info"]
+        
+        # 再次检查缓存
+        cached = self._focus_detect_print_cache.get(cache_key)
+        if cached and (current_time - cached.get("time", 0)) < 3:
+            out = cached.get("out")
+            if out:
+                try:
+                    print(json.dumps(out, ensure_ascii=False, default=str))
+                except Exception:
+                    pass
+            return
+        
+        # 执行计算
         record = None
+        # 优先使用缩略图缓存
         try:
-            p_db = self.db._normalize_file_path_for_db(p0) if hasattr(self, "db") and hasattr(self.db, "_normalize_file_path_for_db") else p0
+            key = self._normalize_path_key(p0)
+            thumbs = self._thumb_by_path.get(key, [])
+            if thumbs:
+                record = getattr(thumbs[0], "image_info", None)
         except Exception:
-            p_db = p0
-        try:
-            recs = self.db.get_results_by_paths([p_db], table_name="import_cache") if hasattr(self, "db") and hasattr(self.db, "get_results_by_paths") else {}
-        except Exception:
-            recs = {}
-        if isinstance(recs, dict) and recs:
+            record = None
+        
+        # 回退到数据库查询
+        if not isinstance(record, dict):
             try:
-                nk = self.db._norm_path_key(p_db) if hasattr(self.db, "_norm_path_key") else str(p_db)
+                p_db = self.db._normalize_file_path_for_db(p0) if hasattr(self, "db") and hasattr(self.db, "_normalize_file_path_for_db") else p0
             except Exception:
-                nk = str(p_db)
-            record = recs.get(str(nk)) or recs.get(str(p_db)) or recs.get(p0)
+                p_db = p0
+            try:
+                recs = self.db.get_results_by_paths([p_db], table_name="import_cache") if hasattr(self, "db") and hasattr(self.db, "get_results_by_paths") else {}
+            except Exception:
+                recs = {}
+            if isinstance(recs, dict) and recs:
+                try:
+                    nk = self.db._norm_path_key(p_db) if hasattr(self.db, "_norm_path_key") else str(p_db)
+                except Exception:
+                    nk = str(p_db)
+                record = recs.get(str(nk)) or recs.get(str(p_db)) or recs.get(p0)
+        
         if not isinstance(record, dict):
             record = image_info if isinstance(image_info, dict) else {}
 
-        thresholds = self._get_focus_detect_ui_thresholds()
+        # 使用类级别缓存的阈值
+        thresholds = getattr(self, "_cached_focus_thresholds", None)
+        if thresholds is None:
+            try:
+                thresholds = self._get_focus_detect_ui_thresholds()
+                self._cached_focus_thresholds = thresholds
+            except Exception:
+                thresholds = {}
+        
         status, decision = self._compute_focus_status_and_debug(record, thresholds)
         fd = self._extract_focus_detect_info(record)
 
@@ -6762,17 +7382,19 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
-        # try:
-        #     from utils.log_manager import LogManager
-
-        #     LogManager.instance().debug(f"[FocusDetect] {json.dumps(out, ensure_ascii=False)}")
-        # except Exception:
-        #     try:
-        #         from utils.log_manager import LogManager
-
-        #         LogManager.instance().debug(f"[FocusDetect] path={p0} status={status}")
-        #     except Exception:
-        #         pass
+        # 更新缓存
+        self._focus_detect_print_cache[cache_key] = {"out": out, "time": current_time}
+        # 清理过期缓存（保留最近50个）
+        if len(self._focus_detect_print_cache) > 50:
+            sorted_keys = sorted(self._focus_detect_print_cache.keys(), 
+                               key=lambda k: self._focus_detect_print_cache[k].get("time", 0))
+            for old_key in sorted_keys[:-50]:
+                del self._focus_detect_print_cache[old_key]
+        
+        try:
+            print(json.dumps(out, ensure_ascii=False, default=str))
+        except Exception:
+            pass
 
     def _filter_files_for_display(self, files):
         out = list(files or [])
@@ -6807,14 +7429,46 @@ class ImportPage(BaseImageBrowserPage):
                 for it in out:
                     if not isinstance(it, dict):
                         continue
+                    # 重新计算状态，确保使用最新的阈值
                     s = self._compute_focus_status_for_item(it, thresholds)
                     it["focus_status"] = s
-                    if str(st or "All") != "All" and s != str(st):
-                        continue
+                    
+                    # 检查状态是否匹配
+                    if str(st or "All") != "All":
+                        # 如果是"对焦点在鸟眼上"文件夹，检查图片是否对焦点在鸟眼上
+                        if str(st or "All") == "FocusOnEye":
+                            try:
+                                fd = self._extract_focus_detect_info(it)
+                                if fd and fd.get("focus_hit_eye"):
+                                    out2.append(it)
+                            except Exception:
+                                pass
+                            continue
+                        # 如果是"对焦点在鸟上"文件夹，检查图片是否对焦点在鸟上
+                        elif str(st or "All") == "FocusOnBird":
+                            try:
+                                fd = self._extract_focus_detect_info(it)
+                                if fd and fd.get("focus_hit_bird"):
+                                    out2.append(it)
+                            except Exception:
+                                pass
+                            continue
+                        # 其他状态（锐利、普通、虚焦等），检查状态是否匹配
+                        elif s != str(st):
+                            continue
+                    
+                    # 非"全部"、"对焦点在鸟眼上"、"对焦点在鸟上"状态时，只显示非连拍图片
+                    if str(st or "All") not in ("All", "FocusOnEye", "FocusOnBird"):
+                        try:
+                            fd = self._extract_focus_detect_info(it)
+                            if fd and str(fd.get("burst_first_file") or "").strip():
+                                continue
+                        except Exception:
+                            pass
                     out2.append(it)
                 out = out2
             elif isinstance(p0, str) and p0.startswith("virtual://focus_detect_burst?"):
-                # 连拍组内的“普通/虚焦/极小...”子节点需要按 status 过滤，否则切换节点缩略图不会变化
+                # 连拍组内的"普通/虚焦/极小..."子节点需要按 status 过滤，否则切换节点缩略图不会变化
                 _, _, st = self._parse_focus_detect_burst_virtual_path(p0)
                 thresholds = self._get_focus_detect_ui_thresholds()
                 out2 = []
@@ -6823,6 +7477,7 @@ class ImportPage(BaseImageBrowserPage):
                         continue
                     s = self._compute_focus_status_for_item(it, thresholds)
                     it["focus_status"] = s
+                    
                     if str(st or "All") != "All" and s != str(st):
                         continue
                     out2.append(it)
@@ -10640,6 +11295,36 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
                 try:
+                    if rec.get("eye_coordinates") is not None and info.get("eye_coordinates") != rec.get("eye_coordinates"):
+                        info["eye_coordinates"] = rec.get("eye_coordinates")
+                        changed = True
+                except Exception:
+                    pass
+                try:
+                    if self._is_missing_focus_point_value(info.get("focus_point")):
+                        fdj = rec.get("focus_detect_json")
+                        if isinstance(fdj, str) and fdj.strip():
+                            fdj = json.loads(fdj)
+                        if isinstance(fdj, dict):
+                            fp0 = fdj.get("focus_point")
+                            if fp0 is not None:
+                                info["focus_point"] = fp0
+                                changed = True
+                except Exception:
+                    pass
+                try:
+                    if info.get("eye_coordinates") is None:
+                        fdj = rec.get("focus_detect_json")
+                        if isinstance(fdj, str) and fdj.strip():
+                            fdj = json.loads(fdj)
+                        if isinstance(fdj, dict):
+                            eye0 = fdj.get("eye_coordinates") or fdj.get("eye")
+                            if eye0 is not None:
+                                info["eye_coordinates"] = eye0
+                                changed = True
+                except Exception:
+                    pass
+                try:
                     if info.get("width") in (None, 0, 0.0, "") or info.get("height") in (None, 0, 0.0, ""):
                         fdj = rec.get("focus_detect_json")
                         if isinstance(fdj, str) and fdj.strip():
@@ -10706,10 +11391,6 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             return
         try:
-            self._schedule_focus_point_backfill(getattr(self, "image_files", []) or [])
-        except Exception:
-            pass
-        try:
             self._backfill_visible_thumbnails_from_import_cache()
         except Exception:
             pass
@@ -10718,6 +11399,196 @@ class ImportPage(BaseImageBrowserPage):
                 self.grid_view.refresh_visible_thumbnails(extra_rows=2)
         except Exception:
             pass
+        try:
+            self._async_backfill_visible_thumbnail_af_points()
+        except Exception:
+            pass
+
+    def _async_backfill_visible_thumbnail_af_points(self, *, max_items: int = 60):
+        try:
+            if not bool(getattr(self, "is_virtual_mode", False)):
+                return
+        except Exception:
+            return
+        try:
+            show_fp = bool(self.settings_manager.get("focus_detect_ui/show_focus_point", True))
+        except Exception:
+            show_fp = True
+        if not show_fp:
+            return
+        try:
+            now_ts = float(time.time())
+        except Exception:
+            now_ts = 0.0
+        try:
+            last_ts = float(getattr(self, "_thumb_af_point_last_ts", 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if now_ts > 0.0 and last_ts > 0.0 and (now_ts - last_ts) < 0.9:
+            return
+        try:
+            self._thumb_af_point_last_ts = float(now_ts)
+        except Exception:
+            pass
+
+        thumbs = []
+        try:
+            thumbs = list(getattr(self.grid_view, "thumbnails", []) or [])
+        except Exception:
+            thumbs = []
+        if not thumbs:
+            return
+
+        try:
+            inflight = getattr(self, "_af_point_inflight", None)
+        except Exception:
+            inflight = None
+        if not isinstance(inflight, set):
+            inflight = set()
+            try:
+                self._af_point_inflight = inflight
+            except Exception:
+                pass
+
+        try:
+            cache = getattr(self, "_af_point_cache_by_path", None)
+        except Exception:
+            cache = None
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                self._af_point_cache_by_path = cache
+            except Exception:
+                pass
+
+        paths: list[str] = []
+        for t in thumbs:
+            if len(paths) >= int(max(10, min(160, int(max_items or 60)))):
+                break
+            try:
+                info = getattr(t, "image_info", None)
+                if not isinstance(info, dict):
+                    continue
+                p = str(info.get("path") or "")
+                if not p:
+                    continue
+                if not self._is_missing_focus_point_value(info.get("focus_point")):
+                    continue
+                if p in inflight:
+                    continue
+                cached_fp = None
+                try:
+                    cached_fp = cache.get(p)
+                except Exception:
+                    cached_fp = None
+                if cached_fp:
+                    try:
+                        info["focus_point"] = cached_fp
+                        t.update()
+                    except Exception:
+                        pass
+                    continue
+                inflight.add(p)
+                paths.append(p)
+            except Exception:
+                continue
+        if not paths:
+            return
+
+        def _worker(batch: list[str]):
+            fp_by_path = {}
+            try:
+                from utils.exif.camera_af_point import get_camera_af_center_points
+                fp_by_path = get_camera_af_center_points(list(batch), timeout=10, chunk_size=80, max_workers=2) or {}
+            except Exception:
+                fp_by_path = {}
+            need_calc = []
+            try:
+                for p0 in (batch or []):
+                    try:
+                        if (not isinstance(fp_by_path, dict)) or (not fp_by_path.get(str(p0))):
+                            need_calc.append(str(p0))
+                    except Exception:
+                        continue
+            except Exception:
+                need_calc = []
+            if need_calc:
+                try:
+                    from core.check_cli import detect_subject_bbox_multi_async
+                    calc_res = detect_subject_bbox_multi_async(
+                        list(need_calc),
+                        targets=["pos", "bbox_orig", "focus_point_orig"],
+                    ).result(timeout=80.0)
+                except Exception:
+                    calc_res = None
+                if isinstance(calc_res, dict) and calc_res:
+                    try:
+                        if not isinstance(fp_by_path, dict):
+                            fp_by_path = {}
+                    except Exception:
+                        fp_by_path = {}
+                    for p0, v0 in calc_res.items():
+                        if not isinstance(v0, dict):
+                            continue
+                        try:
+                            fp0 = v0.get("focus_point")
+                        except Exception:
+                            fp0 = None
+                        if fp0:
+                            fp_by_path[str(p0)] = fp0
+            def _apply():
+                try:
+                    for p0 in batch:
+                        inflight.discard(str(p0))
+                except Exception:
+                    pass
+                if not isinstance(fp_by_path, dict) or not fp_by_path:
+                    return
+                try:
+                    for p0, fp0 in fp_by_path.items():
+                        if not fp0:
+                            continue
+                        cache[str(p0)] = fp0
+                except Exception:
+                    pass
+                for t in thumbs:
+                    try:
+                        info = getattr(t, "image_info", None)
+                        if not isinstance(info, dict):
+                            continue
+                        p = str(info.get("path") or "")
+                        if not p:
+                            continue
+                        fp0 = fp_by_path.get(p)
+                        if not fp0:
+                            continue
+                        if not self._is_missing_focus_point_value(info.get("focus_point")):
+                            continue
+                        info["focus_point"] = fp0
+                        t.update()
+                    except Exception:
+                        continue
+                try:
+                    cur_p = str(getattr(self, "current_preview_path", "") or "")
+                except Exception:
+                    cur_p = ""
+                if cur_p:
+                    try:
+                        fp_cur = fp_by_path.get(cur_p)
+                    except Exception:
+                        fp_cur = None
+                    if fp_cur:
+                        try:
+                            self._refresh_current_preview_overlays_from_import_cache()
+                        except Exception:
+                            pass
+            try:
+                QTimer.singleShot(0, _apply)
+            except Exception:
+                _apply()
+
+        import threading
+        threading.Thread(target=_worker, args=(paths,), daemon=True).start()
 
     def _start_import_cache_bulk_backfill(self, *, interval_ms: int = 30, batch_size: int = 200):
         try:
@@ -11307,11 +12178,8 @@ class ImportPage(BaseImageBrowserPage):
             except Exception:
                 pass
 
-        paths = self._collect_paths_for_folders(folders, options.get("file_extensions"))
-        if not paths:
-            NotificationManager.instance().show_warning("提示", "未找到需要检测的图片")
-            return
-        _focus_log(f"_start_focus_detect: folders={len(folders or [])} paths={len(paths)} options_keys={list((options or {}).keys())}")
+        paths = []
+        _focus_log(f"_start_focus_detect: folders={len(folders or [])} options_keys={list((options or {}).keys())}")
         try:
             auto_switch = bool(self.settings_manager.get("focus_detect/auto_switch_to_scan_mode", True))
         except Exception:
@@ -11361,25 +12229,23 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
         try:
-            from utils.system.gpu_utils import GPUScaler
-            GPUScaler.set_suspended(True)
+            import threading
+
+            def _suspend_gpu():
+                try:
+                    from utils.system.gpu_utils import GPUScaler
+
+                    GPUScaler.set_suspended(True)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_suspend_gpu, daemon=True).start()
         except Exception:
             pass
         try:
-            import cv2
-            prev_ocl = None
-            try:
-                if hasattr(cv2, "ocl"):
-                    prev_ocl = bool(cv2.ocl.useOpenCL())
-                    cv2.ocl.setUseOpenCL(False)
-            except Exception:
-                prev_ocl = None
-            self._focus_prev_cv_opencl = prev_ocl
+            self._focus_prev_cv_opencl = None
         except Exception:
-            try:
-                self._focus_prev_cv_opencl = None
-            except Exception:
-                pass
+            pass
         try:
             self._focus_prev_thumb_ui_suspended = bool(getattr(self, "_thumb_ui_suspended", False))
         except Exception:
@@ -11431,7 +12297,7 @@ class ImportPage(BaseImageBrowserPage):
             pass
         self._focus_progress_operation = "准备中"
         self._focus_progress_done = 0
-        self._focus_progress_total = int(len(paths))
+        self._focus_progress_total = 0
         self._focus_progress_start_ts = float(time.time())
         self._focus_exif_base_done = 0
         self._focus_exif_total = 0
@@ -11499,10 +12365,32 @@ class ImportPage(BaseImageBrowserPage):
             err = ""
             append_detect_mode = False
             append_skip_all = False
-            run_paths = list(paths or [])
+            run_paths = []
             try:
                 _focus_log("worker thread: importing detect_focus_batch_for_import")
                 from core.check_cli import detect_focus_batch_for_import
+                _focus_log("worker thread: collecting paths")
+                try:
+                    progress_bridge.progress.emit("扫描文件", 0, 0, float(time.time()))
+                except Exception:
+                    pass
+                try:
+                    run_paths = self._collect_paths_for_folders(folders, options.get("file_extensions"))
+                except Exception:
+                    run_paths = []
+                _focus_log(f"worker thread: collected paths={len(run_paths)}")
+                if not run_paths:
+                    err = "__NO_PATHS__"
+                    results = {}
+                    try:
+                        finish_bridge.finished.emit([], results, options, err, False, False)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    progress_bridge.progress.emit("准备中", 0, int(len(run_paths)), float(time.time()))
+                except Exception:
+                    pass
 
                 def progress_cb(op: str, done: int, total: int, start_ts: float):
                     try:
@@ -11540,6 +12428,8 @@ class ImportPage(BaseImageBrowserPage):
                     "use_gpu",
                     "multi_check",
                     "exp_frame_check",
+                    "enable_eye_detect",
+                    "enable_af_point_detect",
                     "model",
                     "initial_conf",
                     "target_size",
@@ -11604,7 +12494,6 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         pass
 
-                run_paths = list(paths or [])
                 if append_detect:
                     try:
                         progress_bridge.progress.emit("检查已检测文件", 0, 1, float(time.time()))
@@ -11701,6 +12590,111 @@ class ImportPage(BaseImageBrowserPage):
         Thread(target=run, daemon=True).start()
         _focus_log("worker thread started")
 
+    def _restore_focus_detect_ui_state(self):
+        try:
+            if getattr(self, "loading_overlay", None):
+                self.loading_overlay.hide()
+        except Exception:
+            pass
+        try:
+            self._startup_mask_enabled = bool(getattr(self, "_focus_prev_startup_mask_enabled", True))
+        except Exception:
+            try:
+                self._startup_mask_enabled = True
+            except Exception:
+                pass
+        try:
+            self._force_hide_startup_mask()
+        except Exception:
+            pass
+        try:
+            self._hide_focus_detect_mask()
+        except Exception:
+            pass
+        self._focus_detect_running = False
+        try:
+            self._focus_detect_cancel_requested = False
+            self._focus_detect_cancel_event = None
+        except Exception:
+            pass
+        try:
+            import threading
+
+            def _resume_gpu():
+                try:
+                    from utils.system.gpu_utils import GPUScaler
+
+                    GPUScaler.set_suspended(False)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_resume_gpu, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            import threading
+
+            prev_ocl = getattr(self, "_focus_prev_cv_opencl", None)
+
+            def _restore_cv_opencl():
+                try:
+                    import cv2
+
+                    if prev_ocl is not None and hasattr(cv2, "ocl"):
+                        cv2.ocl.setUseOpenCL(bool(prev_ocl))
+                except Exception:
+                    pass
+
+            threading.Thread(target=_restore_cv_opencl, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            self._thumb_ui_suspended = False
+        except Exception:
+            try:
+                self._thumb_ui_suspended = False
+            except Exception:
+                pass
+        try:
+            self._schedule_visible_load(immediate=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_update_timer") and self._update_timer is not None and not self._update_timer.isActive():
+                self._update_timer.start()
+        except Exception:
+            pass
+        try:
+            self._update_toolbar_for_mode()
+        except Exception:
+            pass
+        try:
+            self._focus_progress_operation = ""
+            self._focus_progress_done = 0
+            self._focus_progress_total = 0
+            self._focus_exif_base_done = 0
+            self._focus_exif_total = 0
+            self._focus_eta_last_op = ""
+            self._focus_eta_last_total = 0
+            self._focus_eta_last_done = 0
+            self._focus_eta_seconds = None
+            self._focus_eta_last_update_ts = 0.0
+            if getattr(self, "_focus_progress_timer", None) is not None and self._focus_progress_timer.isActive():
+                self._focus_progress_timer.stop()
+            if getattr(self, "_focus_db_poll_timer", None) is not None and self._focus_db_poll_timer.isActive():
+                self._focus_db_poll_timer.stop()
+            try:
+                overlay = getattr(self, "_focus_progress_overlay", None)
+                if overlay is not None and hasattr(overlay, "set_progress"):
+                    overlay.set_progress(visible=False)
+                if overlay is not None and hasattr(overlay, "hide"):
+                    overlay.hide()
+            except Exception:
+                pass
+            QTimer.singleShot(0, self._refresh_focus_progress_ui)
+        except Exception:
+            pass
+
     def _on_focus_detect_finished(self, paths: list[str], results: dict, options: dict, err: str, append_detect: bool = False, skipped_all: bool = False):
         try:
             if getattr(self, "loading_overlay", None):
@@ -11711,39 +12705,16 @@ class ImportPage(BaseImageBrowserPage):
             self._hide_focus_detect_mask()
         except Exception:
             pass
+        if err == "__NO_PATHS__":
+            try:
+                self._restore_focus_detect_ui_state()
+            except Exception:
+                pass
+            NotificationManager.instance().show_warning("提示", "未找到需要检测的图片")
+            return
         if err:
-            self._focus_detect_running = False
             try:
-                self._focus_detect_cancel_requested = False
-                self._focus_detect_cancel_event = None
-            except Exception:
-                pass
-            try:
-                self._focus_progress_operation = ""
-                self._focus_progress_done = 0
-                self._focus_progress_total = 0
-                self._focus_eta_last_op = ""
-                self._focus_eta_last_total = 0
-                self._focus_eta_last_done = 0
-                self._focus_eta_seconds = None
-                self._focus_eta_last_update_ts = 0.0
-                if getattr(self, "_focus_progress_timer", None) is not None and self._focus_progress_timer.isActive():
-                    self._focus_progress_timer.stop()
-                if getattr(self, "_focus_db_poll_timer", None) is not None and self._focus_db_poll_timer.isActive():
-                    self._focus_db_poll_timer.stop()
-                try:
-                    overlay = getattr(self, "_focus_progress_overlay", None)
-                    if overlay is not None and hasattr(overlay, "set_progress"):
-                        overlay.set_progress(visible=False)
-                    if overlay is not None and hasattr(overlay, "hide"):
-                        overlay.hide()
-                except Exception:
-                    pass
-                QTimer.singleShot(0, self._refresh_focus_progress_ui)
-            except Exception:
-                pass
-            try:
-                self._update_toolbar_for_mode()
+                self._restore_focus_detect_ui_state()
             except Exception:
                 pass
             NotificationManager.instance().show_warning("错误", f"对焦检测失败: {err}")
@@ -11933,6 +12904,8 @@ class ImportPage(BaseImageBrowserPage):
                 "Minimal": "极小",
                 "ExpFrame": "爆框",
                 "NoBird": "无鸟",
+                "FocusOnBird": "对焦点在鸟上",
+                "FocusOnEye": "对焦点在鸟眼上",
             }
 
             def _status_for_result(res: dict) -> str:
@@ -11943,6 +12916,13 @@ class ImportPage(BaseImageBrowserPage):
                     payload = dict(res)
                     try:
                         payload.pop("path", None)
+                    except Exception:
+                        pass
+                    try:
+                        if bool(payload.get("focus_hit_eye", False)):
+                            return "FocusOnEye"
+                        if bool(payload.get("focus_hit_bird", False)):
+                            return "FocusOnBird"
                     except Exception:
                         pass
                     pseudo = {"focus_detect_json": _json.dumps(payload, ensure_ascii=False, default=str)}
@@ -12175,8 +13155,14 @@ class ImportPage(BaseImageBrowserPage):
                                         rr["orig_h"] = src_meta.get("orig_h")
                                 except Exception:
                                     pass
-                            rr["path"] = dest
-                            post_results[dest] = rr
+                            # 只有 move 操作才将新文件添加到 post_results
+                            # copy 操作不应该将新文件插入数据库
+                            if action in ("move", "move_by_status", "move_by_status_to_source"):
+                                rr["path"] = dest
+                                post_results[dest] = rr
+                            else:
+                                # copy 操作保持原文件路径
+                                post_results[src] = rr
                     except Exception:
                         pass
                 except Exception as e:
@@ -12341,17 +13327,6 @@ class ImportPage(BaseImageBrowserPage):
                 QTimer.singleShot(0, self._refresh_focus_progress_ui)
             except Exception:
                 pass
-            try:
-                if getattr(self, "loading_overlay", None) is not None and hasattr(self.loading_overlay, "show_loading"):
-                    QTimer.singleShot(
-                        0,
-                        lambda: self.loading_overlay.show_loading(
-                            "正在处理文件...",
-                            (f"正在{op}到目标目录：{dest_root}" if dest_root else f"正在{op}到目标目录..."),
-                        ),
-                    )
-            except Exception:
-                pass
         Thread(target=run_post, daemon=True).start()
 
     def _on_focus_detect_saved(self, err: str, warn: str = ""):
@@ -12448,18 +13423,6 @@ class ImportPage(BaseImageBrowserPage):
                 NotificationManager.instance().show_toast(str(warn))
             except Exception:
                 pass
-        try:
-            QTimer.singleShot(0, lambda: self._schedule_focus_point_backfill(getattr(self, "image_files", []) or []))
-        except Exception:
-            pass
-        try:
-            QTimer.singleShot(250, lambda: self._schedule_focus_point_backfill(getattr(self, "image_files", []) or []))
-        except Exception:
-            pass
-        try:
-            QTimer.singleShot(0, lambda: self._start_focus_point_overlay_autorefresh(rounds=16, interval_ms=350))
-        except Exception:
-            pass
         try:
             self._pending_virtual_focus_reload = True
         except Exception:
@@ -12789,6 +13752,8 @@ class ImportPage(BaseImageBrowserPage):
         else:
             status_folder = {
                 "All": "全部",
+                "FocusOnEye": "对焦点在鸟眼上",
+                "FocusOnBird": "对焦点在鸟上",
                 "Sharp": "锐利",
                 "Normal": "普通",
                 "Blurry": "虚焦",
@@ -12796,7 +13761,7 @@ class ImportPage(BaseImageBrowserPage):
                 "ExpFrame": "爆框",
                 "NoBird": "无鸟",
             }
-            status_order = ["All", "Sharp", "Normal", "Blurry", "Minimal", "ExpFrame", "NoBird"]
+            status_order = ["All", "FocusOnEye", "FocusOnBird", "Sharp", "Normal", "Blurry", "Minimal", "ExpFrame", "NoBird"]
             for it0 in (items or []):
                 try:
                     fp = str(it0.get("folder") or "")
@@ -13054,6 +14019,8 @@ class ImportPage(BaseImageBrowserPage):
 
                 status_defs = [
                     ("All", "全部", total),
+                    ("FocusOnEye", "对焦点在鸟眼上", int(counts.get("FocusOnEye", 0) or 0)),
+                    ("FocusOnBird", "对焦点在鸟上", int(counts.get("FocusOnBird", 0) or 0)),
                     ("Sharp", "锐利", int(counts.get("Sharp", 0) or 0)),
                     ("Normal", "普通", int(counts.get("Normal", 0) or 0)),
                     ("Blurry", "虚焦", int(counts.get("Blurry", 0) or 0)),
@@ -13247,7 +14214,7 @@ class ImportPage(BaseImageBrowserPage):
         from utils.file.file_util import get_fast_id
         from utils.file.fingerprint import get_unique_id
         import json
-        from utils.exif.exif_utils import ExifHandleWorker
+        from utils.exif.exif_utils import ExifHandleWorker, EXIF_TAG
         try:
             from utils.log_manager import LogManager
             LogManager.instance().info(f"[FocusDetectUI] finalize_results start files={len(paths or [])}")
@@ -13411,6 +14378,18 @@ class ImportPage(BaseImageBrowserPage):
             is_favorite = existing.get("is_favorite") if isinstance(existing, dict) else 0
             tags = existing.get("tags") if isinstance(existing, dict) else ""
             fp = (existing.get("focus_point") if isinstance(existing, dict) else None)
+            try:
+                fp_new = r.get("focus_point")
+            except Exception:
+                fp_new = None
+            try:
+                if not self._is_missing_focus_point_value(fp_new):
+                    fp = fp_new
+            except Exception:
+                pass
+            eye_coordinates = r.get("eye_coordinates")
+            if eye_coordinates is None and isinstance(existing, dict):
+                eye_coordinates = existing.get("eye_coordinates")
             extra = dict(r)
             try:
                 extra.pop("bbox", None)
@@ -13526,6 +14505,7 @@ class ImportPage(BaseImageBrowserPage):
                         "pixel_count": pixel_count,
                         "area_ratio": area_ratio,
                         "focus_point": fp,
+                        "eye_coordinates": eye_coordinates,
                         "description": desc,
                         "focus_detect_json": focus_detect_json,
                         "rating": int(rating or 0),
@@ -13573,6 +14553,42 @@ class ImportPage(BaseImageBrowserPage):
                     self._focus_progress_operation = "保存到数据库"
                     self._focus_progress_done = 1
                     self._focus_progress_total = 1
+            except Exception:
+                pass
+
+        try:
+            exif_mode = str((options or {}).get("exif_write_mode", "") or "").strip().lower()
+        except Exception:
+            exif_mode = ""
+        if exif_mode in ("file", "xmp", "none"):
+            try:
+                self.settings_manager.set("exif/write_mode", exif_mode)
+                self.settings_manager.set("exif/disable_write", exif_mode == "none")
+                self.settings_manager.sync()
+            except Exception:
+                pass
+        if exif_mode != "none" and exif_worker is not None and paths:
+            exif_tasks = []
+            for p in (paths or []):
+                r = now_results.get(p) or {}
+                if not isinstance(r, dict):
+                    continue
+                eye_coordinates = r.get("eye_coordinates")
+                if eye_coordinates is None:
+                    continue
+                if isinstance(eye_coordinates, (dict, list, tuple)):
+                    try:
+                        eye_value = json.dumps(eye_coordinates, ensure_ascii=False)
+                    except Exception:
+                        eye_value = str(eye_coordinates)
+                else:
+                    eye_value = str(eye_coordinates)
+                if not eye_value:
+                    continue
+                exif_tasks.append((str(p), {EXIF_TAG.EyeCoordinates.value: eye_value}))
+            try:
+                if exif_tasks:
+                    exif_worker.enqueue_update_tags(exif_tasks)
             except Exception:
                 pass
 
@@ -13965,6 +14981,11 @@ class ImportPage(BaseImageBrowserPage):
         val = 1 if bool(checked) else 0
         self._update_virtual_db_user_field([p], "is_favorite", val)
         self._update_status_in_memory([p], "is_favorite", val)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            self._enqueue_exif_update_tasks([(str(p), {EXIF_TAG.Favorite.value: "True" if bool(checked) else "False"})])
+        except Exception:
+            pass
 
     def on_preview_rating_changed(self, rating: int):
         if not bool(getattr(self, "is_virtual_mode", False)):
@@ -13978,6 +14999,11 @@ class ImportPage(BaseImageBrowserPage):
             r = 0
         self._update_virtual_db_user_field([p], "rating", r)
         self._update_status_in_memory([p], "rating", r)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            self._enqueue_exif_update_tasks([(str(p), {EXIF_TAG.Rating.value: str(r)})])
+        except Exception:
+            pass
 
     def on_preview_label_changed(self, label: str):
         if not bool(getattr(self, "is_virtual_mode", False)):
@@ -13991,6 +15017,11 @@ class ImportPage(BaseImageBrowserPage):
             l = ""
         self._update_virtual_db_user_field([p], "label", l)
         self._update_status_in_memory([p], "label", l)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            self._enqueue_exif_update_tasks([(str(p), {EXIF_TAG.Label.value: l})])
+        except Exception:
+            pass
 
     def toggle_favorite_selection(self, is_favorite: bool):
         if not bool(getattr(self, "is_virtual_mode", False)):
@@ -14005,6 +15036,12 @@ class ImportPage(BaseImageBrowserPage):
         val = 1 if bool(is_favorite) else 0
         self._update_virtual_db_user_field(selected_paths, "is_favorite", val)
         self._update_status_in_memory(selected_paths, "is_favorite", val)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            tags = {EXIF_TAG.Favorite.value: "True" if bool(is_favorite) else "False"}
+            self._enqueue_exif_update_tasks([(str(p), tags) for p in (selected_paths or []) if p])
+        except Exception:
+            pass
 
     def set_rating_selection(self, rating: int):
         if not bool(getattr(self, "is_virtual_mode", False)):
@@ -14022,6 +15059,12 @@ class ImportPage(BaseImageBrowserPage):
             r = 0
         self._update_virtual_db_user_field(selected_paths, "rating", r)
         self._update_status_in_memory(selected_paths, "rating", r)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            tags = {EXIF_TAG.Rating.value: str(r)}
+            self._enqueue_exif_update_tasks([(str(p), tags) for p in (selected_paths or []) if p])
+        except Exception:
+            pass
 
     def set_label_selection(self, label: str):
         if not bool(getattr(self, "is_virtual_mode", False)):
@@ -14039,6 +15082,42 @@ class ImportPage(BaseImageBrowserPage):
             l = ""
         self._update_virtual_db_user_field(selected_paths, "label", l)
         self._update_status_in_memory(selected_paths, "label", l)
+        try:
+            from utils.exif.exif_utils import EXIF_TAG
+            tags = {EXIF_TAG.Label.value: l}
+            self._enqueue_exif_update_tasks([(str(p), tags) for p in (selected_paths or []) if p])
+        except Exception:
+            pass
+
+    def _enqueue_exif_update_tasks(self, exif_tasks):
+        """
+        后台写入元数据（EXIF / XMP）。
+        - 导入页虚拟模式下，UI 操作往往先落库（import_cache），这里补齐对同名 XMP/原文件的元数据写入
+        - 统一走 ExifHandleWorker 的队列与去重/批量逻辑，避免阻塞 UI
+        """
+        try:
+            tasks = []
+            for it in (exif_tasks or []):
+                try:
+                    p, tags = it
+                except Exception:
+                    continue
+                if not p or not isinstance(tags, dict) or not tags:
+                    continue
+                tasks.append((str(p), tags))
+            if not tasks:
+                return
+            from utils.exif.exif_utils import ExifHandleWorker
+
+            def run_exif_update():
+                try:
+                    ExifHandleWorker.get_instance().enqueue_update_tags(tasks)
+                except Exception:
+                    pass
+
+            Thread(target=run_exif_update, daemon=True).start()
+        except Exception:
+            pass
 
     def _update_open_detail_shortcut(self):
         if self._open_detail_shortcut is None:
@@ -14572,10 +15651,56 @@ class ImportPage(BaseImageBrowserPage):
         if bool(getattr(self, "_watermark_dialog_opening", False)):
             return
         self._watermark_dialog_opening = True
+        gpu_paused = False
+        main_win = None
+        old_gpu_suppress_until = None
+        old_gpu_query_running = None
+        old_sys_timer_active = None
+        old_sys_timer_interval = None
         try:
             paths = [str(p) for p in (file_paths or []) if p]
             if not paths:
                 return
+            try:
+                main_win = self.window()
+            except Exception:
+                main_win = None
+            try:
+                from utils.system.gpu_monitor import enter_gpu_query_pause
+
+                gpu_paused = bool(enter_gpu_query_pause())
+            except Exception:
+                gpu_paused = False
+            try:
+                if main_win is not None:
+                    try:
+                        if hasattr(main_win, "sys_timer") and main_win.sys_timer is not None:
+                            old_sys_timer_active = bool(main_win.sys_timer.isActive())
+                            old_sys_timer_interval = int(main_win.sys_timer.interval())
+                            main_win.sys_timer.stop()
+                    except Exception:
+                        old_sys_timer_active = None
+                        old_sys_timer_interval = None
+                    try:
+                        old_gpu_suppress_until = float(getattr(main_win, "_gpu_suppress_until", 0.0) or 0.0)
+                    except Exception:
+                        old_gpu_suppress_until = None
+                    try:
+                        old_gpu_query_running = bool(getattr(main_win, "_gpu_query_running", False))
+                    except Exception:
+                        old_gpu_query_running = None
+                    try:
+                        import time
+
+                        main_win._gpu_suppress_until = float(time.monotonic()) + 3600.0
+                    except Exception:
+                        pass
+                    try:
+                        main_win._gpu_query_running = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             from ui.dialogs.watermark_dialog import WatermarkDialog
 
             dlg = WatermarkDialog(parent=self, file_paths=paths)
@@ -14600,6 +15725,36 @@ class ImportPage(BaseImageBrowserPage):
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开水印窗口失败: {e}")
         finally:
+            try:
+                if gpu_paused:
+                    from utils.system.gpu_monitor import exit_gpu_query_pause
+
+                    exit_gpu_query_pause()
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_gpu_suppress_until is not None:
+                    main_win._gpu_suppress_until = float(old_gpu_suppress_until)
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_gpu_query_running is not None:
+                    main_win._gpu_query_running = bool(old_gpu_query_running)
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_sys_timer_active:
+                    try:
+                        itv = int(old_sys_timer_interval) if old_sys_timer_interval is not None else 1000
+                    except Exception:
+                        itv = 1000
+                    try:
+                        if hasattr(main_win, "sys_timer") and main_win.sys_timer is not None:
+                            main_win.sys_timer.start(int(itv))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self._watermark_dialog_opening = False
 
     def on_thumbnail_context_menu(self, index, position):
@@ -14689,6 +15844,52 @@ class ImportPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("提示", "请先选择图片")
             return
         table_name = "import_cache"
+        try:
+            for f in (selected_files or []):
+                if not isinstance(f, dict):
+                    continue
+                p = str(f.get("path") or "")
+                if not p:
+                    continue
+                rec = None
+                try:
+                    rec = self.db.get_result_by_path(p, table_name=table_name)
+                except Exception:
+                    rec = None
+                if not isinstance(rec, dict):
+                    continue
+                try:
+                    if not str(f.get("object") or f.get("species") or "").strip():
+                        f["object"] = rec.get("object") or ""
+                except Exception:
+                    pass
+                try:
+                    if not str(f.get("order_cls") or f.get("order") or "").strip():
+                        f["order_cls"] = rec.get("order_cls") or ""
+                except Exception:
+                    pass
+                try:
+                    if not str(f.get("family_cls") or f.get("family") or "").strip():
+                        f["family_cls"] = rec.get("family_cls") or ""
+                except Exception:
+                    pass
+                try:
+                    if not str(f.get("genus_cls") or f.get("genus") or "").strip():
+                        f["genus_cls"] = rec.get("genus_cls") or ""
+                except Exception:
+                    pass
+                try:
+                    if not str(f.get("species_cls") or "").strip():
+                        f["species_cls"] = rec.get("species_cls") or ""
+                except Exception:
+                    pass
+                try:
+                    if not (f.get("bbox") is not None and str(f.get("bbox") or "").strip()):
+                        f["bbox"] = rec.get("bbox")
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             self._auto_match_species_from_folder_names(selected_files, table_name=table_name)
         except Exception:
@@ -14971,9 +16172,20 @@ class ImportPage(BaseImageBrowserPage):
                 return
             from ui.widgets.geolocation_dialog import GeoLocationDialog
             dialog = GeoLocationDialog(self, selected_count=selected_count, file_paths=selected_paths, table_name="import_cache")
+            dialog.geo_updated.connect(self._on_geo_updated)
             dialog.exec()
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开地理位置窗口失败: {e}")
+    
+    def _on_geo_updated(self, file_paths):
+        """地理位置更新完成回调，刷新信息面板"""
+        try:
+            current_path = getattr(self.preview_panel, "current_image_path", None) if hasattr(self, 'preview_panel') else None
+            if current_path and current_path in file_paths:
+                if hasattr(self, 'info_panel') and self.info_panel:
+                    self.info_panel.update_info(current_path)
+        except Exception:
+            pass
 
     def show_track_match_dialog(self, checked: bool = False):
         try:

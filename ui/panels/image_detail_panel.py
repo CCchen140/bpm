@@ -77,9 +77,9 @@ class MagnifierGraphicsView(QGraphicsView):
         self.setMouseTracking(True)  # 追踪鼠标移动
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        # 设置缩放锚点为鼠标位置，这样缩放时会以鼠标为中心
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # 设置缩放锚点为视图中心，这样 Ctrl+滚轮缩放不会跟随鼠标偏移位置
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self._external_sync = False # 防止信号循环的标志
         
         # Manual drawing state
@@ -580,6 +580,11 @@ class ImageAllInfoOverlay(QWidget):
         except Exception:
             pass
         self._setup_ui()
+        try:
+            ColorManager.instance().register_listener(self._apply_theme_styles)
+        except Exception:
+            pass
+        self._apply_theme_styles()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -587,10 +592,6 @@ class ImageAllInfoOverlay(QWidget):
         layout.setSpacing(0)
 
         self.container = QWidget()
-        cm = ColorManager.instance()
-        overlay_bg = cm.to_qss_color("image_detail.overlay.background", default="#00000064")
-        overlay_border = cm.to_qss_color("image_detail.overlay.border", default="#FFFFFF33")
-        self.container.setStyleSheet(f"QWidget {{ background-color: {overlay_bg}; border-radius: 8px; border: 1px solid {overlay_border}; }}")
         try:
             self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         except Exception:
@@ -609,14 +610,15 @@ class ImageAllInfoOverlay(QWidget):
         header_layout.setSpacing(6)
         self.btn_collapse = QToolButton()
         self.btn_collapse.setIcon(qta.icon("mdi6.chevron-up", color="white"))
-        self.btn_collapse.setFixedSize(32, 32)
+        self.btn_collapse.setIconSize(QSize(16, 16))
+        self.btn_collapse.setFixedSize(24, 24)
         try:
             self.btn_collapse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         except Exception:
             pass
         self.btn_collapse.setStyleSheet(
             "QToolButton { background: transparent; border: none; padding: 0px; margin: 0px; outline: none; "
-            "min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px; }"
+            "min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px; }"
             "QToolButton:focus { outline: none; }"
         )
         self.btn_collapse.clicked.connect(self.collapse_requested.emit)
@@ -634,7 +636,7 @@ class ImageAllInfoOverlay(QWidget):
         except Exception:
             pass
         self.content.setStyleSheet(
-            "color: #dddddd; font-size: 12px; background: transparent; border: none; outline: none;"
+            "color: #FFFFFF; font-size: 12px; background: transparent; border: none; outline: none;"
             "QTextBrowser:focus { border: none; outline: none; }"
         )
         container_layout.addWidget(self.content, 1)
@@ -660,6 +662,35 @@ class ImageAllInfoOverlay(QWidget):
             self.content.setText(t)
         self.show()
         self.adjustSize()
+
+    def _apply_theme_styles(self):
+        cm = ColorManager.instance()
+        overlay_bg = cm.to_qss_color("image_detail.overlay.background", default="#00000064")
+        overlay_border = cm.to_qss_color("image_detail.overlay.border", default="#FFFFFF33")
+        overlay_hover = cm.to_qss_color("image_detail.overlay.hover_background", default="#FFFFFF1E")
+        text_color = cm.get("theme.text.light")
+        self.container.setStyleSheet(
+            f"QWidget {{ background-color: {overlay_bg}; border-radius: 8px; border: 1px solid {overlay_border}; }}"
+        )
+        self.btn_collapse.setStyleSheet(
+            f"QToolButton {{ background-color: transparent; border: 1px solid {overlay_border}; border-radius: 5px; "
+            f"padding: 0px; margin: 0px; outline: none; min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px; }}"
+            f"QToolButton:hover {{ background-color: {overlay_hover}; }}"
+            f"QToolButton:focus {{ outline: none; }}"
+        )
+        try:
+            self.btn_collapse.setIconSize(QSize(16, 16))
+            self.btn_collapse.setFixedSize(24, 24)
+        except Exception:
+            pass
+        try:
+            self.btn_collapse.setIcon(qta.icon("mdi6.chevron-up", color=text_color))
+        except Exception:
+            pass
+        self.content.setStyleSheet(
+            f"color: {text_color}; font-size: 12px; background: transparent; border: none; outline: none;"
+            "QTextBrowser:focus { border: none; outline: none; }"
+        )
 
 class ImageActionOverlay(QWidget):
     action_triggered = pyqtSignal(str, str, object) # path, action_type ('fav', 'rating', 'label'), value
@@ -813,7 +844,7 @@ class ImageActionOverlay(QWidget):
         # If White, draw a border
         if label == 'White':
              painter.setPen(QColor('#D0D0D0'))
-             painter.setBrush(Qt.BrushStyle.NoBrush)
+             painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
              painter.drawEllipse(0, 0, size-1, size-1)
 
         painter.end()
@@ -922,6 +953,12 @@ class ImageDetailPanel(QWidget):
         self._subject_rect_path_left = None
         self._subject_rect_item_right = None
         self._subject_rect_path_right = None
+        self._eye_rect_item = None
+        self._eye_rect_path = None
+        self._eye_rect_item_left = None
+        self._eye_rect_path_left = None
+        self._eye_rect_item_right = None
+        self._eye_rect_path_right = None
         try:
             sm = getattr(self.cache_manager, "settings_manager", None)
         except Exception:
@@ -943,6 +980,7 @@ class ImageDetailPanel(QWidget):
         self._detect_subject_image_size_right = None
         self.db = BirdLibraryDB()
         self._uuid_cache = {}
+        self._exif_orientation_cache = {}
         self._is_zoomed_to_bird = False
         self._is_zoomed_to_bird_compare = False
         self._settings_manager = None
@@ -952,7 +990,7 @@ class ImageDetailPanel(QWidget):
             self._settings_manager = None
         if self._settings_manager is None:
             try:
-                self._settings_manager = SettingsManager()
+                self._settings_manager = SettingsManager.instance()
             except Exception:
                 self._settings_manager = None
         # 已移除从设置中读取 zoom_scale 的逻辑，强制默认 1.0
@@ -1580,6 +1618,16 @@ class ImageDetailPanel(QWidget):
                                     child_n = int(g.childCount())
                                 except Exception:
                                     child_n = 0
+                                cm = ColorManager.instance()
+                                text_light = cm.get("theme.text.light")
+                                try:
+                                    qc_text = QColor(str(text_light or ""))
+                                except Exception:
+                                    qc_text = QColor("#FFFFFF")
+                                if not qc_text.isValid():
+                                    qc_text = QColor("#FFFFFF")
+                                label_color = f"rgba({qc_text.red()}, {qc_text.green()}, {qc_text.blue()}, 0.7)"
+                                value_color = qc_text.name()
                                 for j0 in range(child_n):
                                     try:
                                         it = g.child(int(j0))
@@ -1595,7 +1643,7 @@ class ImageDetailPanel(QWidget):
                                         v = ""
                                     if not k:
                                         continue
-                                    parts.append(f"<div><span style='color:#bbbbbb;'>{_esc(k)}</span>：{_esc(v)}</div>")
+                                    parts.append(f"<div><span style='color:{label_color};'>{_esc(k)}</span>：<span style='color:{value_color};'>{_esc(v)}</span></div>")
 
                             html = "<div style='line-height: 1.45;'>" + "".join(parts) + "</div>" if parts else ""
                             all_overlay.set_html(html)
@@ -1832,7 +1880,7 @@ class ImageDetailPanel(QWidget):
             pass
 
     def _on_delete_clicked(self):
-        """删除按钮点击处理"""
+        """删除按钮点击处理 - 使用与右键菜单相同的确认弹窗"""
         try:
             if self.image_list and 0 <= int(self.current_index) < len(self.image_list):
                 it = self.image_list[int(self.current_index)]
@@ -1850,80 +1898,113 @@ class ImageDetailPanel(QWidget):
         
         try:
             from ui.utils.notification_manager import NotificationManager
-            confirmed = NotificationManager.instance().ask_confirmation(
+            from utils.setting.settings_manager import SettingsManager
+            
+            # 获取上次的删除选择状态
+            delete_local_key = "library/delete_local_file_enabled"
+            sm = SettingsManager.instance()
+            
+            def _to_bool(v, default=True):
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, (int, float)):
+                    return bool(int(v))
+                try:
+                    s = str(v).strip().lower()
+                except Exception:
+                    return bool(default)
+                if s in ("1", "true", "yes", "y", "on"):
+                    return True
+                if s in ("0", "false", "no", "n", "off", ""):
+                    return False
+                return bool(default)
+            
+            # 使用带复选框的确认对话框（与右键菜单一致）
+            confirmed, delete_local = NotificationManager.instance().ask_confirmation(
                 "确认删除",
-                f"确定要删除这张图片吗？\n\n{os.path.basename(image_path)}\n\n此操作会将文件移到回收站。"
+                f"确定要删除以下文件吗？\n{os.path.basename(image_path)}",
+                show_checkbox=True,
+                checkbox_text="同时删除本地磁盘文件",
+                default_checked=_to_bool(sm.get(delete_local_key, True), default=True)
             )
+            
+            try:
+                sm.set(delete_local_key, delete_local)
+                sm.sync()
+            except Exception:
+                pass
+            
             if not confirmed:
                 return
             
-            # 删除文件 - 尝试移到回收站
-            deleted = False
-            try:
-                # 尝试使用send2trash
-                import send2trash
-                send2trash.send2trash(image_path)
-                deleted = True
-            except ImportError:
-                # send2trash未安装，使用Windows API
+            # 删除本地文件（如果勾选）
+            if delete_local and os.path.exists(image_path):
+                deleted = False
                 try:
-                    import ctypes
-                    from ctypes import windll, c_wchar_p, c_uint
-                    
-                    # 使用SHFileOperation将文件移到回收站
-                    class SHFILEOPSTRUCT(ctypes.Structure):
-                        _fields_ = [
-                            ("hwnd", ctypes.c_void_p),
-                            ("wFunc", c_uint),
-                            ("pFrom", c_wchar_p),
-                            ("pTo", c_wchar_p),
-                            ("fFlags", ctypes.c_uint16),
-                            ("fAnyOperationsAborted", ctypes.c_int),
-                            ("hNameMappings", ctypes.c_void_p),
-                            ("lpszProgressTitle", c_wchar_p)
-                        ]
-                    
-                    FO_DELETE = 0x0003
-                    FOF_ALLOWUNDO = 0x0040
-                    FOF_NOCONFIRMATION = 0x0010
-                    FOF_SILENT = 0x0004
-                    
-                    pFrom = image_path + '\0'
-                    
-                    fileop = SHFILEOPSTRUCT()
-                    fileop.hwnd = None
-                    fileop.wFunc = FO_DELETE
-                    fileop.pFrom = pFrom
-                    fileop.pTo = None
-                    fileop.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
-                    fileop.fAnyOperationsAborted = 0
-                    fileop.hNameMappings = None
-                    fileop.lpszProgressTitle = None
-                    
-                    result = windll.shell32.SHFileOperationW(ctypes.byref(fileop))
-                    if result == 0:
-                        deleted = True
-                    else:
+                    # 尝试使用send2trash
+                    import send2trash
+                    send2trash.send2trash(image_path)
+                    deleted = True
+                except ImportError:
+                    # send2trash未安装，使用Windows API
+                    try:
+                        import ctypes
+                        from ctypes import windll, c_wchar_p, c_uint
+                        
+                        # 使用SHFileOperation将文件移到回收站
+                        class SHFILEOPSTRUCT(ctypes.Structure):
+                            _fields_ = [
+                                ("hwnd", ctypes.c_void_p),
+                                ("wFunc", c_uint),
+                                ("pFrom", c_wchar_p),
+                                ("pTo", c_wchar_p),
+                                ("fFlags", ctypes.c_uint16),
+                                ("fAnyOperationsAborted", ctypes.c_int),
+                                ("hNameMappings", ctypes.c_void_p),
+                                ("lpszProgressTitle", c_wchar_p)
+                            ]
+                        
+                        FO_DELETE = 0x0003
+                        FOF_ALLOWUNDO = 0x0040
+                        FOF_NOCONFIRMATION = 0x0010
+                        FOF_SILENT = 0x0004
+                        
+                        pFrom = image_path + '\0'
+                        
+                        fileop = SHFILEOPSTRUCT()
+                        fileop.hwnd = None
+                        fileop.wFunc = FO_DELETE
+                        fileop.pFrom = pFrom
+                        fileop.pTo = None
+                        fileop.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+                        fileop.fAnyOperationsAborted = 0
+                        fileop.hNameMappings = None
+                        fileop.lpszProgressTitle = None
+                        
+                        result = windll.shell32.SHFileOperationW(ctypes.byref(fileop))
+                        if result == 0:
+                            deleted = True
+                        else:
+                            # Windows API失败，直接删除
+                            os.remove(image_path)
+                            deleted = True
+                    except Exception:
                         # Windows API失败，直接删除
                         os.remove(image_path)
                         deleted = True
                 except Exception:
-                    # Windows API失败，直接删除
-                    os.remove(image_path)
-                    deleted = True
-            except Exception:
-                # send2trash失败，直接删除
-                try:
-                    os.remove(image_path)
-                    deleted = True
-                except Exception:
-                    pass
+                    # send2trash失败，直接删除
+                    try:
+                        os.remove(image_path)
+                        deleted = True
+                    except Exception:
+                        pass
+                
+                if not deleted:
+                    NotificationManager.instance().show_error("删除失败", "无法删除文件")
+                    return
             
-            if not deleted:
-                NotificationManager.instance().show_error("删除失败", "无法删除文件")
-                return
-            
-            # 从数据库中删除记录
+            # 从数据库中删除记录（总是执行）
             try:
                 self.db.delete_image_by_path(image_path, table_name=self._db_table_name)
             except Exception:
@@ -1989,6 +2070,10 @@ class ImageDetailPanel(QWidget):
         self.view.zoom_out_requested.connect(self.zoom_out)
         try:
             self.view.magnification_changed.connect(lambda _v=None: self._auto_nav_pause_if_needed())
+        except Exception:
+            pass
+        try:
+            self.view.magnification_changed.connect(lambda f: self._on_magnification_changed(f))
         except Exception:
             pass
         try:
@@ -2115,6 +2200,10 @@ class ImageDetailPanel(QWidget):
             self._apply_saved_magnifier_lens_radius()
         except Exception:
             pass
+        try:
+            self._apply_saved_magnification_factor()
+        except Exception:
+            pass
 
     def init_compare_view(self):
         """初始化对比模式视图"""
@@ -2141,6 +2230,10 @@ class ImageDetailPanel(QWidget):
         except Exception:
             pass
         try:
+            self.view_left.magnification_changed.connect(lambda f: self._on_magnification_changed(f))
+        except Exception:
+            pass
+        try:
             self.view_left.lens_radius_changed.connect(lambda r: self._on_magnifier_lens_radius_changed(r))
         except Exception:
             pass
@@ -2153,6 +2246,10 @@ class ImageDetailPanel(QWidget):
         self.view_right.ctrl_right_detect_requested.connect(lambda: self.detect_subject(force=False, side="right"))
         try:
             self.view_right.magnification_changed.connect(lambda _v=None: self._auto_nav_pause_if_needed())
+        except Exception:
+            pass
+        try:
+            self.view_right.magnification_changed.connect(lambda f: self._on_magnification_changed(f))
         except Exception:
             pass
         try:
@@ -2256,6 +2353,16 @@ class ImageDetailPanel(QWidget):
         self.view_left.lens_radius_changed.connect(self.view_right.set_lens_radius)
         self.view_right.lens_radius_changed.connect(self.view_left.set_lens_radius)
         
+        # 应用保存的放大镜设置到对比模式
+        try:
+            self._apply_saved_magnifier_lens_radius()
+        except Exception:
+            pass
+        try:
+            self._apply_saved_magnification_factor()
+        except Exception:
+            pass
+        
         self.splitter.addWidget(self.view_left)
         self.splitter.addWidget(self.view_right)
         
@@ -2317,6 +2424,44 @@ class ImageDetailPanel(QWidget):
             sm.sync()
         except Exception:
             pass
+
+    def _on_magnification_changed(self, factor: float):
+        """保存放大镜放大倍率到设置"""
+        sm = getattr(self, "_settings_manager", None)
+        if sm is None:
+            return
+        try:
+            f = float(factor)
+        except Exception:
+            return
+        if f < 1.1:
+            f = 1.1
+        if f > 8.0:
+            f = 8.0
+        try:
+            sm.set("image_detail/magnification_factor", float(f))
+            sm.sync()
+        except Exception:
+            pass
+
+    def _apply_saved_magnification_factor(self):
+        """应用保存的放大镜放大倍率"""
+        sm = getattr(self, "_settings_manager", None)
+        if sm is None:
+            return
+        try:
+            f = float(sm.get("image_detail/magnification_factor", 1.5) or 1.5)
+        except Exception:
+            f = 1.5
+        if f < 1.1:
+            f = 1.1
+        if f > 8.0:
+            f = 8.0
+        for v in self._get_active_views():
+            try:
+                v.set_magnification(float(f))
+            except Exception:
+                pass
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
@@ -2965,6 +3110,30 @@ class ImageDetailPanel(QWidget):
         if sm.check_general_close(event, self.back_requested.emit):
             event.accept()
             return
+        
+        # 放大镜本体大小调整快捷键 (Shift+W / Shift+S)
+        try:
+            views = self._get_active_views()
+            magnifier_active = any(getattr(v, "magnifier_enabled", False) for v in views)
+            if magnifier_active:
+                if k_int == int(Qt.Key.Key_W) and bool(mods & Qt.KeyboardModifier.ShiftModifier):
+                    # 放大镜本体变大
+                    for v in views:
+                        if getattr(v, "magnifier_enabled", False):
+                            new_radius = int(min(360, int(getattr(v, "lens_radius", 150) or 150) + 12))
+                            v.set_lens_radius(new_radius)
+                    event.accept()
+                    return
+                if k_int == int(Qt.Key.Key_S) and bool(mods & Qt.KeyboardModifier.ShiftModifier):
+                    # 放大镜本体变小
+                    for v in views:
+                        if getattr(v, "magnifier_enabled", False):
+                            new_radius = int(max(60, int(getattr(v, "lens_radius", 150) or 150) - 12))
+                            v.set_lens_radius(new_radius)
+                    event.accept()
+                    return
+        except Exception:
+            pass
 
         super().keyPressEvent(event)
 
@@ -3180,6 +3349,53 @@ class ImageDetailPanel(QWidget):
         # 适应窗口大小
         if self.pixmap_item.pixmap() and not self.pixmap_item.pixmap().isNull():
             self.fit_image_to_view()
+        
+        # 根据窗口大小动态调整解码分辨率
+        self._update_decode_max_edge_by_viewport()
+
+    def _update_decode_max_edge_by_viewport(self):
+        """根据视口大小动态调整解码分辨率，以显示最大分辨率的图片"""
+        try:
+            # 获取当前激活的视图
+            views = self._get_active_views()
+            if not views:
+                return
+            
+            # 获取最大视口尺寸
+            max_viewport_size = 0
+            for v in views:
+                try:
+                    vw = int(v.viewport().width() or 0)
+                    vh = int(v.viewport().height() or 0)
+                    max_viewport_size = max(max_viewport_size, vw, vh)
+                except Exception:
+                    pass
+            
+            if max_viewport_size <= 0:
+                return
+            
+            # 考虑缩放因子，预留一些余量
+            # 使用 2x 视口大小作为解码目标，以支持 200% 缩放
+            target_edge = int(max_viewport_size * 2)
+            
+            # 限制最小和最大值
+            min_edge = 1600
+            max_edge = 4096  # 最大解码分辨率
+            
+            new_max_edge = max(min_edge, min(target_edge, max_edge))
+            
+            # 只有当变化超过 20% 时才更新，避免频繁调整
+            current_edge = int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)
+            if abs(new_max_edge - current_edge) / current_edge > 0.2:
+                self._detail_decode_max_edge = new_max_edge
+                # 更新缓存管理器的设置
+                try:
+                    if hasattr(self, "big_image_cache") and self.big_image_cache:
+                        self.big_image_cache.set_max_long_edge_override(new_max_edge)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _update_overlay_pos(self, view, overlay, is_info=False):
         if not view or not overlay:
@@ -3354,6 +3570,12 @@ class ImageDetailPanel(QWidget):
         if persist:
             try:
                 sm = getattr(self, "_settings_manager", None)
+                if sm is None:
+                    try:
+                        sm = SettingsManager.instance()
+                        self._settings_manager = sm
+                    except Exception:
+                        sm = None
                 if sm is not None:
                     sm.set("image_detail/all_info_overlay_collapsed", bool(collapsed))
                     sm.sync()
@@ -4126,6 +4348,10 @@ class ImageDetailPanel(QWidget):
                     img_info['bbox'] = record['bbox']
                 if 'focus_point' in record:
                     img_info['focus_point'] = record['focus_point']
+                if 'eye_coordinates' in record:
+                    img_info['eye_coordinates'] = record['eye_coordinates']
+                if 'focus_detect_json' in record:
+                    img_info['focus_detect_json'] = record['focus_detect_json']
                     
         except Exception as e:
             try:
@@ -4207,6 +4433,30 @@ class ImageDetailPanel(QWidget):
             cached = self.big_image_cache.get(path)
         except Exception:
             cached = None
+        if cached is not None and not cached.isNull():
+            try:
+                need_edge = int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)
+            except Exception:
+                need_edge = 2560
+            try:
+                cw = int(cached.width())
+                ch = int(cached.height())
+                cached_long = int(max(cw, ch))
+            except Exception:
+                cached_long = 0
+            if cached_long > 0 and need_edge > 0 and cached_long < int(need_edge):
+                try:
+                    orig = self._get_orig_size_for_path(path)
+                except Exception:
+                    orig = None
+                if orig is not None:
+                    try:
+                        ow, oh = orig
+                        orig_long = int(max(int(ow), int(oh)))
+                    except Exception:
+                        orig_long = 0
+                    if orig_long > cached_long and orig_long >= int(need_edge):
+                        cached = None
         if cached is not None and not cached.isNull():
             try:
                 self.on_image_loaded(cached, path)
@@ -4856,6 +5106,299 @@ class ImageDetailPanel(QWidget):
         except Exception:
             pass
         return None
+
+    def _get_exif_orientation_code(self, path: str) -> int:
+        try:
+            p = str(path or "")
+        except Exception:
+            p = ""
+        if not p:
+            return 1
+        try:
+            cached = (getattr(self, "_exif_orientation_cache", None) or {}).get(p)
+            if cached is not None:
+                return int(cached)
+        except Exception:
+            pass
+        code = 1
+        try:
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    tags = exifread.process_file(f, details=False, stop_tag="Image Orientation")
+                tag = None
+                if isinstance(tags, dict):
+                    tag = tags.get("Image Orientation") or tags.get("Orientation") or tags.get("EXIF Orientation")
+                if tag is not None:
+                    try:
+                        vals = getattr(tag, "values", None)
+                        if isinstance(vals, (list, tuple)) and vals:
+                            code = int(vals[0])
+                        else:
+                            code = int(str(tag).strip())
+                    except Exception:
+                        s = str(tag or "")
+                        try:
+                            import re
+                            nums = re.findall(r"\\d+", s)
+                            if nums:
+                                code = int(nums[0])
+                        except Exception:
+                            pass
+        except Exception:
+            code = 1
+        try:
+            if not hasattr(self, "_exif_orientation_cache") or self._exif_orientation_cache is None:
+                self._exif_orientation_cache = {}
+            self._exif_orientation_cache[p] = int(code)
+        except Exception:
+            pass
+        return int(code or 1)
+
+    def _get_detect_base_size_for_path(self, path: str):
+        p = str(path or "")
+        if not p:
+            return None
+        try:
+            rec = self._get_record_for_path(p)
+        except Exception:
+            rec = None
+        if isinstance(rec, dict):
+            fd = None
+            try:
+                fdj = rec.get("focus_detect_json")
+            except Exception:
+                fdj = None
+            if isinstance(fdj, dict):
+                fd = fdj
+            elif isinstance(fdj, str):
+                s = fdj.strip()
+                if s:
+                    try:
+                        fd = json.loads(s)
+                    except Exception:
+                        fd = None
+            if isinstance(fd, dict):
+                try:
+                    ow = int(float(fd.get("orig_w") or 0))
+                    oh = int(float(fd.get("orig_h") or 0))
+                    if ow > 1 and oh > 1:
+                        return (ow, oh)
+                except Exception:
+                    pass
+        try:
+            from cache.focus_scaled_cache import try_load_meta
+            try:
+                focus_target = int(SettingsManager.instance().get("focus_detect/target_size", 640) or 640)
+            except Exception:
+                focus_target = 640
+            scope = "import_focus" if str(getattr(self, "_db_table_name", "")) == "import_cache" or str(getattr(self, "_big_cache_context", "")).lower() == "import" else "focus"
+            meta0 = try_load_meta(p, int(focus_target), scope=str(scope))
+            if isinstance(meta0, dict):
+                try:
+                    ow = int(float(meta0.get("orig_w") or 0))
+                    oh = int(float(meta0.get("orig_h") or 0))
+                    if ow > 1 and oh > 1:
+                        return (ow, oh)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            for info in (self.image_list or []):
+                if isinstance(info, dict) and str(info.get("path") or "") == p:
+                    try:
+                        w0 = int(info.get("width") or 0)
+                        h0 = int(info.get("height") or 0)
+                        if w0 > 1 and h0 > 1:
+                            return (w0, h0)
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
+        try:
+            if os.path.exists(p):
+                with suppress_stderr_fd():
+                    reader = QImageReader(p)
+                    try:
+                        reader.setAutoTransform(False)
+                    except Exception:
+                        pass
+                    sz = reader.size()
+                if sz is not None and sz.isValid():
+                    ow = int(sz.width())
+                    oh = int(sz.height())
+                    if ow > 1 and oh > 1:
+                        return (ow, oh)
+        except Exception:
+            pass
+        return None
+
+    def _map_point_to_scene_xy(self, x, y, path: str, scene_w: int, scene_h: int, *, is_normalized: bool):
+        try:
+            sw = int(scene_w)
+            sh = int(scene_h)
+        except Exception:
+            return None
+        if sw <= 1 or sh <= 1:
+            return None
+        if bool(is_normalized):
+            try:
+                return float(x) * float(sw), float(y) * float(sh)
+            except Exception:
+                return None
+        bases = []
+        try:
+            b0 = self._get_detect_base_size_for_path(path)
+        except Exception:
+            b0 = None
+        if b0 is not None:
+            bases.append(b0)
+        try:
+            b1 = self._get_orig_size_for_path(path)
+        except Exception:
+            b1 = None
+        if b1 is not None:
+            bases.append(b1)
+        if bases:
+            uniq = []
+            for b in bases:
+                try:
+                    bw = int(b[0])
+                    bh = int(b[1])
+                except Exception:
+                    continue
+                if bw <= 1 or bh <= 1:
+                    continue
+                key = (bw, bh)
+                if key not in uniq:
+                    uniq.append(key)
+            bases = uniq
+        if not bases:
+            try:
+                return float(x), float(y)
+            except Exception:
+                return None
+        try:
+            x0 = float(x)
+            y0 = float(y)
+        except Exception:
+            return None
+        rot_hint = 0
+        try:
+            ori = int(self._get_exif_orientation_code(path) or 1)
+            if ori == 3:
+                rot_hint = 180
+            elif ori == 6:
+                rot_hint = 90
+            elif ori == 8:
+                rot_hint = 270
+        except Exception:
+            rot_hint = 0
+
+        cand_rots = []
+        for r in (rot_hint, 0, 90, 270, 180):
+            try:
+                r = int(r or 0) % 360
+            except Exception:
+                r = 0
+            if r not in cand_rots:
+                cand_rots.append(r)
+
+        best = None
+        best_score = -1e18
+        for bi, base_wh in enumerate(bases):
+            try:
+                ow = float(base_wh[0])
+                oh = float(base_wh[1])
+            except Exception:
+                continue
+            if ow <= 1.0 or oh <= 1.0:
+                continue
+
+            def _map_with_rot(r: int):
+                try:
+                    r = int(r or 0) % 360
+                except Exception:
+                    r = 0
+                try:
+                    if r == 90:
+                        x1 = float(oh) - float(y0)
+                        y1 = float(x0)
+                        rw = float(oh)
+                        rh = float(ow)
+                    elif r == 270:
+                        x1 = float(y0)
+                        y1 = float(ow) - float(x0)
+                        rw = float(oh)
+                        rh = float(ow)
+                    elif r == 180:
+                        x1 = float(ow) - float(x0)
+                        y1 = float(oh) - float(y0)
+                        rw = float(ow)
+                        rh = float(oh)
+                    else:
+                        x1 = float(x0)
+                        y1 = float(y0)
+                        rw = float(ow)
+                        rh = float(oh)
+                except Exception:
+                    x1 = float(x0)
+                    y1 = float(y0)
+                    rw = float(ow)
+                    rh = float(oh)
+                if rw <= 1.0 or rh <= 1.0:
+                    return None
+                try:
+                    sx = float(sw) / float(rw)
+                    sy = float(sh) / float(rh)
+                except Exception:
+                    return None
+                px = float(x1) * float(sx)
+                py = float(y1) * float(sy)
+                return px, py, x1, y1, rw, rh
+
+            for r in cand_rots:
+                m = _map_with_rot(r)
+                if m is None:
+                    continue
+                px, py, x1, y1, rw, rh = m
+                sc = 0.0
+                try:
+                    if 0.0 <= float(px) <= float(sw) and 0.0 <= float(py) <= float(sh):
+                        sc += 4.0
+                except Exception:
+                    pass
+                try:
+                    if 0.0 <= float(x1) <= float(rw) and 0.0 <= float(y1) <= float(rh):
+                        sc += 2.0
+                except Exception:
+                    pass
+                try:
+                    if int(r) == int(rot_hint):
+                        sc += 0.2
+                except Exception:
+                    pass
+                try:
+                    if int(bi) == 1:
+                        sc += 0.05
+                except Exception:
+                    pass
+                if sc > best_score:
+                    best_score = sc
+                    best = (px, py)
+
+        if best is not None:
+            return best[0], best[1]
+        try:
+            ow = float(bases[-1][0])
+            oh = float(bases[-1][1])
+            return float(x0) * float(sw) / float(ow), float(y0) * float(sh) / float(oh)
+        except Exception:
+            try:
+                return float(x0), float(y0)
+            except Exception:
+                return None
 
     def _get_orig_size_for_path(self, path: str):
         if not path:
@@ -5641,6 +6184,8 @@ class ImageDetailPanel(QWidget):
         else:
             if not has_bbox:
                 targets.append("bbox_orig")
+            if (not has_focus) and bool(getattr(self, "_focus_point_display_enabled", False)):
+                targets.append("focus_point_orig")
             if targets:
                 targets.append("pos")
             else:
@@ -5678,8 +6223,24 @@ class ImageDetailPanel(QWidget):
                 self._detect_subject_pending = False
                 if hasattr(self, 'btn_detect_subject'):
                     self.btn_detect_subject.setEnabled(True)
+            pretty = None
             try:
-                NotificationManager.instance().show_warning("错误", f"检测主体失败: {e}")
+                s = str(e)
+            except Exception:
+                s = ""
+            low = s.lower()
+            if ("dll" in low and "初始化" in s) or ("winerror 1114" in low) or ("c10.dll" in low) or ("torch" in low and "dll" in low):
+                pretty = "检测引擎初始化失败：可能缺少 PyTorch/YOLO 依赖或显卡驱动异常，请检查运行环境或安装 CPU 版本支持。"
+            elif "torch" in low and ("import" in low or "load" in low):
+                pretty = "检测引擎导入失败：PyTorch/YOLO 未正确安装或版本不兼容。"
+            elif "yolo" in low and ("model" in low or "load" in low):
+                pretty = "模型加载失败：未找到或无法读取模型文件，请检查 models 目录。"
+            try:
+                msg = pretty if pretty else f"检测主体失败: {s}"
+            except Exception:
+                msg = "检测主体失败"
+            try:
+                NotificationManager.instance().show_warning("错误", msg)
             except Exception:
                 pass
             return
@@ -5724,13 +6285,27 @@ class ImageDetailPanel(QWidget):
             target_index = self.current_index
 
         if err:
+            pretty = None
             try:
-                NotificationManager.instance().show_warning("错误", f"检测主体失败: {err}")
+                s = str(err)
+            except Exception:
+                s = ""
+            low = s.lower()
+            if ("dll" in low and "初始化" in s) or ("winerror 1114" in low) or ("c10.dll" in low) or ("torch" in low and "dll" in low):
+                pretty = "检测引擎初始化失败：可能缺少 PyTorch/YOLO 依赖或显卡驱动异常，请检查运行环境或安装 CPU 版本支持。"
+            elif "torch" in low and ("import" in low or "load" in low):
+                pretty = "检测引擎导入失败：PyTorch/YOLO 未正确安装或版本不兼容。"
+            elif "yolo" in low and ("model" in low or "load" in low):
+                pretty = "模型加载失败：未找到或无法读取模型文件，请检查 models 目录。"
+            try:
+                msg = pretty if pretty else f"检测主体失败: {s}"
+            except Exception:
+                msg = "检测主体失败"
+            try:
+                NotificationManager.instance().show_warning("错误", msg)
             except Exception:
                 pass
             return
-
-        focus_point = None
 
         if target_index is None or not self.image_list or target_index < 0 or target_index >= len(self.image_list):
             return
@@ -5869,6 +6444,11 @@ class ImageDetailPanel(QWidget):
             info = self.image_list[target_index]
             if info.get('path') == image_path:
                 info['bbox'] = json.dumps(bbox_xyxy) if bbox_xyxy else None
+                if focus_list:
+                    try:
+                        info['focus_point'] = json.dumps([float(focus_list[0]), float(focus_list[1])])
+                    except Exception:
+                        info['focus_point'] = info.get('focus_point')
                 if position:
                     info['position'] = position
         
@@ -5877,6 +6457,11 @@ class ImageDetailPanel(QWidget):
             tags = {}
             if bbox_xyxy:
                 tags[EXIF_TAG.ObjectCoordinates.value] = json.dumps(bbox_xyxy)
+            if focus_list:
+                try:
+                    tags[EXIF_TAG.FocusPoint.value] = json.dumps([float(focus_list[0]), float(focus_list[1])])
+                except Exception:
+                    tags = tags
             if position is not None and position != "":
                 tags[EXIF_TAG.Position.value] = str(position)
             if tags:
@@ -5951,6 +6536,52 @@ class ImageDetailPanel(QWidget):
             item_attr, path_attr = "_subject_rect_item_left", "_subject_rect_path_left"
         elif side == "right":
             item_attr, path_attr = "_subject_rect_item_right", "_subject_rect_path_right"
+        else:
+            return
+
+        item = getattr(self, item_attr, None)
+        if item is not None:
+            try:
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+            except Exception:
+                pass
+        try:
+            setattr(self, item_attr, None)
+            setattr(self, path_attr, None)
+        except Exception:
+            pass
+
+    def _clear_eye_rect(self):
+        items = [
+            ("_eye_rect_item", "_eye_rect_path"),
+            ("_eye_rect_item_left", "_eye_rect_path_left"),
+            ("_eye_rect_item_right", "_eye_rect_path_right"),
+        ]
+        for item_attr, path_attr in items:
+            item = getattr(self, item_attr, None)
+            if item is None:
+                try:
+                    setattr(self, path_attr, None)
+                except Exception:
+                    pass
+                continue
+            try:
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+            except Exception:
+                pass
+            try:
+                setattr(self, item_attr, None)
+                setattr(self, path_attr, None)
+            except Exception:
+                pass
+
+    def _clear_eye_rect_side(self, side: str):
+        if side == "left":
+            item_attr, path_attr = "_eye_rect_item_left", "_eye_rect_path_left"
+        elif side == "right":
+            item_attr, path_attr = "_eye_rect_item_right", "_eye_rect_path_right"
         else:
             return
 
@@ -6146,14 +6777,47 @@ class ImageDetailPanel(QWidget):
             enabled = bool(getattr(self, "_subject_rect_display_enabled", False))
         except Exception:
             enabled = False
+        try:
+            focus_enabled = bool(getattr(self, "_focus_point_display_enabled", False))
+        except Exception:
+            focus_enabled = False
+        def _is_missing_xy(v) -> bool:
+            if v is None:
+                return True
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return True
+                s2 = s.lower()
+                if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                    return True
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return False
+                return _is_missing_xy(obj)
+            if isinstance(v, dict):
+                if "x" in v and "y" in v:
+                    try:
+                        float(v.get("x"))
+                        float(v.get("y"))
+                        return False
+                    except Exception:
+                        return True
+                return True
+            if isinstance(v, (list, tuple)):
+                return len(v) < 2
+            return False
 
         if self.compare_mode:
             try:
                 self._clear_subject_rect()
             except Exception:
                 pass
-            if not enabled:
-                return
+            try:
+                self._clear_eye_rect()
+            except Exception:
+                pass
             left_index = getattr(self, "saved_left_index", None)
             right_index = self.current_index
             try:
@@ -6165,15 +6829,173 @@ class ImageDetailPanel(QWidget):
             except Exception:
                 right_index = -1
 
+            def _parse_xy(v):
+                if v is None:
+                    return None
+                if isinstance(v, str):
+                    s = v.strip()
+                    if not s:
+                        return None
+                    try:
+                        v = json.loads(s)
+                    except Exception:
+                        return None
+                if isinstance(v, dict):
+                    try:
+                        if "x" in v and "y" in v:
+                            return float(v.get("x")), float(v.get("y"))
+                    except Exception:
+                        return None
+                if isinstance(v, (list, tuple)) and len(v) >= 2:
+                    try:
+                        return float(v[0]), float(v[1])
+                    except Exception:
+                        return None
+                return None
+
+            def _get_bbox_from_fd(fdj):
+                fd = None
+                if isinstance(fdj, dict):
+                    fd = fdj
+                elif isinstance(fdj, str):
+                    s = fdj.strip()
+                    if s:
+                        try:
+                            fd = json.loads(s)
+                        except Exception:
+                            fd = None
+                if isinstance(fd, dict):
+                    try:
+                        return fd.get("bbox_orig") or fd.get("bbox")
+                    except Exception:
+                        return None
+                return None
+
+            def _get_eye(i: int):
+                if i is None or i < 0 or i >= len(self.image_list):
+                    return None, None, None
+                info0 = self.image_list[i]
+                p0 = info0.get("path")
+                eye0 = info0.get("eye_coordinates")
+                eye_xy = _parse_xy(eye0)
+                record0 = None
+                if not eye_xy and p0:
+                    try:
+                        record0 = self._get_record_for_path(p0)
+                    except Exception:
+                        record0 = None
+                    if isinstance(record0, dict):
+                        try:
+                            eye_xy = _parse_xy(record0.get("eye_coordinates"))
+                        except Exception:
+                            eye_xy = eye_xy
+                if not eye_xy:
+                    fdj = None
+                    try:
+                        fdj = info0.get("focus_detect_json")
+                    except Exception:
+                        fdj = None
+                    if not fdj and isinstance(record0, dict):
+                        try:
+                            fdj = record0.get("focus_detect_json")
+                        except Exception:
+                            fdj = fdj
+                    fd = None
+                    if isinstance(fdj, dict):
+                        fd = fdj
+                    elif isinstance(fdj, str):
+                        s = fdj.strip()
+                        if s:
+                            try:
+                                fd = json.loads(s)
+                            except Exception:
+                                fd = None
+                    if isinstance(fd, dict):
+                        try:
+                            eye_xy = _parse_xy(fd.get("eye_coordinates") or fd.get("eye"))
+                        except Exception:
+                            eye_xy = eye_xy
+                if not eye_xy:
+                    return None, None, p0
+                return eye_xy[0], eye_xy[1], p0
+
+            def _add_eye(scene, size, ex, ey, attr: str, path: str):
+                if scene is None or size is None or ex is None or ey is None:
+                    return
+                try:
+                    w, h = int(size[0]), int(size[1])
+                except Exception:
+                    return
+                is_normalized = (0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0)
+                mapped = None
+                try:
+                    mapped = self._map_point_to_scene_xy(ex, ey, str(path or ""), int(w), int(h), is_normalized=bool(is_normalized))
+                except Exception:
+                    mapped = None
+                if mapped is None:
+                    scene_x = float(ex) * float(w) if is_normalized else float(ex)
+                    scene_y = float(ey) * float(h) if is_normalized else float(ey)
+                else:
+                    scene_x, scene_y = mapped
+                try:
+                    r = 8.0
+                except Exception:
+                    r = 8.0
+                item = QGraphicsRectItem(QRectF(-r, -r, 2 * r, 2 * r))
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                c = QColor("#2196F3")
+                c.setAlpha(240)
+                pen = QPen(c, 3)
+                try:
+                    pen.setCosmetic(True)
+                except Exception:
+                    pass
+                item.setPen(pen)
+                item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                item.setPos(scene_x, scene_y)
+                item.setZValue(101)
+                scene.addItem(item)
+                try:
+                    setattr(self, attr, item)
+                except Exception:
+                    pass
+
             if left_index is not None and 0 <= left_index < len(self.image_list):
                 try:
                     left_info = self.image_list[left_index]
                     left_path = left_info.get("path")
                     left_bbox = left_info.get("bbox")
+                    if not left_bbox:
+                        try:
+                            left_bbox = _get_bbox_from_fd(left_info.get("focus_detect_json"))
+                        except Exception:
+                            left_bbox = left_bbox
+                        if left_bbox:
+                            left_info["bbox"] = left_bbox
+                    if left_path and not left_bbox:
+                        try:
+                            record0 = self._get_record_for_path(left_path)
+                        except Exception:
+                            record0 = None
+                        if isinstance(record0, dict):
+                            try:
+                                left_bbox = record0.get("bbox")
+                            except Exception:
+                                left_bbox = left_bbox
+                            if not left_bbox:
+                                try:
+                                    left_bbox = _get_bbox_from_fd(record0.get("focus_detect_json"))
+                                except Exception:
+                                    left_bbox = left_bbox
+                            if left_bbox:
+                                left_info["bbox"] = left_bbox
                     left_size = self._get_pixmap_size_for_scene(self.scene_left)
                     left_rect, _ = self._bbox_to_rect_and_xywh(left_bbox, image_size=left_size, orig_size=self._get_orig_size_for_path(left_path))
-                    if left_rect is not None and not left_rect.isNull():
+                    if enabled and left_rect is not None and not left_rect.isNull():
                         self._draw_subject_rect(left_rect, self.scene_left, left_path)
+                    if enabled:
+                        ex, ey, p0 = _get_eye(left_index)
+                        _add_eye(self.scene_left, left_size, ex, ey, "_eye_rect_item_left", p0)
                 except Exception:
                     pass
 
@@ -6182,10 +7004,37 @@ class ImageDetailPanel(QWidget):
                     right_info = self.image_list[right_index]
                     right_path = right_info.get("path")
                     right_bbox = right_info.get("bbox")
+                    if not right_bbox:
+                        try:
+                            right_bbox = _get_bbox_from_fd(right_info.get("focus_detect_json"))
+                        except Exception:
+                            right_bbox = right_bbox
+                        if right_bbox:
+                            right_info["bbox"] = right_bbox
+                    if right_path and not right_bbox:
+                        try:
+                            record0 = self._get_record_for_path(right_path)
+                        except Exception:
+                            record0 = None
+                        if isinstance(record0, dict):
+                            try:
+                                right_bbox = record0.get("bbox")
+                            except Exception:
+                                right_bbox = right_bbox
+                            if not right_bbox:
+                                try:
+                                    right_bbox = _get_bbox_from_fd(record0.get("focus_detect_json"))
+                                except Exception:
+                                    right_bbox = right_bbox
+                            if right_bbox:
+                                right_info["bbox"] = right_bbox
                     right_size = self._get_pixmap_size_for_scene(self.scene_right)
                     right_rect, _ = self._bbox_to_rect_and_xywh(right_bbox, image_size=right_size, orig_size=self._get_orig_size_for_path(right_path))
-                    if right_rect is not None and not right_rect.isNull():
+                    if enabled and right_rect is not None and not right_rect.isNull():
                         self._draw_subject_rect(right_rect, self.scene_right, right_path)
+                    if enabled:
+                        ex, ey, p0 = _get_eye(right_index)
+                        _add_eye(self.scene_right, right_size, ex, ey, "_eye_rect_item_right", p0)
                 except Exception:
                     pass
             return
@@ -6194,8 +7043,10 @@ class ImageDetailPanel(QWidget):
             self._clear_subject_rect()
         except Exception:
             pass
-        if not enabled:
-            return
+        try:
+            self._clear_eye_rect()
+        except Exception:
+            pass
         try:
             idx = int(self.current_index)
         except Exception:
@@ -6206,9 +7057,21 @@ class ImageDetailPanel(QWidget):
             info = self.image_list[idx]
             path = info.get("path")
             bbox = info.get("bbox")
+            eye0 = info.get("eye_coordinates")
         except Exception:
             path = None
             bbox = None
+            eye0 = None
+        if not bbox:
+            try:
+                bbox = _get_bbox_from_fd(info.get("focus_detect_json"))
+            except Exception:
+                bbox = bbox
+            if bbox:
+                try:
+                    info["bbox"] = bbox
+                except Exception:
+                    pass
         if path and not bbox:
             try:
                 record = self._get_record_for_path(path)
@@ -6217,24 +7080,243 @@ class ImageDetailPanel(QWidget):
                     info["bbox"] = bbox
             except Exception:
                 bbox = bbox
-        if not path or not bbox:
+        if path and not bbox:
+            try:
+                record = self._get_record_for_path(path)
+            except Exception:
+                record = None
+            if isinstance(record, dict):
+                try:
+                    bbox = _get_bbox_from_fd(record.get("focus_detect_json"))
+                except Exception:
+                    bbox = bbox
+                if bbox:
+                    try:
+                        info["bbox"] = bbox
+                    except Exception:
+                        pass
+        if path and _is_missing_xy(eye0):
+            try:
+                record = self._get_record_for_path(path)
+            except Exception:
+                record = None
+            if isinstance(record, dict):
+                try:
+                    eye0 = record.get("eye_coordinates")
+                except Exception:
+                    eye0 = eye0
+                if not eye0:
+                    try:
+                        fdj = record.get("focus_detect_json")
+                    except Exception:
+                        fdj = None
+                    fd = None
+                    if isinstance(fdj, dict):
+                        fd = fdj
+                    elif isinstance(fdj, str):
+                        s = fdj.strip()
+                        if s:
+                            try:
+                                fd = json.loads(s)
+                            except Exception:
+                                fd = None
+                    if isinstance(fd, dict):
+                        try:
+                            eye0 = fd.get("eye_coordinates") or fd.get("eye")
+                        except Exception:
+                            eye0 = eye0
+        if not path:
             return
+        try:
+            now = float(time.time())
+        except Exception:
+            now = 0.0
+        try:
+            last_p = str(getattr(self, "_big_overlay_warn_path", "") or "")
+        except Exception:
+            last_p = ""
+        try:
+            last_ts = float(getattr(self, "_big_overlay_warn_ts", 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        do_warn = False
+        try:
+            do_warn = (last_p != str(path)) or (now - last_ts > 2.0)
+        except Exception:
+            do_warn = False
+        try:
+            if do_warn:
+                self._big_overlay_warn_path = str(path)
+                self._big_overlay_warn_ts = float(now)
+        except Exception:
+            pass
         try:
             image_size = self._get_pixmap_size_for_scene(self.scene)
         except Exception:
             image_size = None
-        rect, _ = self._bbox_to_rect_and_xywh(bbox, image_size=image_size, orig_size=self._get_orig_size_for_path(path))
-        if rect is not None and not rect.isNull():
+        if bbox:
+            rect, _ = self._bbox_to_rect_and_xywh(bbox, image_size=image_size, orig_size=self._get_orig_size_for_path(path))
+            if enabled and rect is not None and not rect.isNull():
+                try:
+                    self._draw_subject_rect(rect, self.scene, path)
+                except Exception:
+                    pass
+        eye_xy = None
+        try:
+            if isinstance(eye0, str):
+                s = eye0.strip()
+                if s:
+                    eye0 = json.loads(s)
+        except Exception:
+            pass
+        try:
+            if isinstance(eye0, dict) and "x" in eye0 and "y" in eye0:
+                eye_xy = (float(eye0.get("x")), float(eye0.get("y")))
+            elif isinstance(eye0, (list, tuple)) and len(eye0) >= 2:
+                eye_xy = (float(eye0[0]), float(eye0[1]))
+        except Exception:
+            eye_xy = None
+        if not eye_xy:
+            fdj = None
             try:
-                self._draw_subject_rect(rect, self.scene, path)
+                fdj = info.get("focus_detect_json")
             except Exception:
-                pass
+                fdj = None
+            if not fdj and path:
+                try:
+                    record = self._get_record_for_path(path)
+                except Exception:
+                    record = None
+                if isinstance(record, dict):
+                    try:
+                        fdj = record.get("focus_detect_json")
+                    except Exception:
+                        fdj = fdj
+            fd = None
+            if isinstance(fdj, dict):
+                fd = fdj
+            elif isinstance(fdj, str):
+                s = fdj.strip()
+                if s:
+                    try:
+                        fd = json.loads(s)
+                    except Exception:
+                        fd = None
+            if isinstance(fd, dict):
+                try:
+                    v = fd.get("eye_coordinates") or fd.get("eye")
+                except Exception:
+                    v = None
+                try:
+                    if isinstance(v, str):
+                        sv = v.strip()
+                        if sv:
+                            v = json.loads(sv)
+                except Exception:
+                    v = v
+                try:
+                    if isinstance(v, dict) and "x" in v and "y" in v:
+                        eye_xy = (float(v.get("x")), float(v.get("y")))
+                    elif isinstance(v, (list, tuple)) and len(v) >= 2:
+                        eye_xy = (float(v[0]), float(v[1]))
+                except Exception:
+                    eye_xy = eye_xy
+        if enabled and eye_xy and image_size is not None:
+            try:
+                w, h = int(image_size[0]), int(image_size[1])
+            except Exception:
+                w = h = 0
+            if w > 0 and h > 0:
+                ex, ey = eye_xy
+                is_normalized = (0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0)
+                mapped = None
+                try:
+                    mapped = self._map_point_to_scene_xy(ex, ey, str(path or ""), int(w), int(h), is_normalized=bool(is_normalized))
+                except Exception:
+                    mapped = None
+                if mapped is None:
+                    scene_x = float(ex) * float(w) if is_normalized else float(ex)
+                    scene_y = float(ey) * float(h) if is_normalized else float(ey)
+                else:
+                    scene_x, scene_y = mapped
+                try:
+                    r = 8.0
+                except Exception:
+                    r = 8.0
+                try:
+                    item = QGraphicsRectItem(QRectF(-r, -r, 2 * r, 2 * r))
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                    c = QColor("#2196F3")
+                    c.setAlpha(240)
+                    pen = QPen(c, 3)
+                    try:
+                        pen.setCosmetic(True)
+                    except Exception:
+                        pass
+                    item.setPen(pen)
+                    item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    item.setPos(scene_x, scene_y)
+                    item.setZValue(101)
+                    self.scene.addItem(item)
+                    self._eye_rect_item = item
+                    self._eye_rect_path = path
+                    try:
+                        if bool(do_warn):
+                            vpos = None
+                            try:
+                                vpos = self.view.mapFromScene(QPointF(float(scene_x), float(scene_y)))
+                            except Exception:
+                                vpos = None
+                            try:
+                                vw = int(self.view.viewport().width() or 0)
+                                vh = int(self.view.viewport().height() or 0)
+                            except Exception:
+                                vw = vh = 0
+                    except Exception:
+                        pass
+                    try:
+                        self.scene.update()
+                    except Exception:
+                        pass
+                    try:
+                        self.view.viewport().update()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    LogManager.instance().warning(f"[大图叠加] eye_add_failed path={path} err={repr(e)}")
 
     def _refresh_focus_point_overlay(self):
         try:
             enabled = bool(getattr(self, "_focus_point_display_enabled", False))
         except Exception:
             enabled = False
+        def _is_missing_fp(v) -> bool:
+            if v is None:
+                return True
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return True
+                s2 = s.lower()
+                if s2 in ("null", "none", "nan", "[]", "{}", "0,0", "0 0"):
+                    return True
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    return False
+                return _is_missing_fp(obj)
+            if isinstance(v, (list, tuple)):
+                return len(v) < 2
+            if isinstance(v, dict):
+                if "x" in v and "y" in v:
+                    try:
+                        float(v.get("x"))
+                        float(v.get("y"))
+                        return False
+                    except Exception:
+                        return True
+                return True
+            return False
 
         if self.compare_mode:
             try:
@@ -6260,14 +7342,42 @@ class ImageDetailPanel(QWidget):
                     return None, None, None
                 info = self.image_list[i]
                 fp = info.get("focus_point")
-                if not fp:
+                if _is_missing_fp(fp):
                     try:
                         p = info.get("path")
                         if p:
                             record = self._get_record_for_path(p)
-                            if record and "focus_point" in record:
-                                fp = record["focus_point"]
-                                info["focus_point"] = fp
+                            if isinstance(record, dict):
+                                try:
+                                    fp0 = record.get("focus_point")
+                                except Exception:
+                                    fp0 = None
+                                if not _is_missing_fp(fp0):
+                                    fp = fp0
+                                    info["focus_point"] = fp
+                                else:
+                                    fd = None
+                                    try:
+                                        fdj = record.get("focus_detect_json")
+                                    except Exception:
+                                        fdj = None
+                                    if isinstance(fdj, dict):
+                                        fd = fdj
+                                    elif isinstance(fdj, str):
+                                        s = fdj.strip()
+                                        if s:
+                                            try:
+                                                fd = json.loads(s)
+                                            except Exception:
+                                                fd = None
+                                    if isinstance(fd, dict):
+                                        try:
+                                            fp1 = fd.get("focus_point")
+                                        except Exception:
+                                            fp1 = None
+                                        if not _is_missing_fp(fp1):
+                                            fp = fp1
+                                            info["focus_point"] = fp
                     except Exception:
                         fp = fp
                 fx = fy = None
@@ -6319,21 +7429,16 @@ class ImageDetailPanel(QWidget):
                 except Exception:
                     return
                 is_normalized = (0 <= fx <= 1.0 and 0 <= fy <= 1.0)
-                scene_x = fx * w if is_normalized else fx
-                scene_y = fy * h if is_normalized else fy
-                if not is_normalized:
-                    orig_size = self._get_orig_size_for_path(path) if path else None
-                    if orig_size is not None:
-                        try:
-                            ow, oh = int(orig_size[0]), int(orig_size[1])
-                        except Exception:
-                            ow = oh = 0
-                        try:
-                            if ow > 0 and oh > 0 and (int(w) != int(ow) or int(h) != int(oh)):
-                                scene_x = float(scene_x) * float(w) / float(ow)
-                                scene_y = float(scene_y) * float(h) / float(oh)
-                        except Exception:
-                            pass
+                mapped = None
+                try:
+                    mapped = self._map_point_to_scene_xy(fx, fy, str(path or ""), int(w), int(h), is_normalized=bool(is_normalized))
+                except Exception:
+                    mapped = None
+                if mapped is None:
+                    scene_x = fx * w if is_normalized else fx
+                    scene_y = fy * h if is_normalized else fy
+                else:
+                    scene_x, scene_y = mapped
                 item = QGraphicsPixmapItem(pixmap)
                 item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
                 item.setPos(scene_x, scene_y)
@@ -6365,14 +7470,42 @@ class ImageDetailPanel(QWidget):
             return
         img_info = self.image_list[idx]
         focus_point = img_info.get("focus_point")
-        if not focus_point:
+        if _is_missing_fp(focus_point):
             try:
                 path = img_info.get("path")
                 if path:
                     record = self._get_record_for_path(path)
-                    if record and "focus_point" in record:
-                        focus_point = record["focus_point"]
-                        img_info["focus_point"] = focus_point
+                    if isinstance(record, dict):
+                        try:
+                            fp0 = record.get("focus_point")
+                        except Exception:
+                            fp0 = None
+                        if not _is_missing_fp(fp0):
+                            focus_point = fp0
+                            img_info["focus_point"] = focus_point
+                        else:
+                            fd = None
+                            try:
+                                fdj = record.get("focus_detect_json")
+                            except Exception:
+                                fdj = None
+                            if isinstance(fdj, dict):
+                                fd = fdj
+                            elif isinstance(fdj, str):
+                                s = fdj.strip()
+                                if s:
+                                    try:
+                                        fd = json.loads(s)
+                                    except Exception:
+                                        fd = None
+                            if isinstance(fd, dict):
+                                try:
+                                    fp1 = fd.get("focus_point")
+                                except Exception:
+                                    fp1 = None
+                                if not _is_missing_fp(fp1):
+                                    focus_point = fp1
+                                    img_info["focus_point"] = focus_point
             except Exception:
                 focus_point = focus_point
         try:
@@ -6419,21 +7552,16 @@ class ImageDetailPanel(QWidget):
             return
         w, h = image_size
         is_normalized = (0 <= fx <= 1.0 and 0 <= fy <= 1.0)
-        scene_x = fx * w if is_normalized else fx
-        scene_y = fy * h if is_normalized else fy
-        if not is_normalized:
-            orig_size = self._get_orig_size_for_path(img_info.get("path"))
-            if orig_size is not None:
-                try:
-                    ow, oh = int(orig_size[0]), int(orig_size[1])
-                except Exception:
-                    ow = oh = 0
-                try:
-                    if ow > 0 and oh > 0 and (int(w) != int(ow) or int(h) != int(oh)):
-                        scene_x = float(scene_x) * float(w) / float(ow)
-                        scene_y = float(scene_y) * float(h) / float(oh)
-                except Exception:
-                    pass
+        mapped = None
+        try:
+            mapped = self._map_point_to_scene_xy(fx, fy, str(img_info.get("path") or ""), int(w), int(h), is_normalized=bool(is_normalized))
+        except Exception:
+            mapped = None
+        if mapped is None:
+            scene_x = fx * w if is_normalized else fx
+            scene_y = fy * h if is_normalized else fy
+        else:
+            scene_x, scene_y = mapped
         icon = qta.icon("mdi6.focus-field", color=ColorManager.instance().to_qss_color("border.subject_rect", default="red"))
         pixmap = icon.pixmap(QSize(40, 40))
         self._focus_point_item = QGraphicsPixmapItem(pixmap)

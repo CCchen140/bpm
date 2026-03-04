@@ -124,6 +124,11 @@ class FocusDetectDialog(BasePopupDialog):
 
         def run():
             try:
+                if bool(getattr(self, "_yolo_prewarm_cancel", False)):
+                    return
+            except Exception:
+                pass
+            try:
                 model = str(self.model_combo.currentText() or "x").lower()
             except Exception:
                 model = "x"
@@ -156,13 +161,7 @@ class FocusDetectDialog(BasePopupDialog):
                 )
             except Exception:
                 pass
-            try:
-                if self._yolo_prewarm_cancel:
-                    from core.check_cli import clear_focus_detector
-
-                    clear_focus_detector()
-            except Exception:
-                pass
+            return
 
         t = Thread(target=run, daemon=True, name="YoloPrewarm")
         self._yolo_prewarm_thread = t
@@ -170,12 +169,7 @@ class FocusDetectDialog(BasePopupDialog):
 
     def _cancel_yolo_prewarm(self):
         self._yolo_prewarm_cancel = True
-        try:
-            from core.check_cli import clear_focus_detector
-
-            clear_focus_detector()
-        except Exception:
-            pass
+        return
 
     def reject(self):
         try:
@@ -501,6 +495,8 @@ class FocusDetectDialog(BasePopupDialog):
             ("use_gpu", "使用GPU加速", True),
             ("multi_check", "进行多次检测", True),
             ("exp_frame_check", "进行爆框检测", True),
+            ("enable_eye_detect", "进行鸟眼检测", True),
+            ("enable_af_point_detect", "识别对焦点", True),
             ("append_detect", "追加检测", False),
             ("no_db_write", "不写入数据库", False),
         ]
@@ -1569,6 +1565,8 @@ class FocusDetectDialog(BasePopupDialog):
             "use_gpu": self._option_checked("use_gpu"),
             "multi_check": self._option_checked("multi_check"),
             "exp_frame_check": self._option_checked("exp_frame_check"),
+            "enable_eye_detect": self._option_checked("enable_eye_detect"),
+            "enable_af_point_detect": self._option_checked("enable_af_point_detect"),
             "append_detect": self._option_checked("append_detect"),
             "no_db_write": self._option_checked("no_db_write"),
             "exif_write_mode": exif_mode,

@@ -105,6 +105,14 @@ class ChartsWebBridge(QObject):
             if act == "update_layout":
                 self._manager.update_layout(str(data.get("chart_id") or ""), dict(data.get("layout") or {}))
                 return _json_dumps({"ok": True})
+            if act == "update_chart_layouts":
+                layouts = data.get("layouts") or []
+                for item in layouts:
+                    cid = str(item.get("chart_id") or "")
+                    layout = dict(item.get("layout") or {})
+                    if cid:
+                        self._manager.update_layout(cid, layout)
+                return _json_dumps({"ok": True})
             if act == "update_user_field":
                 dataset = str(data.get("dataset") or "library")
                 field_name = str(data.get("field_name") or "")
@@ -161,6 +169,14 @@ class ChartsWebBridge(QObject):
                 return _json_dumps({"ok": True})
             if act == "update_layout":
                 self._manager.update_layout(str(data.get("chart_id") or ""), dict(data.get("layout") or {}))
+                return _json_dumps({"ok": True})
+            if act == "update_chart_layouts":
+                layouts = data.get("layouts") or []
+                for item in layouts:
+                    cid = str(item.get("chart_id") or "")
+                    layout = dict(item.get("layout") or {})
+                    if cid:
+                        self._manager.update_layout(cid, layout)
                 return _json_dumps({"ok": True})
             if act == "update_user_field":
                 dataset = str(data.get("dataset") or "library")

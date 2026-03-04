@@ -5,13 +5,95 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 _WIN_GPU_BACKEND_HINT = None
+_SUPPRESS_UNTIL = 0.0
+_PAUSE_COUNT = 0
+
+
+def suppress_gpu_query(seconds: float = 1.8):
+    global _SUPPRESS_UNTIL
+    try:
+        now = float(time.monotonic())
+    except Exception:
+        return
+    try:
+        sec = float(seconds)
+    except Exception:
+        sec = 1.8
+    if sec <= 0:
+        return
+    try:
+        _SUPPRESS_UNTIL = max(float(_SUPPRESS_UNTIL or 0.0), now + sec)
+    except Exception:
+        _SUPPRESS_UNTIL = now + sec
+
+
+def enter_gpu_query_pause() -> bool:
+    global _PAUSE_COUNT
+    try:
+        _PAUSE_COUNT = int(_PAUSE_COUNT or 0) + 1
+        return True
+    except Exception:
+        _PAUSE_COUNT = 1
+        return True
+
+
+def exit_gpu_query_pause():
+    global _PAUSE_COUNT
+    try:
+        c = int(_PAUSE_COUNT or 0) - 1
+    except Exception:
+        c = 0
+    _PAUSE_COUNT = max(0, int(c))
+
+
+def _subprocess_no_console_kwargs() -> dict:
+    try:
+        if sys.platform != "win32":
+            return {}
+        try:
+            from utils.setting.settings_manager import SettingsManager
+
+            hide = bool(SettingsManager.instance().get("system/hide_subprocess_console", True))
+        except Exception:
+            hide = True
+        if not hide:
+            return {}
+        creationflags = 0
+        try:
+            creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        except Exception:
+            creationflags |= 0x08000000
+        try:
+            creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+        except Exception:
+            creationflags |= 0x00000008
+        try:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
+            return {"creationflags": int(creationflags), "startupinfo": si}
+        except Exception:
+            return {"creationflags": int(creationflags)}
+    except Exception:
+        return {}
 
 
 def _run_cmd(args: list[str], timeout_s: float) -> str:
     try:
-        out = subprocess.check_output(args, stderr=subprocess.STDOUT, timeout=float(timeout_s))
+        if int(_PAUSE_COUNT or 0) > 0:
+            return ""
+    except Exception:
+        pass
+    try:
+        if os.name == "nt" and float(time.monotonic()) < float(_SUPPRESS_UNTIL or 0.0):
+            return ""
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(args, stderr=subprocess.STDOUT, timeout=float(timeout_s), **_subprocess_no_console_kwargs())
         return out.decode("utf-8", errors="ignore").strip()
     except subprocess.CalledProcessError as e:
         try:
@@ -100,10 +182,31 @@ def _try_gputil() -> float | None:
 
 
 def _try_nvidia_smi(timeout_s: float) -> float | None:
-    if shutil.which("nvidia-smi") is None:
+    exe = None
+    try:
+        exe = shutil.which("nvidia-smi")
+    except Exception:
+        exe = None
+    if not exe:
+        try:
+            cands = [
+                os.path.join(os.environ.get("ProgramW6432", r"C:\Program Files"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+                os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+                os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+            ]
+        except Exception:
+            cands = []
+        for p in cands:
+            try:
+                if p and os.path.exists(p):
+                    exe = p
+                    break
+            except Exception:
+                continue
+    if not exe:
         return None
     out = _run_cmd(
-        ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+        [str(exe), "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
         timeout_s=timeout_s,
     )
     if not out:
@@ -378,11 +481,21 @@ def _try_windows_gpu_engine_cim(timeout_s: float) -> float | None:
 
 def get_gpu_util_percent(timeout_s: float = 1.0) -> float | None:
     global _WIN_GPU_BACKEND_HINT
+    try:
+        if int(_PAUSE_COUNT or 0) > 0:
+            return None
+    except Exception:
+        pass
+    try:
+        if os.name == "nt" and float(time.monotonic()) < float(_SUPPRESS_UNTIL or 0.0):
+            return None
+    except Exception:
+        pass
     best = None
     best_backend = None
     funcs: list[tuple[str, callable]] = [
-        ("gputil", lambda: _try_gputil()),
         ("nvidia-smi", lambda: _try_nvidia_smi(timeout_s=timeout_s)),
+        ("gputil", lambda: _try_gputil()),
         ("typeperf", lambda: _try_windows_gpu_engine_typeperf(timeout_s=timeout_s)),
         ("cim", lambda: _try_windows_gpu_engine_cim(timeout_s=max(0.8, timeout_s * 1.2))),
         ("get-counter", lambda: _try_windows_gpu_engine_powershell(timeout_s=max(0.5, timeout_s * 1.5))),

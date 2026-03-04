@@ -4,22 +4,18 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QSize, QTimer, QEvent, QPoint, QThreadPool, QRunnable, QObject, pyqtSignal, QUrl
 from PyQt6.QtGui import QColor, QPalette
 
-from ui.image_library_page import ImageLibraryPage
-from ui.settings_page import SettingsPage
 from ui.guide_page import GuidePage
-from ui.info_page import InfoPage
 from ui.utils.notification_manager import NotificationManager
 from ui.utils.status_manager import StatusManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.app_icon import get_app_icon
-from ui.import_page import ImportPage
-from ui.web.image_library_web_page import ImageLibraryWebPage
 
 from ui.utils.icon_loader import qta
 import os
 import sys
 import psutil
 import time
+import threading
 
 from utils.setting.settings_manager import SettingsManager
 from utils.paths import PathManager
@@ -40,7 +36,8 @@ class GpuUtilWorker(QRunnable):
 
     def run(self):
         try:
-            gpu_text = get_gpu_util_text(timeout_s=0.9)
+            # 增加超时时间，确保 typeperf 等命令有足够时间执行
+            gpu_text = get_gpu_util_text(timeout_s=5.0)
         except Exception:
             gpu_text = "--"
         try:
@@ -60,6 +57,23 @@ class MainWindow(QMainWindow):
         lbl.setStyleSheet("font-size: 22px; font-weight: 600;")
         lay.addWidget(lbl)
         sub = QLabel(f"{str(title or '')} 功能正在开发中")
+        sub.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        sub.setStyleSheet("font-size: 13px; opacity: 0.85;")
+        lay.addWidget(sub)
+        lay.addStretch()
+        return w
+
+    def _create_loading_placeholder(self, title: str):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(30, 30, 30, 30)
+        lay.setSpacing(10)
+        lay.addStretch()
+        lbl = QLabel("正在加载")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        lbl.setStyleSheet("font-size: 22px; font-weight: 600;")
+        lay.addWidget(lbl)
+        sub = QLabel(f"{str(title or '')} 页面正在后台加载，请稍候…")
         sub.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         sub.setStyleSheet("font-size: 13px; opacity: 0.85;")
         lay.addWidget(sub)
@@ -127,7 +141,8 @@ class MainWindow(QMainWindow):
                 color: {status_text};
             }}
         """)
-        central_layout.addWidget(self.status_bar)
+        # 设置状态栏到主窗口（QMainWindow 的状态栏不需要添加到布局中）
+        self.setStatusBar(self.status_bar)
 
         # 状态栏组件
         # 1. 任务状态 (最左)
@@ -144,6 +159,12 @@ class MainWindow(QMainWindow):
         
         # 连接任务管理器信号
         StatusManager.instance().status_changed.connect(self.on_task_status_changed)
+        self._base_task_status_message = "就绪"
+        self._base_task_status_idle = True
+
+        self.exif_task_timer = QTimer(self)
+        self.exif_task_timer.timeout.connect(self._refresh_exif_task_status)
+        self.exif_task_timer.start(300)
         
         # 系统资源监控定时器
         self.sys_timer = QTimer(self)
@@ -156,6 +177,7 @@ class MainWindow(QMainWindow):
         self._gpu_util_text = "--"
         self._gpu_query_running = False
         self._gpu_last_request_ts = 0.0
+        self._gpu_suppress_until = 0.0
         self._gpu_thread_pool = QThreadPool.globalInstance()
         
         # 引导页面 (默认隐藏，覆盖在内容区域之上，或者替代内容区域)
@@ -197,7 +219,7 @@ class MainWindow(QMainWindow):
         sidebar_btn_bg = cm.get("theme.sidebar")
         sidebar_btn_checked = cm.get("theme.primary")
         sidebar_btn_hover = cm.get("theme.primary")
-        tooltip_bg = cm.get("theme.text.light")
+        tooltip_bg = cm.get("tooltip.background")
         tooltip_text = cm.get("tooltip.text")
         tooltip_border = cm.get("tooltip.border")
         sidebar_btn_style = f"""
@@ -356,44 +378,54 @@ class MainWindow(QMainWindow):
         # ========== 右侧：页面堆栈 ==========
         self.pages = QStackedWidget()
         self.pages.setAutoFillBackground(True)
-        # 图片库页面
-        self.page_library = ImageLibraryPage()
-        self.pages.addWidget(self.page_library)
-        # 连接状态更新信号
-        self.page_library.stats_changed.connect(self.on_library_stats_changed)
-        # 图片导入页面
-        self.page_import = ImportPage()
-        self.pages.addWidget(self.page_import)
-        self.page_import.stats_changed.connect(self.on_import_stats_changed)
-        try:
-            self.page_import.import_to_library_succeeded.connect(self.page_library.on_import_to_library_succeeded)
-        except Exception:
-            pass
+
+        self._page_loaded_flags = {
+            0: False,  # 图库
+            1: False,  # 导入
+            4: False,  # 设置
+            5: False,  # 关于
+            6: False,  # Web
+        }
+        self._page_loading_flags = {
+            0: False,
+            1: False,
+            4: False,
+            5: False,
+            6: False,
+        }
+        self._page_placeholders = {}
+        self._cross_page_signals_connected = False
+
+        self.page_library = None
+        self.page_import = None
+        self.page_settings = None
+        self.page_info = None
+        self.page_library_web = None
+
+        ph_lib = self._create_loading_placeholder("图片库")
+        self._page_placeholders[0] = ph_lib
+        self.pages.addWidget(ph_lib)
+
+        ph_import = self._create_loading_placeholder("导入")
+        self._page_placeholders[1] = ph_import
+        self.pages.addWidget(ph_import)
+
         self._charts_page_loaded = False
         self._charts_page_loading = False
         self.pages.addWidget(self._create_dev_placeholder("数据图表"))
         self.pages.addWidget(self._create_dev_placeholder("奖章页面"))
-        # 设置页面
-        self.page_settings = SettingsPage()
-        self.pages.addWidget(self.page_settings)
-        # 连接设置变化信号
-        self.page_settings.library_thumbnail_setting_changed.connect(self.page_library.reload_thumbnails_config)
-        self.page_settings.import_thumbnail_setting_changed.connect(self.page_import.reload_thumbnails_config)
-        self.page_settings.thumbnail_ui_perf_setting_changed.connect(self.page_library.update_thumbnail_ui_perf_config)
-        self.page_settings.thumbnail_ui_perf_setting_changed.connect(self.page_import.update_thumbnail_ui_perf_config)
-        try:
-            self.page_import.folder_panel.folderRemovedFromTree.connect(self.page_library.clear_if_showing_folder)
-            self.page_import.folder_panel.folderDeletedOnDisk.connect(self.page_library.clear_if_showing_folder)
-        except Exception:
-            pass
-        
-        # 关于页面
-        self.page_info = InfoPage()
-        self.pages.addWidget(self.page_info)
-        
-        # 图库 Web 版本
-        self.page_library_web = ImageLibraryWebPage()
-        self.pages.addWidget(self.page_library_web)
+
+        ph_settings = self._create_loading_placeholder("设置")
+        self._page_placeholders[4] = ph_settings
+        self.pages.addWidget(ph_settings)
+
+        ph_info = self._create_loading_placeholder("关于")
+        self._page_placeholders[5] = ph_info
+        self.pages.addWidget(ph_info)
+
+        ph_web = self._create_loading_placeholder("图库 Web 版")
+        self._page_placeholders[6] = ph_web
+        self.pages.addWidget(ph_web)
         
         # 连接按钮组到页面切换
         self.sidebar_btn_group.idClicked.connect(self.pages.setCurrentIndex)
@@ -516,8 +548,9 @@ class MainWindow(QMainWindow):
             combo_text = cm.get("theme.text.dark")
             combo_border = cm.get("popup.border.primary")
             combo_bg = cm.get("theme.background.light")
-            arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-            arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+            # 使用Base64编码的SVG箭头，避免中文路径问题
+            from ui.common.icon_utils import get_arrow_down_svg_base64
+            arrow_url = get_arrow_down_svg_base64(combo_text)
             app.setStyleSheet(f"""
                 QToolTip {{
                     background-color: {tooltip_bg};
@@ -766,12 +799,19 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'icon_toolbar'):
              self.icon_toolbar.show()
         
+        try:
+            QTimer.singleShot(150, lambda: self._ensure_page_loaded(0))
+            QTimer.singleShot(250, lambda: self._ensure_page_loaded(1))
+        except Exception:
+            pass
+
         if not self._startup_preloaded:
-            if hasattr(self, 'page_library'):
-                 QTimer.singleShot(0, self.page_library.initialize)
-            if hasattr(self, 'page_import'):
-                 QTimer.singleShot(0, self.page_import._start_cache_loading)
+            try:
+                QTimer.singleShot(1200, self._maybe_start_page_startup_jobs)
+            except Exception:
+                pass
         QTimer.singleShot(1200, self._warmup_subject_detector_once)
+        QTimer.singleShot(600, self._warmup_exiftool_stayopen_once)
         
         # 尝试启动主界面功能引导（针对已有用户或测试模式）
         # 延迟一点时间，确保界面已完全显示
@@ -782,6 +822,238 @@ class MainWindow(QMainWindow):
             LogManager.instance().debug(f"[Startup] show_main_interface: {t1 - t0:.3f}s")
         except Exception:
             pass
+
+    def _maybe_start_page_startup_jobs(self):
+        """
+        主界面显示后，启动与页面相关但不影响首屏显示的初始化工作。
+        """
+        try:
+            if bool(getattr(self, "_startup_preloaded", False)):
+                return
+        except Exception:
+            pass
+        try:
+            if not bool(getattr(self, "_entered_main_interface", False)):
+                return
+        except Exception:
+            return
+
+        lib = getattr(self, "page_library", None)
+        imp = getattr(self, "page_import", None)
+        if lib is None and imp is None:
+            try:
+                QTimer.singleShot(500, self._maybe_start_page_startup_jobs)
+            except Exception:
+                pass
+            return
+
+        try:
+            if lib is not None and hasattr(lib, "initialize"):
+                QTimer.singleShot(0, lib.initialize)
+        except Exception:
+            pass
+        try:
+            if imp is not None and hasattr(imp, "_start_cache_loading"):
+                QTimer.singleShot(0, imp._start_cache_loading)
+        except Exception:
+            pass
+
+        self._startup_preloaded = True
+
+    def _connect_cross_page_signals_if_ready(self):
+        """
+        页面之间的信号联动需要双方页面都已创建，这里集中做一次性连接。
+        """
+        try:
+            if bool(getattr(self, "_cross_page_signals_connected", False)):
+                return
+        except Exception:
+            pass
+        lib = getattr(self, "page_library", None)
+        imp = getattr(self, "page_import", None)
+        st = getattr(self, "page_settings", None)
+        if lib is None or imp is None or st is None:
+            return
+        try:
+            imp.import_to_library_succeeded.connect(lib.on_import_to_library_succeeded)
+        except Exception:
+            pass
+        try:
+            st.library_thumbnail_setting_changed.connect(lib.reload_thumbnails_config)
+        except Exception:
+            pass
+        try:
+            st.import_thumbnail_setting_changed.connect(imp.reload_thumbnails_config)
+        except Exception:
+            pass
+        try:
+            st.thumbnail_ui_perf_setting_changed.connect(lib.update_thumbnail_ui_perf_config)
+        except Exception:
+            pass
+        try:
+            st.thumbnail_ui_perf_setting_changed.connect(imp.update_thumbnail_ui_perf_config)
+        except Exception:
+            pass
+        try:
+            imp.folder_panel.folderRemovedFromTree.connect(lib.clear_if_showing_folder)
+            imp.folder_panel.folderDeletedOnDisk.connect(lib.clear_if_showing_folder)
+        except Exception:
+            pass
+        self._cross_page_signals_connected = True
+
+    def _ensure_page_loaded(self, index: int):
+        """
+        延后加载指定页面：
+        - 避免在启动阶段立即 import / 构造所有页面，减少首屏等待
+        - 页面构造必须在主线程进行，因此使用 QTimer 把工作推迟到事件循环开始后执行
+        """
+        idx = int(index)
+        if idx not in (0, 1, 4, 5, 6):
+            return
+        if bool(self._page_loaded_flags.get(idx, False)):
+            return
+        if bool(self._page_loading_flags.get(idx, False)):
+            return
+
+        self._page_loading_flags[idx] = True
+
+        title_map = {0: "图片库", 1: "导入", 4: "设置", 5: "关于", 6: "图库 Web 版"}
+        title = title_map.get(idx, "页面")
+        task_id = None
+        try:
+            task_id = StatusManager.instance().start_task(f"正在加载{title}页面...")
+        except Exception:
+            task_id = None
+
+        def _do_load():
+            try:
+                if idx == 0:
+                    from ui.image_library_page import ImageLibraryPage
+                    page = ImageLibraryPage()
+                    try:
+                        page.stats_changed.connect(self.on_library_stats_changed)
+                    except Exception:
+                        pass
+                    self.page_library = page
+                elif idx == 1:
+                    from ui.import_page import ImportPage
+                    page = ImportPage()
+                    try:
+                        page.stats_changed.connect(self.on_import_stats_changed)
+                    except Exception:
+                        pass
+                    self.page_import = page
+                elif idx == 4:
+                    from ui.settings_page import SettingsPage
+                    page = SettingsPage()
+                    self.page_settings = page
+                elif idx == 5:
+                    from ui.info_page import InfoPage
+                    page = InfoPage()
+                    self.page_info = page
+                else:
+                    from ui.web.image_library_web_page import ImageLibraryWebPage
+                    page = ImageLibraryWebPage()
+                    self.page_library_web = page
+
+                old = self._page_placeholders.get(idx)
+                was_current = False
+                try:
+                    if old is not None and self.pages.currentWidget() == old:
+                        was_current = True
+                except Exception:
+                    was_current = False
+                try:
+                    if old is not None:
+                        self.pages.removeWidget(old)
+                    self.pages.insertWidget(idx, page)
+                except Exception:
+                    self.pages.addWidget(page)
+                    try:
+                        if was_current:
+                            self.pages.setCurrentWidget(page)
+                    except Exception:
+                        pass
+                try:
+                    if was_current:
+                        self.pages.setCurrentWidget(page)
+                except Exception:
+                    pass
+                try:
+                    if old is not None:
+                        old.deleteLater()
+                except Exception:
+                    pass
+                self._page_loaded_flags[idx] = True
+                self._page_placeholders.pop(idx, None)
+
+                try:
+                    if idx == 4:
+                        self._connect_cross_page_signals_if_ready()
+                    if idx in (0, 1):
+                        self._connect_cross_page_signals_if_ready()
+                except Exception:
+                    pass
+
+                try:
+                    if idx in (0, 1):
+                        QTimer.singleShot(0, self._maybe_start_page_startup_jobs)
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    err = str(e)
+                    if err:
+                        err = err.replace("\r", " ").replace("\n", " ").strip()
+                    if err and len(err) > 140:
+                        err = err[:140] + "..."
+                    msg = f"{title}页面加载失败"
+                    if err:
+                        msg = f"{msg}：{err}"
+                    NotificationManager.instance().show_toast(msg)
+                except Exception:
+                    pass
+                try:
+                    LogManager.instance().warning(f"{title}页面加载失败: {e}")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    if task_id is not None:
+                        StatusManager.instance().finish_task(task_id)
+                except Exception:
+                    pass
+                self._page_loading_flags[idx] = False
+
+        QTimer.singleShot(0, _do_load)
+
+    def _warmup_exiftool_stayopen_once(self):
+        try:
+            if bool(getattr(self, "_exiftool_warmup_started", False)):
+                return
+            self._exiftool_warmup_started = True
+        except Exception:
+            self._exiftool_warmup_started = True
+
+        def _run():
+            try:
+                from utils.exif.exif_utils import ExifHandleWorker
+
+                worker = ExifHandleWorker.get_instance()
+                try:
+                    worker._start_stayopen_process()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(target=_run, name="WarmupExifTool", daemon=True).start()
+        except Exception:
+            try:
+                _run()
+            except Exception:
+                pass
 
     def _ensure_charts_page_loaded(self):
         try:
@@ -861,8 +1133,9 @@ class MainWindow(QMainWindow):
         self.show_main_interface()
         NotificationManager.instance().show_toast("设置已完成，开始探索吧！")
         try:
-            if hasattr(self, "page_library"):
-                QTimer.singleShot(600, self.page_library.initialize)
+            lib = getattr(self, "page_library", None)
+            if lib is not None and hasattr(lib, "initialize"):
+                QTimer.singleShot(600, lib.initialize)
         except Exception:
             pass
         try:
@@ -872,7 +1145,7 @@ class MainWindow(QMainWindow):
                 if not getattr(self, "_guide_scan_refresh_connected", False):
                     self._guide_scan_refresh_connected = True
                     sw.scan_finished.connect(
-                        lambda: QTimer.singleShot(0, self.page_library.initialize) if hasattr(self, "page_library") else None
+                        lambda: QTimer.singleShot(0, p.initialize) if (p := getattr(self, "page_library", None)) is not None and hasattr(p, "initialize") else None
                     )
         except Exception:
             pass
@@ -987,7 +1260,14 @@ class MainWindow(QMainWindow):
 
     def on_task_status_changed(self, message, is_idle):
         """任务状态变更"""
-        self.lbl_task_status.setText(message)
+        try:
+            self._base_task_status_message = str(message or "")
+        except Exception:
+            self._base_task_status_message = message
+        try:
+            self._base_task_status_idle = bool(is_idle)
+        except Exception:
+            self._base_task_status_idle = True
         # 可以根据 is_idle 改变样式，比如空闲时灰色，忙碌时黑色
         cm = ColorManager.instance()
         status_text = cm.get("theme.text.dark")
@@ -996,6 +1276,66 @@ class MainWindow(QMainWindow):
         else:
             busy_color = cm.get("theme.primary", "#2196F3")
             self.lbl_task_status.setStyleSheet(f"color: {busy_color}; font-weight: bold;")
+        try:
+            self._refresh_exif_task_status()
+        except Exception:
+            pass
+
+    def _refresh_exif_task_status(self):
+        """
+        刷新左下角任务栏文本：
+        - UI 侧的“数据库读写”等任务仍由 StatusManager 推送
+        - Exif/XMP 的实际队列/批量写入属于持续任务，这里用轮询方式补齐显示进度与待处理数量
+        """
+        base_msg = str(getattr(self, "_base_task_status_message", "") or "")
+        base_idle = bool(getattr(self, "_base_task_status_idle", True))
+
+        exif_msg = ""
+        is_exif_busy = False
+        try:
+            from utils.exif.exif_utils import ExifHandleWorker
+            worker = ExifHandleWorker.get_instance()
+            counts = worker.get_pending_task_counts() or {}
+            pending_all = int(counts.get("pending_all") or 0)
+            pending_write = int(counts.get("pending") or 0)
+            read_queued = int(counts.get("read_queued") or 0)
+            c, t = worker.get_task_progress()
+            try:
+                c = int(c or 0)
+            except Exception:
+                c = 0
+            try:
+                t = int(t or 0)
+            except Exception:
+                t = 0
+
+            if pending_all > 0:
+                is_exif_busy = True
+                if t > 0:
+                    exif_msg = f"元数据任务：{c}/{t}（写入待处理{pending_write}，读取待处理{read_queued}）"
+                else:
+                    exif_msg = f"元数据任务：写入待处理{pending_write}，读取待处理{read_queued}"
+        except Exception:
+            exif_msg = ""
+            is_exif_busy = False
+
+        if exif_msg:
+            if (not base_idle) and base_msg and base_msg != "就绪":
+                show = f"{base_msg} | {exif_msg}"
+            else:
+                show = exif_msg
+        else:
+            show = base_msg if base_msg else "就绪"
+
+        self.lbl_task_status.setText(show)
+
+        cm = ColorManager.instance()
+        status_text = cm.get("theme.text.dark")
+        if (not base_idle) or is_exif_busy:
+            busy_color = cm.get("theme.primary", "#2196F3")
+            self.lbl_task_status.setStyleSheet(f"color: {busy_color}; font-weight: bold;")
+        else:
+            self.lbl_task_status.setStyleSheet(f"color: {status_text};")
 
     def on_library_stats_changed(self, total, loaded, selected):
         """图库统计信息变更"""
@@ -1003,7 +1343,8 @@ class MainWindow(QMainWindow):
         if self.pages.currentIndex() == 0:
             cache_info = None
             try:
-                cache_info = self.page_library.cache_manager.get_cache_info()
+                lib = getattr(self, "page_library", None)
+                cache_info = lib.cache_manager.get_cache_info() if lib is not None else None
             except Exception:
                 cache_info = None
             self.lbl_image_counts.setText(self._format_stats_text(total, loaded, selected, cache_info))
@@ -1011,17 +1352,23 @@ class MainWindow(QMainWindow):
     def on_import_stats_changed(self, total, loaded, selected):
         self._import_stats = (total, loaded, selected)
         if self.pages.currentIndex() == 1:
-            if not getattr(self.page_import, "has_valid_folder", False):
+            imp = getattr(self, "page_import", None)
+            if imp is None or not getattr(imp, "has_valid_folder", False):
                 self.lbl_image_counts.setText("")
                 return
             cache_info = None
             try:
-                cache_info = self.page_import.cache_manager.get_cache_info()
+                cache_info = imp.cache_manager.get_cache_info()
             except Exception:
                 cache_info = None
             self.lbl_image_counts.setText(self._format_stats_text(total, loaded, selected, cache_info))
 
     def on_page_changed(self, index):
+        try:
+            if int(index) in (0, 1, 4, 5, 6):
+                self._ensure_page_loaded(int(index))
+        except Exception:
+            pass
         try:
             self._update_sidebar_icons()
         except Exception:
@@ -1040,29 +1387,27 @@ class MainWindow(QMainWindow):
                 self._ensure_charts_page_loaded()
             except Exception:
                 pass
-            try:
-                page = getattr(self, "page_charts", None)
-                if page is not None and hasattr(page, "reload_html"):
-                    page.reload_html()
-            except Exception:
-                pass
+            # 不再每次切换都重新加载HTML，避免页面闪烁
+            # 如果需要刷新数据，页面内部会通过WebSocket或定时器自动刷新
         if index == 0:
             total, loaded, selected = getattr(self, "_library_stats", (0, 0, 0))
             cache_info = None
             try:
-                cache_info = self.page_library.cache_manager.get_cache_info()
+                lib = getattr(self, "page_library", None)
+                cache_info = lib.cache_manager.get_cache_info() if lib is not None else None
             except Exception:
                 cache_info = None
             self.lbl_image_counts.setText(self._format_stats_text(total, loaded, selected, cache_info))
             return
         if index == 1:
             total, loaded, selected = getattr(self, "_import_stats", (0, 0, 0))
-            if not getattr(self.page_import, "has_valid_folder", False):
+            imp = getattr(self, "page_import", None)
+            if imp is None or not getattr(imp, "has_valid_folder", False):
                 self.lbl_image_counts.setText("")
                 return
             cache_info = None
             try:
-                cache_info = self.page_import.cache_manager.get_cache_info()
+                cache_info = imp.cache_manager.get_cache_info()
             except Exception:
                 cache_info = None
             self.lbl_image_counts.setText(self._format_stats_text(total, loaded, selected, cache_info))
@@ -1160,13 +1505,17 @@ class MainWindow(QMainWindow):
     def _release_page_memory_cache(self, page_index: int):
         if int(page_index) == 0:
             try:
-                self.page_library.release_memory_caches()
+                lib = getattr(self, "page_library", None)
+                if lib is not None and hasattr(lib, "release_memory_caches"):
+                    lib.release_memory_caches()
             except Exception:
                 pass
             return
         if int(page_index) == 1:
             try:
-                self.page_import.release_memory_caches()
+                imp = getattr(self, "page_import", None)
+                if imp is not None and hasattr(imp, "release_memory_caches"):
+                    imp.release_memory_caches()
             except Exception:
                 pass
             return
@@ -1180,12 +1529,10 @@ class MainWindow(QMainWindow):
     def update_sys_status(self):
         """更新系统资源占用"""
         try:
-            cpu_percent = psutil.cpu_percent(interval=None)
-            process = psutil.Process(os.getpid())
-            mem_info = process.memory_info()
-            mem_mb = mem_info.rss / 1024 / 1024
+            # 请求 GPU 数据更新（异步）
             self._request_gpu_util_update()
-            self.lbl_sys_status.setText(f"CPU: {cpu_percent:.1f}% | GPU: {self._gpu_util_text} | Mem: {mem_mb:.1f} MB")
+            # 立即刷新状态栏显示（使用当前的 GPU 数据）
+            self._refresh_sys_status_text()
         except Exception as e:
             try:
                 LogManager.instance().warning(f"更新系统状态失败: {e}")
@@ -1193,7 +1540,29 @@ class MainWindow(QMainWindow):
                 pass
 
     def _request_gpu_util_update(self):
+        try:
+            if not bool(self.isActiveWindow()):
+                return
+        except Exception:
+            pass
+        try:
+            aw = QApplication.activeWindow()
+        except Exception:
+            aw = None
+        if aw is not None and aw is not self:
+            try:
+                from PyQt6.QtWidgets import QDialog
+
+                if isinstance(aw, QDialog):
+                    return
+            except Exception:
+                return
         now = time.monotonic()
+        try:
+            if float(now) < float(getattr(self, "_gpu_suppress_until", 0.0) or 0.0):
+                return
+        except Exception:
+            pass
         if self._gpu_query_running:
             return
         if now - self._gpu_last_request_ts < 0.6:
@@ -1207,6 +1576,37 @@ class MainWindow(QMainWindow):
     def _on_gpu_util_ready(self, text):
         self._gpu_util_text = text or "--"
         self._gpu_query_running = False
+        # GPU 数据更新后，立即刷新状态栏显示
+        try:
+            self._refresh_sys_status_text()
+        except Exception:
+            pass
+    
+    def _refresh_sys_status_text(self):
+        """刷新系统状态栏文本（CPU/GPU/内存）"""
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            mem_mb = mem_info.rss / 1024 / 1024
+            self.lbl_sys_status.setText(f"CPU: {cpu_percent:.1f}% | GPU: {self._gpu_util_text} | Mem: {mem_mb:.1f} MB")
+        except Exception:
+            pass
+
+    def suppress_gpu_util_refresh(self, seconds: float = 3.0):
+        try:
+            sec = float(seconds)
+        except Exception:
+            sec = 3.0
+        if sec <= 0:
+            return
+        try:
+            self._gpu_suppress_until = max(float(getattr(self, "_gpu_suppress_until", 0.0) or 0.0), float(time.monotonic()) + sec)
+        except Exception:
+            try:
+                self._gpu_suppress_until = float(time.monotonic()) + sec
+            except Exception:
+                self._gpu_suppress_until = 0.0
 
     def reset_click_count(self):
         self.settings_click_count = 0
@@ -1324,10 +1724,18 @@ class MainWindow(QMainWindow):
             pass
 
         # 停止所有后台任务，确保线程及时退出
-        if hasattr(self, 'page_library'):
-             self.page_library.shutdown()
-        if hasattr(self, 'page_import'):
-             self.page_import.shutdown()
+        try:
+            lib = getattr(self, "page_library", None)
+            if lib is not None and hasattr(lib, "shutdown"):
+                lib.shutdown()
+        except Exception:
+            pass
+        try:
+            imp = getattr(self, "page_import", None)
+            if imp is not None and hasattr(imp, "shutdown"):
+                imp.shutdown()
+        except Exception:
+            pass
 
         # 保存窗口状态
         try:

@@ -8,7 +8,7 @@ import threading
 import time
 import zipfile
 import multiprocessing as mp
-from concurrent.futures import Future
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime
 
 from utils.log_manager import LogManager
@@ -60,14 +60,31 @@ def _is_focus_cuda_usable() -> bool:
 
 
 def _resolve_yolo_seg_model_path(model: str) -> str:
-    model_map = {
-        "n": "yolov8n-seg.pt",
-        "s": "yolov8s-seg.pt",
-        "m": "yolov8m-seg.pt",
-        "l": "yolov8l-seg.pt",
-        "x": "yolov8x-seg.pt",
-    }
-    filename = model_map.get((model or "").lower(), "yolov8x-seg.pt")
+    raw = str(model or "").strip()
+    if raw:
+        try:
+            if os.path.isfile(raw):
+                return raw
+        except Exception:
+            pass
+        try:
+            if raw.lower().endswith(".pt"):
+                filename = os.path.basename(raw)
+            else:
+                filename = ""
+        except Exception:
+            filename = ""
+    else:
+        filename = ""
+    if not filename:
+        model_map = {
+            "n": "yolov8n-seg.pt",
+            "s": "yolov8s-seg.pt",
+            "m": "yolov8m-seg.pt",
+            "l": "yolov8l-seg.pt",
+            "x": "yolov8x-seg.pt",
+        }
+        filename = model_map.get((model or "").lower(), "yolov8x-seg.pt")
     candidates = [
         os.path.join(os.getcwd(), "models", filename),
         os.path.join(_project_root, "assets", "models", filename),
@@ -83,6 +100,24 @@ def _resolve_yolo_seg_model_path(model: str) -> str:
 
 
 def _resolve_valid_yolo_seg_model_path(model: str) -> str:
+    raw = str(model or "").strip()
+    if raw:
+        try:
+            if os.path.isfile(raw):
+                size = int(os.path.getsize(raw))
+                if size >= 3 * 1024 * 1024:
+                    try:
+                        if zipfile.is_zipfile(raw):
+                            return raw
+                    except Exception:
+                        pass
+                    try:
+                        if str(raw).lower().endswith(".pt"):
+                            return raw
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     filename = os.path.basename(_resolve_yolo_seg_model_path(model))
     candidates = [
         os.path.join(os.getcwd(), "models", filename),
@@ -103,7 +138,17 @@ def _resolve_valid_yolo_seg_model_path(model: str) -> str:
             if size < 3 * 1024 * 1024:
                 errors.append(f"{p} 文件过小({size} bytes)，可能未下载完整或已损坏")
                 continue
-            if not zipfile.is_zipfile(p):
+            ok_zip = False
+            try:
+                ok_zip = bool(zipfile.is_zipfile(p))
+            except Exception:
+                ok_zip = False
+            if not ok_zip:
+                try:
+                    if str(p).lower().endswith(".pt"):
+                        return p
+                except Exception:
+                    pass
                 errors.append(f"{p} 不是有效的模型文件(Zip结构无效)，可能已损坏")
                 continue
             return p
@@ -116,6 +161,7 @@ def _resolve_valid_yolo_seg_model_path(model: str) -> str:
 
 
 _FOCUS_DETECTOR_WORKER_INSTANCE = None
+_FOCUS_DETECT_EYE_ENABLED = False
 
 
 def clear_focus_detector():
@@ -154,8 +200,16 @@ def clear_focus_detector():
         pass
 
 
-def _focus_detect_worker_init(model_path: str, target_size: int, use_gpu: bool, multi_check: bool, exp_frame_check: bool, initial_conf: float = 0.15):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE
+def _focus_detect_worker_init(
+    model_path: str,
+    target_size: int,
+    use_gpu: bool,
+    multi_check: bool,
+    exp_frame_check: bool,
+    initial_conf: float = 0.15,
+    enable_eye_detect: bool = False,
+):
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
     t0 = time.time()
     try:
         focus_trace(
@@ -183,6 +237,10 @@ def _focus_detect_worker_init(model_path: str, target_size: int, use_gpu: bool, 
         save_output=False,
         print_focus_point=False,
     )
+    try:
+        _FOCUS_DETECT_EYE_ENABLED = bool(enable_eye_detect)
+    except Exception:
+        _FOCUS_DETECT_EYE_ENABLED = False
     try:
         det.enable_scaled_cache(True)
     except Exception:
@@ -214,19 +272,28 @@ def prewarm_focus_detector(
     use_gpu: bool = True,
     multi_check: bool = True,
     exp_frame_check: bool = True,
+    enable_eye_detect: bool = False,
     initial_conf: float = 0.15,
 ):
     model_path = _resolve_valid_yolo_seg_model_path(model)
     effective_gpu = bool(use_gpu)
     if effective_gpu and (not _is_focus_cuda_usable()):
         effective_gpu = False
-    _focus_detect_worker_init(model_path, int(target_size or 640), bool(effective_gpu), bool(multi_check), bool(exp_frame_check), float(initial_conf or 0.15))
+    _focus_detect_worker_init(
+        model_path,
+        int(target_size or 640),
+        bool(effective_gpu),
+        bool(multi_check),
+        bool(exp_frame_check),
+        float(initial_conf or 0.15),
+        bool(enable_eye_detect),
+    )
 
 
-def _focus_detect_one_path(image_path: str):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE
+def _focus_detect_one_path(image_path: str, af_focus_point=None):
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
     if _FOCUS_DETECTOR_WORKER_INSTANCE is None:
-        _focus_detect_worker_init(_resolve_valid_yolo_seg_model_path("x"), 640, _is_focus_cuda_usable(), True, True, 0.15)
+        _focus_detect_worker_init(_resolve_valid_yolo_seg_model_path("x"), 640, _is_focus_cuda_usable(), True, True, 0.15, bool(_FOCUS_DETECT_EYE_ENABLED))
     det = _FOCUS_DETECTOR_WORKER_INSTANCE
     targets = [
         "score",
@@ -240,7 +307,6 @@ def _focus_detect_one_path(image_path: str):
         "raw_bg_score",
         "bg_score",
         "bbox_orig",
-        "focus_point_orig",
         "ratio",
         "ratio_local",
         "hf_ratio",
@@ -254,6 +320,8 @@ def _focus_detect_one_path(image_path: str):
         "ratio_best",
         "has_bird",
     ]
+    if bool(_FOCUS_DETECT_EYE_ENABLED) and "eye_coordinates" not in targets:
+        targets.append("eye_coordinates")
     try:
         p0 = str(image_path)
         try:
@@ -306,11 +374,16 @@ def _focus_detect_one_path(image_path: str):
         except Exception:
             _fh = None
         t0 = time.perf_counter()
-        res = det.analyze_file(p0, targets=targets)
+        res = det.analyze_file(p0, targets=targets, af_focus_point=af_focus_point)
         t1 = time.perf_counter()
         if not isinstance(res, dict):
             res = {}
         res["path"] = p0
+        if isinstance(af_focus_point, dict) and af_focus_point:
+            try:
+                res["focus_point"] = af_focus_point
+            except Exception:
+                pass
         try:
             res["_file_size"] = int(_file_size)
             res["_file_mtime"] = float(_file_mtime)
@@ -373,6 +446,8 @@ def detect_focus_batch_for_import(
     use_gpu: bool = True,
     multi_check: bool = True,
     exp_frame_check: bool = True,
+    enable_eye_detect: bool = False,
+    enable_af_point_detect: bool = True,
     model: str = "x",
     initial_conf: float = 0.15,
     target_size: int = 640,
@@ -390,7 +465,15 @@ def detect_focus_batch_for_import(
     _all_start_ts = time.time()
     _t_all = time.perf_counter()
     _t_init0 = _t_all
+    
     effective_use_gpu = bool(use_gpu)
+    enable_eye_detect = bool(enable_eye_detect)
+    try:
+        global _FOCUS_DETECT_EYE_ENABLED
+        _FOCUS_DETECT_EYE_ENABLED = bool(enable_eye_detect)
+    except Exception:
+        pass
+    
     if effective_use_gpu and (not _is_focus_cuda_usable()):
         effective_use_gpu = False
 
@@ -405,6 +488,7 @@ def detect_focus_batch_for_import(
                 bool(multi_check),
                 bool(exp_frame_check),
                 float(initial_conf or 0.15),
+                bool(enable_eye_detect),
             )
         except Exception:
             pass
@@ -594,13 +678,21 @@ def detect_focus_batch_for_import(
                 rating = preserved.get("rating") if isinstance(preserved, dict) else None
                 is_favorite = preserved.get("is_favorite") if isinstance(preserved, dict) else None
                 tags = preserved.get("tags") if isinstance(preserved, dict) else None
-                fp = preserved.get("focus_point") if isinstance(preserved, dict) else None
+                fp = None
+                try:
+                    fp = r.get("focus_point") if isinstance(r, dict) else None
+                except Exception:
+                    fp = None
+                if fp is None and isinstance(preserved, dict):
+                    try:
+                        fp = preserved.get("focus_point")
+                    except Exception:
+                        fp = None
                 extra = dict(r)
                 try:
                     extra.pop("bbox", None)
                     extra.pop("bbox_orig", None)
                     extra.pop("focus_point", None)
-                    extra.pop("focus_point_orig", None)
                 except Exception:
                     pass
                 focus_detect_json = ""
@@ -768,6 +860,71 @@ def detect_focus_batch_for_import(
         except Exception:
             pass
     cancelled = False
+
+    af_point_by_norm_path: dict[str, dict] = {}
+    try:
+        enable_af_point_detect = bool(enable_af_point_detect)
+    except Exception:
+        enable_af_point_detect = True
+    if bool(enable_af_point_detect):
+        try:
+            if callable(progress_callback):
+                progress_callback("读取对焦点", 0, int(len(paths)), float(time.time()))
+        except Exception:
+            pass
+        try:
+            from utils.exif.camera_af_point import get_camera_af_center_points
+
+            try:
+                cpu_count = int(os.cpu_count() or 4)
+            except Exception:
+                cpu_count = 4
+            try:
+                reserve = int(reserve_cpu or 0)
+            except Exception:
+                reserve = 0
+            max_workers = max(1, min(4, int(cpu_count - max(0, reserve))))
+
+            def _af_progress(done: int, total: int):
+                try:
+                    if callable(progress_callback):
+                        progress_callback("读取对焦点", int(done), int(total), float(time.time()))
+                except Exception:
+                    pass
+
+            af_raw = get_camera_af_center_points(
+                list(paths),
+                timeout=16,
+                chunk_size=4,
+                max_workers=int(max_workers),
+                progress_callback=_af_progress,
+                cancel_event=cancel_event,
+            )
+            for p0, fp in (af_raw or {}).items():
+                if not isinstance(fp, dict) or not fp:
+                    continue
+                try:
+                    nk = os.path.normcase(os.path.normpath(str(p0)))
+                except Exception:
+                    nk = str(p0)
+                if nk:
+                    af_point_by_norm_path[str(nk)] = fp
+        except Exception:
+            af_point_by_norm_path = {}
+        _t_af1 = time.perf_counter()
+        try:
+            focus_trace(
+                f"stage=exif.af elapsed_s={float(_t_af1 - _t_af0):.3f} "
+                f"files={len(paths)} hits={len(af_point_by_norm_path or {})} enabled={bool(enable_af_point_detect)}"
+            )
+        except Exception:
+            pass
+    # 对焦点检测完成后，显示初始化进度
+    try:
+        if callable(progress_callback):
+            progress_callback("初始化对焦检测", 0, int(len(paths)), float(time.time()))
+    except Exception:
+        pass
     if use_multiprocess:
         try:
             cpu_count = int(os.cpu_count() or 4)
@@ -786,7 +943,15 @@ def detect_focus_batch_for_import(
         pool = ctx.Pool(
             processes=proc,
             initializer=_focus_detect_worker_init,
-            initargs=(model_path, int(target_size or 640), bool(effective_use_gpu), bool(multi_check), bool(exp_frame_check), float(initial_conf or 0.15)),
+            initargs=(
+                model_path,
+                int(target_size or 640),
+                bool(effective_use_gpu),
+                bool(multi_check),
+                bool(exp_frame_check),
+                float(initial_conf or 0.15),
+                bool(enable_eye_detect),
+            ),
         )
         _t_pool1 = time.perf_counter()
         try:
@@ -850,7 +1015,12 @@ def detect_focus_batch_for_import(
                         if not p0:
                             continue
                         try:
-                            ar = pool.apply_async(_focus_detect_one_path, (p0,))
+                            nk = os.path.normcase(os.path.normpath(str(p0)))
+                        except Exception:
+                            nk = str(p0)
+                        af_focus_point = (af_point_by_norm_path or {}).get(str(nk)) if nk else None
+                        try:
+                            ar = pool.apply_async(_focus_detect_one_path, (p0, af_focus_point))
                         except Exception:
                             ar = None
                         if ar is None:
@@ -1110,7 +1280,15 @@ def detect_focus_batch_for_import(
                     pool = ctx.Pool(
                         processes=new_proc,
                         initializer=_focus_detect_worker_init,
-                        initargs=(model_path, int(target_size or 640), bool(effective_use_gpu), bool(multi_check), bool(exp_frame_check), float(initial_conf or 0.15)),
+                        initargs=(
+                            model_path,
+                            int(target_size or 640),
+                            bool(effective_use_gpu),
+                            bool(multi_check),
+                            bool(exp_frame_check),
+                            float(initial_conf or 0.15),
+                            bool(enable_eye_detect),
+                        ),
                     )
                     try:
                         if hasattr(_queue, "extendleft"):
@@ -1160,7 +1338,15 @@ def detect_focus_batch_for_import(
             except Exception:
                 pass
     else:
-        _focus_detect_worker_init(model_path, int(target_size or 640), bool(effective_use_gpu), bool(multi_check), bool(exp_frame_check), float(initial_conf or 0.15))
+        _focus_detect_worker_init(
+            model_path,
+            int(target_size or 640),
+            bool(effective_use_gpu),
+            bool(multi_check),
+            bool(exp_frame_check),
+            float(initial_conf or 0.15),
+            bool(enable_eye_detect),
+        )
         total = len(paths)
         done = 0
         start_ts = time.time()
@@ -1180,7 +1366,12 @@ def detect_focus_batch_for_import(
                     break
             except Exception:
                 pass
-            r = _focus_detect_one_path(p)
+            try:
+                nk = os.path.normcase(os.path.normpath(str(p)))
+            except Exception:
+                nk = str(p)
+            af_focus_point = (af_point_by_norm_path or {}).get(str(nk)) if nk else None
+            r = _focus_detect_one_path(p, af_focus_point)
             if not isinstance(r, dict):
                 r = {"path": str(p)}
             if r.get("_error"):
@@ -1293,6 +1484,8 @@ def detect_focus_batch_for_import(
             "use_gpu": bool(effective_use_gpu),
             "multi_check": bool(multi_check),
             "exp_frame_check": bool(exp_frame_check),
+            "enable_eye_detect": bool(enable_eye_detect),
+            "enable_af_point_detect": bool(enable_af_point_detect),
             "cancelled": bool(cancelled),
             "model": str(model or "x").lower(),
             "target_size": int(target_size or 640),
@@ -1306,6 +1499,153 @@ def detect_focus_batch_for_import(
 
 _SUBJECT_DETECTOR_INSTANCE = None
 _SUBJECT_DETECTOR_LOCK = threading.Lock()
+_SUBJECT_DETECT_PROCESS_EXECUTOR: ProcessPoolExecutor | None = None
+_SUBJECT_DETECT_PROCESS_LOCK = threading.Lock()
+
+
+def _subject_detect_should_use_subprocess(err: str) -> bool:
+    s = str(err or "")
+    if not s:
+        return False
+    low = s.lower()
+    if "缺少依赖" in s:
+        return True
+    if ("pytorch" in low) or ("torch" in low) or ("ultralytics" in low):
+        return True
+    if ("c10.dll" in low) or ("winerror 1114" in low) or ("winerror" in low and "1114" in low):
+        return True
+    if ("dll" in low and "load" in low) or ("dll" in low and "初始化" in s):
+        return True
+    return False
+
+
+def _get_subject_detect_process_executor() -> ProcessPoolExecutor:
+    global _SUBJECT_DETECT_PROCESS_EXECUTOR
+    with _SUBJECT_DETECT_PROCESS_LOCK:
+        if _SUBJECT_DETECT_PROCESS_EXECUTOR is not None:
+            return _SUBJECT_DETECT_PROCESS_EXECUTOR
+        try:
+            ctx = mp.get_context("spawn")
+            _SUBJECT_DETECT_PROCESS_EXECUTOR = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+        except Exception:
+            _SUBJECT_DETECT_PROCESS_EXECUTOR = ProcessPoolExecutor(max_workers=1)
+        return _SUBJECT_DETECT_PROCESS_EXECUTOR
+
+
+def _subject_detect_one(det, image_path: str, targets):
+    try:
+        from utils.log_manager import LogManager
+    except Exception:
+        LogManager = None
+    try:
+        from utils.exif.camera_af_point import get_camera_af_center_point_or_none
+    except Exception as e:
+        if LogManager is not None:
+            try:
+                LogManager.instance().debug(f"[对焦点] 导入camera_af_point模块失败: {e}")
+            except Exception:
+                pass
+        get_camera_af_center_point_or_none = None
+    cam_fp = None
+    if callable(get_camera_af_center_point_or_none):
+        try:
+            cam_fp = get_camera_af_center_point_or_none(str(image_path or ""))
+            if LogManager is not None:
+                try:
+                    LogManager.instance().debug(f"[对焦点] 获取相机对焦点结果: path={image_path} cam_fp={'Y' if cam_fp else 'N'} value={cam_fp}")
+                except Exception:
+                    pass
+        except Exception as e:
+            if LogManager is not None:
+                try:
+                    LogManager.instance().debug(f"[对焦点] 获取相机对焦点异常: path={image_path} error={e}")
+                except Exception:
+                    pass
+            cam_fp = None
+    else:
+        if LogManager is not None:
+            try:
+                LogManager.instance().debug(f"[对焦点] get_camera_af_center_point_or_none不可用")
+            except Exception:
+                pass
+
+    focus_requested = False
+    if targets is not None:
+        try:
+            focus_requested = ("focus_point_orig" in targets) or ("focus_point" in targets)
+        except Exception:
+            focus_requested = False
+    if targets is None:
+        targets = ["pos", "bbox_orig"]
+    try:
+        if LogManager is not None:
+            LogManager.instance().debug(f"[对焦点] 请求对焦点: path={image_path} cam_fp={'Y' if cam_fp else 'N'} targets={targets} focus_requested={focus_requested}")
+    except Exception:
+        pass
+    try:
+        info = det.analyze_file(str(image_path), targets=list(targets or []), af_focus_point=cam_fp)
+    except Exception as e:
+        try:
+            cur_dev = str(getattr(det, "device", "cpu") or "cpu")
+        except Exception:
+            cur_dev = "cpu"
+        if cur_dev != "cpu":
+            try:
+                det.device = "cpu"
+            except Exception:
+                pass
+            try:
+                info = det.analyze_file(str(image_path), targets=list(targets or []), af_focus_point=cam_fp)
+            except Exception as e2:
+                return None, None, None, str(e2)
+        else:
+            return None, None, None, str(e)
+    if not isinstance(info, dict):
+        return None, None, None, ""
+    fp = cam_fp
+    try:
+        if LogManager is not None and focus_requested:
+            LogManager.instance().debug(f"[对焦点] 返回对焦点: path={image_path} cam_fp={'Y' if cam_fp else 'N'} out_fp={'Y' if fp else 'N'}")
+    except Exception:
+        pass
+    return info.get("bbox_orig"), fp, info.get("pos"), str(info.get("_error") or "")
+
+
+def _subject_detect_warmup_in_subprocess(targets):
+    try:
+        import cv2
+        if hasattr(cv2, "ocl"):
+            try:
+                cv2.ocl.setUseOpenCL(False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        _get_subject_detector(targets)
+        return True
+    except Exception:
+        return False
+
+
+def _subject_detect_one_in_subprocess(image_path: str, targets):
+    try:
+        import cv2
+        if hasattr(cv2, "ocl"):
+            try:
+                cv2.ocl.setUseOpenCL(False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        det = _get_subject_detector(targets)
+    except Exception as e:
+        return None, None, None, str(e)
+    try:
+        return _subject_detect_one(det, str(image_path or ""), targets)
+    except Exception as e:
+        return None, None, None, str(e)
 
 
 def _get_subject_detector(targets: Optional[Sequence[str]] = None):
@@ -1315,10 +1655,25 @@ def _get_subject_detector(targets: Optional[Sequence[str]] = None):
             return _SUBJECT_DETECTOR_INSTANCE
         from core.detectors.bird_focus_detector import BirdFocusDetector
 
-        model_path = _resolve_yolo_seg_model_path("x")
+        model = "x"
+        target_size = 640
+        initial_conf = 0.15
+        use_gpu = True
+        try:
+            from utils.setting.settings_manager import SettingsManager
+
+            sm = SettingsManager.instance()
+            model = str(sm.get("focus_detect/model", "x") or "x").lower()
+            target_size = int(sm.get("focus_detect/target_size", 640) or 640)
+            initial_conf = float(sm.get("focus_detect/initial_conf", 0.15) or 0.15)
+            use_gpu = bool(sm.get("focus_detect/use_gpu", True))
+        except Exception:
+            pass
+        model_path = _resolve_valid_yolo_seg_model_path(model)
         det = BirdFocusDetector(
             str(model_path),
-            target_size=512,
+            target_size=int(target_size or 640),
+            initial_conf=float(initial_conf or 0.15),
             multi_check=False,
             exp_frame_check=False,
             save_output=False,
@@ -1329,7 +1684,14 @@ def _get_subject_detector(targets: Optional[Sequence[str]] = None):
         except Exception:
             pass
         try:
-            det.device = "cuda" if _is_focus_cuda_usable() else "cpu"
+            effective_gpu = bool(use_gpu) and bool(_is_focus_cuda_usable())
+            det.device = "cuda" if bool(effective_gpu) else "cpu"
+        except Exception:
+            pass
+        try:
+            if not bool(locals().get("effective_gpu", False)):
+                from utils.system.gpu_utils import GPUScaler
+                GPUScaler.set_suspended(True)
         except Exception:
             pass
         _SUBJECT_DETECTOR_INSTANCE = det
@@ -1368,63 +1730,48 @@ class _SubjectDetectService:
         self._queue.put(("many", [str(p) for p in (image_paths or []) if p], future, callback, targets))
         return future
 
-    def _detect_one(self, det, image_path: str, targets):
-        try:
-            from utils.exif.camera_af_point import get_camera_af_center_point_or_none
-        except Exception:
-            get_camera_af_center_point_or_none = None
-        cam_fp = None
-        if callable(get_camera_af_center_point_or_none):
-            try:
-                cam_fp = get_camera_af_center_point_or_none(str(image_path or ""))
-            except Exception:
-                cam_fp = None
-
-        focus_requested = False
-        if targets is not None:
-            try:
-                focus_requested = ("focus_point_orig" in targets) or ("focus_point" in targets)
-            except Exception:
-                focus_requested = False
-        if targets is None:
-            targets = ["pos", "bbox_orig"]
-        if cam_fp is None and focus_requested:
-            try:
-                targets = [t for t in (targets or []) if t not in ("focus_point_orig", "focus_point")]
-            except Exception:
-                targets = ["pos", "bbox_orig"]
-            if not targets:
-                return None, None, None, ""
-        try:
-            info = det.analyze_file(str(image_path), targets=list(targets or []))
-        except Exception as e:
-            return None, None, None, str(e)
-        if not isinstance(info, dict):
-            return None, None, None, ""
-        fp = cam_fp
-        if fp is None:
-            v = info.get("focus_point_orig")
-            if isinstance(v, (list, tuple)) and len(v) >= 2:
-                try:
-                    fp = {"x": float(v[0]), "y": float(v[1]), "mode": "global"}
-                except Exception:
-                    fp = None
-        return info.get("bbox_orig"), fp, info.get("pos"), str(info.get("_error") or "")
-
     def _run(self):
         while True:
             kind, paths, future, callback, targets = self._queue.get()
             try:
                 if kind == "warmup":
-                    _get_subject_detector(targets)
+                    try:
+                        _get_subject_detector(targets)
+                        ok = True
+                    except Exception as e:
+                        if _subject_detect_should_use_subprocess(str(e)):
+                            try:
+                                ex = _get_subject_detect_process_executor()
+                                ok = bool(ex.submit(_subject_detect_warmup_in_subprocess, targets).result())
+                            except Exception:
+                                ok = False
+                        else:
+                            ok = False
                     if future is not None and not future.done():
-                        future.set_result(True)
+                        future.set_result(bool(ok))
                     continue
 
-                det = _get_subject_detector(targets)
+                det = None
+                init_err = ""
+                try:
+                    det = _get_subject_detector(targets)
+                except Exception as e:
+                    init_err = str(e)
                 if kind == "one":
                     p = paths[0] if paths else ""
-                    bbox, fp, pos, err = self._detect_one(det, p, targets)
+                    bbox = fp = pos = None
+                    err = ""
+                    if det is None:
+                        err = init_err
+                    else:
+                        bbox, fp, pos, err = _subject_detect_one(det, p, targets)
+                    if (det is None or _subject_detect_should_use_subprocess(err)) and p:
+                        try:
+                            ex = _get_subject_detect_process_executor()
+                            bbox, fp, pos, err = ex.submit(_subject_detect_one_in_subprocess, p, targets).result()
+                        except Exception as e:
+                            bbox = fp = pos = None
+                            err = str(e)
                     if future is not None and not future.done():
                         future.set_result({"bbox": bbox, "focus_point": fp, "position": pos})
                     if callable(callback):
@@ -1433,7 +1780,19 @@ class _SubjectDetectService:
 
                 results: Dict[str, Dict[str, Any]] = {}
                 for p in paths:
-                    bbox, fp, pos, err = self._detect_one(det, p, targets)
+                    bbox = fp = pos = None
+                    err = ""
+                    if det is None:
+                        err = init_err
+                    else:
+                        bbox, fp, pos, err = _subject_detect_one(det, p, targets)
+                    if (det is None or _subject_detect_should_use_subprocess(err)) and p:
+                        try:
+                            ex = _get_subject_detect_process_executor()
+                            bbox, fp, pos, err = ex.submit(_subject_detect_one_in_subprocess, p, targets).result()
+                        except Exception as e:
+                            bbox = fp = pos = None
+                            err = str(e)
                     results[p] = {"bbox": bbox, "focus_point": fp, "position": pos, "err": err}
                     if callable(callback):
                         callback(p, bbox, fp, pos, err)

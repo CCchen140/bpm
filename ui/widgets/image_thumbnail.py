@@ -145,10 +145,12 @@ class ThumbnailOverlay(QWidget):
         try:
             bbox0 = self.image_info.get("bbox")
             fp0 = self.image_info.get("focus_point")
+            eye0 = self.image_info.get("eye_coordinates")
         except Exception:
             bbox0 = None
             fp0 = None
-        if bbox0 is None or fp0 is None:
+            eye0 = None
+        if bbox0 is None or fp0 is None or eye0 is None:
             fd = None
             try:
                 fdj = self.image_info.get("focus_detect_json")
@@ -169,12 +171,18 @@ class ThumbnailOverlay(QWidget):
                         bbox0 = fd.get("bbox_orig") or fd.get("bbox")
                     except Exception:
                         pass
+                if eye0 is None:
+                    try:
+                        eye0 = fd.get("eye_coordinates") or fd.get("eye")
+                    except Exception:
+                        pass
         try:
             sm = getattr(getattr(self.parent_thumbnail, "cache_manager", None), "settings_manager", None)
         except Exception:
             sm = None
         show_bbox = True
         show_fp = True
+        show_eye = True
         if sm is not None:
             try:
                 show_bbox = bool(sm.get("focus_detect_ui/show_subject_rect", True))
@@ -184,11 +192,14 @@ class ThumbnailOverlay(QWidget):
                 show_fp = bool(sm.get("focus_detect_ui/show_focus_point", True))
             except Exception:
                 show_fp = True
+        show_eye = bool(show_bbox)
         if not show_bbox:
             bbox0 = None
         if not show_fp:
             fp0 = None
-        if bbox0 is None and fp0 is None:
+        if not show_eye:
+            eye0 = None
+        if bbox0 is None and fp0 is None and eye0 is None:
             return
 
         def _parse_bbox(v):
@@ -272,7 +283,8 @@ class ThumbnailOverlay(QWidget):
 
         bbox = _parse_bbox(bbox0)
         fp = _parse_xy(fp0)
-        if bbox is None and fp is None:
+        eye = _parse_xy(eye0)
+        if bbox is None and fp is None and eye is None:
             return
 
         try:
@@ -281,7 +293,7 @@ class ThumbnailOverlay(QWidget):
         except Exception:
             orig_w = 0.0
             orig_h = 0.0
-        if (orig_w <= 1 or orig_h <= 1) and (bbox is not None or fp is not None):
+        if (orig_w <= 1 or orig_h <= 1) and (bbox is not None or fp is not None or eye is not None):
             fd = None
             try:
                 fdj = self.image_info.get("focus_detect_json")
@@ -348,6 +360,14 @@ class ThumbnailOverlay(QWidget):
                         orig_h = 1.0
             except Exception:
                 pass
+            try:
+                if (orig_w <= 1 or orig_h <= 1) and eye is not None:
+                    ex, ey = eye
+                    if 0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0:
+                        orig_w = 1.0
+                        orig_h = 1.0
+            except Exception:
+                pass
             if orig_w <= 1 or orig_h <= 1:
                 orig_w = float(img_w)
                 orig_h = float(img_h)
@@ -367,6 +387,7 @@ class ThumbnailOverlay(QWidget):
         cm = ColorManager.instance()
         rect_color = cm.qcolor("border.subject_rect", default="#f50f0f")
         fp_color = cm.qcolor("theme.primary", default="#2196F3")
+        eye_color = QColor("#2196F3")
         try:
             pen_w = max(1, int(size_for_calcs // 90))
         except Exception:
@@ -424,6 +445,31 @@ class ThumbnailOverlay(QWidget):
                 painter.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
                 painter.drawLine(int(cx - r * 2), int(cy), int(cx + r * 2), int(cy))
                 painter.drawLine(int(cx), int(cy - r * 2), int(cx), int(cy + r * 2))
+            except Exception:
+                pass
+
+        if eye is not None:
+            try:
+                ex, ey = eye
+                try:
+                    if 0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0:
+                        ex = float(ex) * float(orig_w)
+                        ey = float(ey) * float(orig_h)
+                except Exception:
+                    pass
+                ex = max(0.0, min(orig_w, ex))
+                ey = max(0.0, min(orig_h, ey))
+                cx = target_rect.x() + (ex / orig_w) * target_rect.width()
+                cy = target_rect.y() + (ey / orig_h) * target_rect.height()
+                try:
+                    r = max(4, int(round(pen_w * 2.8)))
+                except Exception:
+                    r = 6
+                c = QColor(eye_color)
+                c.setAlpha(240)
+                painter.setPen(QPen(c, int(pen_w)))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRectF(cx - r, cy - r, 2 * r, 2 * r))
             except Exception:
                 pass
 

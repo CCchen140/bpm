@@ -94,8 +94,9 @@ class ExifWriteDialog(BasePopupDialog):
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(self._text_color)
         self.preset_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 6px 10px;

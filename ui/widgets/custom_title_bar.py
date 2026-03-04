@@ -125,7 +125,7 @@ class CustomTitleBar(QWidget):
             # 使用默认图标
             # 默认模式：小鸟图标颜色与标题文字一致，避免在“数据加载/初始化”等场景出现颜色不一致
             cm = ColorManager.instance()
-            self.app_icon_label.setPixmap(qta.icon('ph.bird-fill', color=cm.get("theme.text.dark")).pixmap(24, 24))
+            self.app_icon_label.setPixmap(qta.icon('ph.bird-fill', color=cm.get("theme.primary")).pixmap(24, 24))
 
     def _apply_theme_styles(self):
         cm = ColorManager.instance()
@@ -149,7 +149,7 @@ class CustomTitleBar(QWidget):
             title_text = cm.get("theme.text.dark")
             hover_bg = cm.get("theme.popup")
             close_hover_bg = cm.get("theme.primary")
-            icon_color = cm.get("theme.text.dark")
+            icon_color = cm.get("theme.primary")
             self.icon_container.setStyleSheet(f"background-color: {sidebar_bg};")
             self.set_app_icon()
             self.title_container.setStyleSheet(f"background-color: {title_bg};")

@@ -36,13 +36,14 @@ except Exception:
     lazy_pinyin = None
 
 from core.classifier.bird_biological_classifier import BirdBiologicalClassifier
-from core.check_cli import detect_subject_bbox_async
+from core.check_cli import detect_subject_bbox_async, detect_subject_bbox_multi_async
 from core.recognizer.bird_species_recognizer import BirdSpeciesRecognizer
 from ui.panels.image_detail_panel import MagnifierGraphicsView
 from ui.utils.color_manager import ColorManager
 from ui.utils.notification_manager import NotificationManager
 from ui.utils.status_manager import StatusManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
+from ui.widgets.custom_progress_dialog import CustomProgressDialog
 from utils.exif.exif_utils import EXIF_TAG, ExifHandleWorker
 from utils.file.file import load_image
 from utils.setting.settings_manager import SettingsManager
@@ -53,6 +54,10 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
     _species_done = pyqtSignal(int, str, str)
     _location_done = pyqtSignal(str)
     _shot_time_done = pyqtSignal(str)
+    _batch_progress = pyqtSignal(int, int, str)
+    _batch_bbox_done = pyqtSignal(str, object, str)
+    _batch_species_done = pyqtSignal(str, str, str)
+    _batch_done = pyqtSignal(int, int, int, int)
 
     _species_text_alias_rules_cache: list[dict[str, str]] | None = None
 
@@ -97,12 +102,19 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
         self._suppress_species_suggestions = False
         self._pinyin_available = lazy_pinyin is not None
         self._pinyin_warned = False
+        self._batch_running = False
+        self._batch_progress_dialog: CustomProgressDialog | None = None
+        self._batch_task_id: int | None = None
 
         self._init_ui()
         self._detect_done.connect(self._on_detect_done)
         self._species_done.connect(self._on_species_done)
         self._location_done.connect(self._on_location_done)
         self._shot_time_done.connect(self._on_shot_time_done)
+        self._batch_progress.connect(self._on_batch_progress)
+        self._batch_bbox_done.connect(self._on_batch_bbox_done)
+        self._batch_species_done.connect(self._on_batch_species_done)
+        self._batch_done.connect(self._on_batch_done)
         self._load_preview_image()
         self._restore_state_for_current()
         self._load_default_location()
@@ -258,9 +270,14 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
         self.apply_undetected_btn.clicked.connect(self._on_apply_undetected_clicked)
         btn_row.addWidget(self.apply_undetected_btn)
 
+        self.batch_detect_btn = QPushButton(qta.icon("mdi6.auto-fix", color=text_color), "批量检测")
+        self.batch_detect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.batch_detect_btn.clicked.connect(self._on_batch_detect_clicked)
+        btn_row.addWidget(self.batch_detect_btn)
+
         btn_row.addStretch()
 
-        for b in (self.detect_btn, self.draw_btn, self.recognize_btn, self.apply_undetected_btn):
+        for b in (self.detect_btn, self.draw_btn, self.recognize_btn, self.apply_undetected_btn, self.batch_detect_btn):
             b.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {control_bg};
@@ -406,6 +423,10 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
             self.apply_undetected_btn.setVisible(bool(len(self._selected_files) > 1))
         except Exception:
             pass
+        try:
+            self.batch_detect_btn.setVisible(bool(len(self._selected_files) > 1))
+        except Exception:
+            pass
 
         self.close_btn = QPushButton("取消")
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -462,6 +483,9 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
             pass
 
     def _on_confirm_clicked(self):
+        if bool(getattr(self, "_batch_running", False)):
+            NotificationManager.instance().show_toast("批量检测正在进行，请稍候")
+            return
         if not self._is_taxonomy_complete():
             NotificationManager.instance().show_warning("提示", "请先填写完整的生物学分类（物种/目/科/属）")
             return
@@ -472,6 +496,9 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
         self.accept()
         
     def _on_close_clicked(self):
+        if bool(getattr(self, "_batch_running", False)):
+            NotificationManager.instance().show_toast("批量检测正在进行，请稍候")
+            return
         try:
             self._save_current_state()
         except Exception:
@@ -583,6 +610,54 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                 except Exception:
                     pass
             self._switching_image = False
+
+        try:
+            species = str(self.species_input.text() or "").strip()
+        except Exception:
+            species = ""
+        if species:
+            try:
+                need = (not str(st.get("order") or "").strip()) or (not str(st.get("family") or "").strip()) or (not str(st.get("genus") or "").strip())
+            except Exception:
+                need = True
+            if need:
+                species2 = self._extract_species_name(species)
+                species2 = str(species2 or "").strip()
+                if species2:
+                    species_for_classifier = self._normalize_species_text(species2)
+                    try:
+                        t = BirdBiologicalClassifier().classify(species_for_classifier)
+                    except Exception:
+                        t = None
+                    if t is not None:
+                        self._switching_image = True
+                        try:
+                            for w in (self.order_input, self.family_input, self.genus_input):
+                                try:
+                                    w.blockSignals(True)
+                                except Exception:
+                                    pass
+                            if not (self.order_input.text() or "").strip() and str(getattr(t, "order_cn", "") or "").strip():
+                                self.order_input.setText(str(getattr(t, "order_cn", "") or ""))
+                                st["order"] = str(getattr(t, "order_cn", "") or "")
+                            if not (self.family_input.text() or "").strip() and str(getattr(t, "family_cn", "") or "").strip():
+                                self.family_input.setText(str(getattr(t, "family_cn", "") or ""))
+                                st["family"] = str(getattr(t, "family_cn", "") or "")
+                            if not (self.genus_input.text() or "").strip() and str(getattr(t, "genus_cn", "") or "").strip():
+                                self.genus_input.setText(str(getattr(t, "genus_cn", "") or ""))
+                                st["genus"] = str(getattr(t, "genus_cn", "") or "")
+                        finally:
+                            for w in (self.order_input, self.family_input, self.genus_input):
+                                try:
+                                    w.blockSignals(False)
+                                except Exception:
+                                    pass
+                            self._switching_image = False
+                        f = self._path_to_file.get(path)
+                        if isinstance(f, dict):
+                            f["order"] = st.get("order", "")
+                            f["family"] = st.get("family", "")
+                            f["genus"] = st.get("genus", "")
 
         self._bbox_xyxy = None
         try:
@@ -919,6 +994,10 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
             time_hint = (self.shot_time_input.text() or "").strip()
         except Exception:
             time_hint = ""
+        
+        # 获取GPS信息和区域代码用于地域过滤
+        lat, lon, region_code = self._get_gps_for_current_image()
+        
         self.recognize_btn.setEnabled(False)
         task_id = StatusManager.instance().start_task("正在识别物种...")
         self._species_req_id += 1
@@ -949,7 +1028,14 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                         raise RuntimeError("裁剪图片编码失败")
                     with open(tmp_path, "wb") as f:
                         f.write(bytes(buf))
-                    text = BirdSpeciesRecognizer().recognize(tmp_path, location_hint=str(location_hint or ""), time_hint=str(time_hint or "")).text
+                    text = BirdSpeciesRecognizer().recognize(
+                        tmp_path,
+                        location_hint=str(location_hint or ""),
+                        time_hint=str(time_hint or ""),
+                        lat=lat,
+                        lon=lon,
+                        region_code=region_code
+                    ).text
                 finally:
                     try:
                         os.remove(tmp_path)
@@ -967,6 +1053,69 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                     pass
 
         Thread(target=run, daemon=True).start()
+
+    def _get_gps_for_current_image(self) -> tuple:
+        """
+        获取当前图片的GPS坐标和区域代码
+        
+        优先级：
+        1. 数据库中的区域代码
+        2. 数据库中用户设置的地理位置
+        3. EXIF信息中的区域代码
+        4. EXIF信息中的GPS数据
+        5. 文字版地理位置（通过地理编码转换）
+        
+        Returns:
+            (lat, lon, region_code) 元组，如果无法获取则返回 (None, None, None)
+        """
+        # 优先获取区域代码
+        try:
+            from core.recognizer.geo_filter import get_region_code_for_image
+            region_code = get_region_code_for_image(self._current_path)
+            if region_code:
+                # 有区域代码，尝试获取GPS
+                try:
+                    from core.recognizer.geo_filter import resolve_image_location
+                    location = resolve_image_location(self._current_path)
+                    if location:
+                        return location.latitude, location.longitude, region_code
+                except Exception:
+                    pass
+                return None, None, region_code
+        except Exception:
+            pass
+        
+        # 尝试从数据库/EXIF获取GPS
+        try:
+            from core.recognizer.geo_filter import resolve_image_location
+            location = resolve_image_location(self._current_path)
+            if location:
+                return location.latitude, location.longitude, location.region_code
+        except Exception:
+            pass
+        
+        # 回退：尝试从文字版地理位置获取GPS
+        try:
+            location_text = (self.location_input.text() or "").strip()
+            if location_text:
+                from ui.utils.geo_manager import GeoInfoManager
+                geo = GeoInfoManager.instance()
+                result = geo.geocode(location_text)
+                if result:
+                    lat, lon, _ = result
+                    # 根据GPS推断区域代码
+                    try:
+                        from core.recognizer.geo_filter import get_geo_index
+                        geo_index = get_geo_index()
+                        region_code = geo_index.detect_region_from_gps(lat, lon)
+                        return lat, lon, region_code
+                    except Exception:
+                        pass
+                    return lat, lon, None
+        except Exception:
+            pass
+        
+        return None, None, None
 
     def _on_species_done(self, req_id: int, species: str, err: str):
         task_id = None
@@ -1100,6 +1249,472 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                 NotificationManager.instance().show_toast(f"已应用到未检测文件：{applied} 张")
             except Exception:
                 pass
+
+    def _set_batch_controls_enabled(self, enabled: bool):
+        for w in (
+            getattr(self, "detect_btn", None),
+            getattr(self, "draw_btn", None),
+            getattr(self, "recognize_btn", None),
+            getattr(self, "apply_undetected_btn", None),
+            getattr(self, "batch_detect_btn", None),
+            getattr(self, "close_btn", None),
+            getattr(self, "confirm_btn", None),
+        ):
+            if w is None:
+                continue
+            try:
+                w.setEnabled(bool(enabled))
+            except Exception:
+                pass
+
+    def _on_batch_detect_clicked(self):
+        try:
+            multi = len(self._selected_files) > 1
+        except Exception:
+            multi = False
+        if not multi:
+            return
+        if bool(getattr(self, "_batch_running", False)):
+            NotificationManager.instance().show_toast("批量检测正在进行，请稍候")
+            return
+        if cv2 is None:
+            NotificationManager.instance().show_warning("错误", "缺少依赖：opencv-python")
+            return
+
+        paths: list[str] = []
+        for f in (self._selected_files or []):
+            try:
+                p = str((f or {}).get("path") or "").strip()
+            except Exception:
+                p = ""
+            if not p:
+                continue
+            paths.append(p)
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            return
+
+        try:
+            location_hint = (self.location_input.text() or "").strip()
+        except Exception:
+            location_hint = ""
+        try:
+            time_hint = (self.shot_time_input.text() or "").strip()
+        except Exception:
+            time_hint = ""
+
+        self._batch_running = True
+        self._batch_bbox_added = 0
+        self._batch_species_added = 0
+        self._batch_failed = 0
+
+        try:
+            self._batch_task_id = StatusManager.instance().start_task("正在批量检测...")
+        except Exception:
+            self._batch_task_id = None
+
+        try:
+            dlg = CustomProgressDialog(title="批量检测", message="正在准备...")
+            dlg.setMaximum(1)
+            dlg.setValue(0)
+            dlg.show()
+            self._batch_progress_dialog = dlg
+        except Exception:
+            self._batch_progress_dialog = None
+
+        self._set_batch_controls_enabled(False)
+
+        def run():
+            try:
+                needs_bbox: list[str] = []
+                needs_species: list[str] = []
+                for p in paths:
+                    st = self._state_for_path(p)
+                    try:
+                        has_bbox = isinstance(st.get("bbox"), (list, tuple)) and len(st.get("bbox") or []) >= 4
+                    except Exception:
+                        has_bbox = False
+                    if not has_bbox:
+                        needs_bbox.append(p)
+                    try:
+                        has_species = bool(str(st.get("species") or "").strip())
+                    except Exception:
+                        has_species = False
+                    if not has_species:
+                        needs_species.append(p)
+
+                if needs_bbox:
+                    try:
+                        self._batch_progress.emit(0, int(len(needs_bbox)), "正在批量检测主体框...")
+                    except Exception:
+                        pass
+                    import threading
+
+                    lock = threading.Lock()
+                    done_event = threading.Event()
+                    pending = set(needs_bbox)
+                    done = 0
+
+                    def cb(p, bbox, _fp, _pos, err):
+                        nonlocal done
+                        p2 = str(p or "").strip()
+                        with lock:
+                            if p2 in pending:
+                                pending.remove(p2)
+                            done += 1
+                            done2 = int(done)
+                            total2 = int(len(needs_bbox))
+                        try:
+                            self._batch_bbox_done.emit(str(p2), bbox, str(err or ""))
+                        except Exception:
+                            pass
+                        try:
+                            self._batch_progress.emit(int(done2), int(total2), f"正在检测主体框：{done2}/{total2}")
+                        except Exception:
+                            pass
+                        if done2 >= int(total2):
+                            try:
+                                done_event.set()
+                            except Exception:
+                                pass
+
+                    fut = None
+                    try:
+                        fut = detect_subject_bbox_multi_async(needs_bbox, callback=cb, targets=["bbox_orig"])
+                    except Exception as e:
+                        for p in list(needs_bbox):
+                            try:
+                                self._batch_bbox_done.emit(str(p), None, str(e))
+                            except Exception:
+                                pass
+                        pending = set()
+                        done_event.set()
+
+                    timeout_seconds = 60 * 30
+                    if fut is not None:
+                        try:
+                            fut.result(timeout=int(timeout_seconds))
+                        except Exception:
+                            pass
+                    try:
+                        done_event.wait(timeout=float(timeout_seconds))
+                    except Exception:
+                        pass
+                    for p in list(pending):
+                        try:
+                            self._batch_bbox_done.emit(str(p), None, "检测超时")
+                        except Exception:
+                            pass
+
+                needs_species2: list[str] = []
+                for p in needs_species:
+                    st = self._state_for_path(p)
+                    try:
+                        has_bbox = isinstance(st.get("bbox"), (list, tuple)) and len(st.get("bbox") or []) >= 4
+                    except Exception:
+                        has_bbox = False
+                    if not has_bbox:
+                        try:
+                            self._batch_species_done.emit(str(p), "", "缺少主体框")
+                        except Exception:
+                            pass
+                        continue
+                    needs_species2.append(p)
+
+                if needs_species2:
+                    try:
+                        self._batch_progress.emit(0, int(len(needs_species2)), "正在批量识别物种...")
+                    except Exception:
+                        pass
+                    done2 = 0
+                    for p in needs_species2:
+                        done2 += 1
+                        try:
+                            st = self._state_for_path(p)
+                            bbox = st.get("bbox")
+                        except Exception:
+                            bbox = None
+                        xyxy = self._parse_xyxy_bbox(bbox)
+                        if xyxy is None:
+                            try:
+                                self._batch_species_done.emit(str(p), "", "主体框无效")
+                            except Exception:
+                                pass
+                            try:
+                                self._batch_progress.emit(int(done2), int(len(needs_species2)), f"正在识别物种：{done2}/{len(needs_species2)}")
+                            except Exception:
+                                pass
+                            continue
+
+                        try:
+                            img = load_image(p)
+                            if img is None:
+                                raise RuntimeError("读取图片失败")
+                            h, w = img.shape[:2]
+                            x1 = max(0, min(int(xyxy[0]), w - 1))
+                            y1 = max(0, min(int(xyxy[1]), h - 1))
+                            x2 = max(0, min(int(xyxy[2]), w))
+                            y2 = max(0, min(int(xyxy[3]), h))
+                            if x2 <= x1 or y2 <= y1:
+                                raise RuntimeError("主体框无效")
+                            crop = img[y1:y2, x1:x2]
+                            crop = self._to_uint8_bgr(crop)
+                            if crop is None:
+                                raise RuntimeError("裁剪图片处理失败")
+                            fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+                            os.close(fd)
+                            try:
+                                ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                                if not ok:
+                                    raise RuntimeError("裁剪图片编码失败")
+                                with open(tmp_path, "wb") as f:
+                                    f.write(bytes(buf))
+                                text = BirdSpeciesRecognizer().recognize(tmp_path, location_hint=str(location_hint or ""), time_hint=str(time_hint or "")).text
+                            finally:
+                                try:
+                                    os.remove(tmp_path)
+                                except Exception:
+                                    pass
+                            species = self._extract_species_name(text)
+                            if not str(species or "").strip():
+                                raise RuntimeError("物种识别失败")
+                            try:
+                                self._batch_species_done.emit(str(p), str(species), "")
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                self._batch_species_done.emit(str(p), "", str(e))
+                            except Exception:
+                                pass
+                        try:
+                            self._batch_progress.emit(int(done2), int(len(needs_species2)), f"正在识别物种：{done2}/{len(needs_species2)}")
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    self._batch_done.emit(int(len(paths)), 0, 0, 0)
+                except Exception:
+                    pass
+
+        Thread(target=run, daemon=True).start()
+
+    def _on_batch_progress(self, done: int, total: int, msg: str):
+        dlg = getattr(self, "_batch_progress_dialog", None)
+        if dlg is None:
+            return
+        try:
+            dlg.setLabelText(str(msg or ""))
+        except Exception:
+            pass
+        try:
+            t = int(total)
+        except Exception:
+            t = 0
+        if t <= 0:
+            t = 1
+        try:
+            dlg.setMaximum(int(t))
+        except Exception:
+            pass
+        try:
+            v = int(done)
+        except Exception:
+            v = 0
+        v = max(0, min(v, int(t)))
+        try:
+            dlg.setValue(int(v))
+        except Exception:
+            pass
+
+    def _on_batch_bbox_done(self, path: str, bbox: Any, err: str):
+        p = str(path or "").strip()
+        if not p:
+            return
+        if str(err or "").strip():
+            try:
+                self._batch_failed += 1
+            except Exception:
+                pass
+            return
+        xyxy = self._parse_xyxy_bbox(bbox)
+        if xyxy is None:
+            try:
+                self._batch_failed += 1
+            except Exception:
+                pass
+            return
+        st = self._state_for_path(p)
+        try:
+            had = isinstance(st.get("bbox"), (list, tuple)) and len(st.get("bbox") or []) >= 4
+        except Exception:
+            had = False
+        if not had:
+            try:
+                st["bbox"] = list(xyxy)
+            except Exception:
+                pass
+            try:
+                self._batch_bbox_added += 1
+            except Exception:
+                pass
+            f2 = self._path_to_file.get(p)
+            if isinstance(f2, dict):
+                try:
+                    f2["bbox"] = list(xyxy)
+                except Exception:
+                    pass
+        if p == getattr(self, "_current_path", ""):
+            try:
+                self._bbox_xyxy = list(xyxy)
+                self._draw_bbox_on_preview(list(xyxy))
+            except Exception:
+                pass
+
+    def _on_batch_species_done(self, path: str, species: str, err: str):
+        p = str(path or "").strip()
+        if not p:
+            return
+        if str(err or "").strip():
+            try:
+                self._batch_failed += 1
+            except Exception:
+                pass
+            return
+        s = str(species or "").strip()
+        if not s:
+            try:
+                self._batch_failed += 1
+            except Exception:
+                pass
+            return
+        st = self._state_for_path(p)
+        try:
+            had = bool(str(st.get("species") or "").strip())
+        except Exception:
+            had = False
+        if not had:
+            try:
+                st["species"] = str(s)
+            except Exception:
+                pass
+            try:
+                self._batch_species_added += 1
+            except Exception:
+                pass
+            f2 = self._path_to_file.get(p)
+            if isinstance(f2, dict):
+                try:
+                    f2["species"] = str(s)
+                except Exception:
+                    pass
+        if p == getattr(self, "_current_path", ""):
+            try:
+                if not (self.species_input.text() or "").strip():
+                    self.species_input.setText(str(s))
+            except Exception:
+                pass
+
+    def _on_batch_done(self, total: int, _a: int, _b: int, _c: int):
+        try:
+            tid = getattr(self, "_batch_task_id", None)
+            if tid is not None:
+                StatusManager.instance().finish_task(int(tid))
+        except Exception:
+            pass
+        try:
+            self._batch_task_id = None
+        except Exception:
+            pass
+
+        dlg = getattr(self, "_batch_progress_dialog", None)
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:
+                pass
+        try:
+            self._batch_progress_dialog = None
+        except Exception:
+            pass
+
+        self._batch_running = False
+        self._set_batch_controls_enabled(True)
+
+        try:
+            cache: dict[str, Any] = {}
+            for f in (self._selected_files or []):
+                try:
+                    p = str((f or {}).get("path") or "").strip()
+                except Exception:
+                    p = ""
+                if not p:
+                    continue
+                st = self._state_for_path(p)
+                try:
+                    raw_species = str(st.get("species") or "").strip()
+                except Exception:
+                    raw_species = ""
+                if not raw_species:
+                    continue
+                try:
+                    need = (not str(st.get("order") or "").strip()) or (not str(st.get("family") or "").strip()) or (not str(st.get("genus") or "").strip())
+                except Exception:
+                    need = True
+                if not need:
+                    continue
+                species2 = self._extract_species_name(raw_species)
+                species2 = str(species2 or "").strip()
+                if not species2:
+                    continue
+                species_for_classifier = self._normalize_species_text(species2)
+                t = cache.get(species_for_classifier)
+                if t is None and species_for_classifier not in cache:
+                    try:
+                        t = BirdBiologicalClassifier().classify(species_for_classifier)
+                    except Exception:
+                        t = None
+                    cache[species_for_classifier] = t
+                if t is None:
+                    continue
+                if not str(st.get("order") or "").strip():
+                    st["order"] = str(getattr(t, "order_cn", "") or "")
+                if not str(st.get("family") or "").strip():
+                    st["family"] = str(getattr(t, "family_cn", "") or "")
+                if not str(st.get("genus") or "").strip():
+                    st["genus"] = str(getattr(t, "genus_cn", "") or "")
+                f2 = self._path_to_file.get(p)
+                if isinstance(f2, dict):
+                    f2["order"] = st.get("order", "")
+                    f2["family"] = st.get("family", "")
+                    f2["genus"] = st.get("genus", "")
+        except Exception:
+            pass
+
+        try:
+            self._restore_state_for_current()
+        except Exception:
+            pass
+
+        try:
+            t = int(total)
+        except Exception:
+            t = 0
+        try:
+            added_bbox = int(getattr(self, "_batch_bbox_added", 0) or 0)
+        except Exception:
+            added_bbox = 0
+        try:
+            added_species = int(getattr(self, "_batch_species_added", 0) or 0)
+        except Exception:
+            added_species = 0
+        try:
+            failed = int(getattr(self, "_batch_failed", 0) or 0)
+        except Exception:
+            failed = 0
+
+        msg = f"批量检测完成：共 {t} 张，新增主体框 {added_bbox} 张，新增物种 {added_species} 张，失败 {failed} 张"
+        NotificationManager.instance().show_toast(msg)
 
     def _extract_species_name(self, text: str) -> str:
         s = str(text or "").strip()
@@ -1401,15 +2016,34 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
             pass
 
         def run():
+            text = ""
             try:
-                raw = ExifHandleWorker.get_instance().read_tag(self._current_path, EXIF_TAG.Location.value, timeout=3)
-            except Exception:
-                raw = None
-            text = self._extract_country_province(raw)
-            try:
-                self._location_done.emit(text)
+                # 优先从数据库读取已设置的地理位置
+                from utils.sql.data_base import BirdLibraryDB
+                db = BirdLibraryDB()
+                record = db.get_result_by_path(self._current_path, table_name="bird_results")
+                if not record:
+                    record = db.get_result_by_path(self._current_path, table_name="import_cache")
+                if record:
+                    loc = record.get("location")
+                    if loc and str(loc).strip():
+                        text = str(loc).strip()
             except Exception:
                 pass
+            
+            # 如果数据库没有，回退到EXIF读取
+            if not text:
+                try:
+                    raw = ExifHandleWorker.get_instance().read_tag(self._current_path, EXIF_TAG.Location.value, timeout=3)
+                    text = self._extract_country_province(raw) or ""
+                except Exception:
+                    pass
+            
+            if text:
+                try:
+                    self._location_done.emit(text)
+                except Exception:
+                    pass
 
         Thread(target=run, daemon=True).start()
 

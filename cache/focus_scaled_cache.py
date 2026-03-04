@@ -20,7 +20,7 @@ def _project_root() -> str:
 
 
 def get_cache_dir(scope: str = "import_focus") -> str:
-    base = os.path.join(_project_root(), "data", "cache")
+    base = os.path.join(_project_root(), "cache")
     s = str(scope or "import_focus").lower()
     if s in ["import_focus", "focus_scaled", "focus"]:
         return os.path.join(base, "focus_scaled")

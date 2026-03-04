@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -17,6 +18,10 @@ from table.chart_types import CHART_TYPES
 from ui.utils.color_manager import ColorManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
 from ui.widgets.themed_combo_box import ThemedComboBox
+
+
+# 允许选择的图表类型列表（不在此列表中的将被禁用）
+ENABLED_CHART_TYPES = {"number", "bar", "line", "pie", "scatter", "tree"}
 
 
 DATASET_OPTIONS = [
@@ -75,8 +80,18 @@ class CreateChartDialog(BasePopupDialog):
         base_form.addRow("图表名称", self.name_edit)
 
         self.type_combo = ThemedComboBox(font_size=12, padding="6px 10px")
+        # 使用自定义模型来支持禁用特定选项
+        type_model = QStandardItemModel()
         for opt in CHART_TYPES:
-            self.type_combo.addItem(opt.title, opt.chart_type)
+            item = QStandardItem(opt.title)
+            item.setData(opt.chart_type, Qt.ItemDataRole.UserRole)
+            # 如果图表类型不在允许列表中，则禁用该项
+            if opt.chart_type not in ENABLED_CHART_TYPES:
+                item.setEnabled(False)
+                # 设置禁用项的样式（灰色显示）
+                item.setForeground(Qt.GlobalColor.gray)
+            type_model.appendRow(item)
+        self.type_combo.setModel(type_model)
         base_form.addRow("图表类型", self.type_combo)
 
         self.dataset_combo = ThemedComboBox(font_size=12, padding="6px 10px")

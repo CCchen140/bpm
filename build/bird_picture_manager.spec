@@ -102,23 +102,10 @@ if not os.path.exists(icon_path):
 
 datas = []
 datas += _collect_datas(os.path.join(ROOT, "assets"), "assets")
-data_template_dir = ""
-try:
-    candidates = [
-        os.path.join(ROOT, "data_build"),
-        os.path.join(ROOT, "data build"),
-        os.path.join(ROOT, "data"),
-    ]
-    for p in candidates:
-        if os.path.isdir(p):
-            data_template_dir = p
-            break
-except Exception:
-    data_template_dir = ""
-if not data_template_dir:
-    data_template_dir = os.path.join(ROOT, "data")
+data_template_dir = os.path.join(ROOT, "data")
 datas += _collect_datas(data_template_dir, "data")
 datas += _collect_datas(os.path.join(ROOT, "models"), "models")
+datas += _collect_datas(os.path.join(ROOT, "opensource"), "opensource")
 try:
     manual_docx = os.path.join(ROOT, "docs", "使用说明书.docx")
     if os.path.exists(manual_docx):
@@ -255,7 +242,14 @@ analysis = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch._dynamo",
+        "torch._inductor",
+        "torch.distributed",
+        "torch.testing",
+        "torch.utils.benchmark",
+        "torch.utils.tensorboard",
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     noarchive=False,

@@ -143,8 +143,24 @@ def _load_theme_presets() -> tuple[list[str], str, dict]:
 def build_html() -> str:
     theme_names, register_code, theme_ui = _load_theme_presets()
     default_theme = "dark" if "dark" in theme_names else (theme_names[0] if theme_names else "dark")
+    # 主题名称映射：英文名 -> 中文名
+    theme_name_map = {
+        "dark": "深色",
+        "light": "浅色",
+        "chalk": "粉笔",
+        "essos": "埃索斯",
+        "infographic": "信息图",
+        "macarons": "马卡龙",
+        "purple-passion": "紫色激情",
+        "roma": "罗马",
+        "shine": "闪耀",
+        "vintage": "复古",
+        "walden": "瓦尔登",
+        "westeros": "维斯特洛",
+        "wonderland": "仙境",
+    }
     theme_opts = "".join(
-        f'<option value="{_escape_html(t)}"{" selected" if t == default_theme else ""}>{_escape_html(t)}</option>'
+        f'<option value="{_escape_html(t)}"{" selected" if t == default_theme else ""}>{_escape_html(theme_name_map.get(t, t))}</option>'
         for t in theme_names
     )
     html = """<!DOCTYPE html>
@@ -219,6 +235,7 @@ def build_html() -> str:
       --card-overlay-opacity:0;
       --card-overlay-color:transparent;
       --card-overlay-image:none;
+      --card-noise-opacity:0;
 
       --btn-h:34px;
       --grid: 20px;
@@ -293,20 +310,40 @@ def build_html() -> str:
     .btn.boat[data-on="1"] .boat-thumb{left:calc(100% - 21px);background:rgba(255,255,255,0.94)}
     #panel, #panel *{-webkit-tap-highlight-color:transparent}
     #panel ::selection{background:transparent}
+    /* 禁止所有文字被选中 */
+    html, body, #desk, #panel, .win, .win-content, .win-header, .win-tools, .modal, .modal-content{
+      user-select:none;
+      -webkit-user-select:none;
+      -moz-user-select:none;
+      -ms-user-select:none;
+    }
+    /* 允许输入框和文本域中的文字被选中 */
+    input, textarea, [contenteditable="true"]{
+      user-select:text;
+      -webkit-user-select:text;
+      -moz-user-select:text;
+      -ms-user-select:text;
+    }
 
-    .workspace{flex:1;min-height:0;position:relative}
+    .workspace{flex:1;min-height:0;position:relative;overflow-y:auto;overflow-x:auto}
+    .workspace::-webkit-scrollbar{display:none}
+    .workspace{scrollbar-width:none;-ms-overflow-style:none}
     #desk{
-      position:absolute;inset:0;
+      position:relative;
       background-color:var(--scene-bg);
       background-image:var(--scene-style-overlay),var(--scene-gradient);
       background-size:cover,cover;
       background-repeat:no-repeat,no-repeat;
+      background-attachment:fixed,fixed;
       background-position:center center,center center;
       isolation:isolate;
+      overflow:visible;
+      min-height:100%;
+      min-width:100%;
     }
     #desk::before{
       content:"";
-      position:absolute;inset:0;z-index:0;pointer-events:none;
+      position:fixed;inset:0;z-index:0;pointer-events:none;
       background-image:var(--scene-texture);
       background-size:200px 200px;
       background-repeat:repeat;
@@ -346,7 +383,7 @@ def build_html() -> str:
     .win::before{
       content:"";
       position:absolute;top:0;left:10%;right:10%;height:1px;z-index:3;pointer-events:none;
-      background:linear-gradient(90deg,transparent,rgba(255,255,255,0.10),transparent);
+      background:linear-gradient(90deg,transparent,rgba(255,255,255,0.15),transparent);
     }
     .win::after{
       content:"";
@@ -355,6 +392,16 @@ def build_html() -> str:
       background-color:var(--card-overlay-color);
       background-image:var(--card-overlay-image);
       opacity:var(--card-overlay-opacity);
+      backdrop-filter:blur(var(--card-layer-blur)) saturate(1.2);
+      -webkit-backdrop-filter:blur(var(--card-layer-blur)) saturate(1.2);
+    }
+    .win-noise{
+      position:absolute;inset:0;z-index:2;pointer-events:none;
+      border-radius:inherit;
+      opacity:var(--card-noise-opacity);
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      background-repeat:repeat;
+      mix-blend-mode:overlay;
     }
     .refreshLamp{
       position:absolute;
@@ -958,6 +1005,11 @@ def build_html() -> str:
         <select id="styleSelect" class="select">
           <option value="acrylic" selected>亚克力</option>
           <option value="frosted">磨砂玻璃</option>
+          <option value="glass">水晶玻璃</option>
+          <option value="glass-dark">暗夜玻璃</option>
+          <option value="neon">霓虹光效</option>
+          <option value="cyber">赛博朋克</option>
+          <option value="paper">纸质质感</option>
           <option value="transparent">透明</option>
           <option value="opaque">不透明</option>
           <option value="flat">极简扁平</option>
@@ -1006,9 +1058,26 @@ def build_html() -> str:
           <label>横坐标参数</label>
           <select class="select" id="fBarXKind">
             <option value="time" selected>时间</option>
-            <option value="location">地点</option>
+            <option value="score">评分</option>
             <option value="rating">评星</option>
+            <option value="iso">ISO</option>
+            <option value="shutter">快门</option>
+            <option value="fnumber">光圈</option>
+            <option value="focal_length">焦距</option>
+            <option value="species">物种</option>
+            <option value="order">目</option>
+            <option value="family">科</option>
+            <option value="genus">属</option>
+            <option value="location">地点</option>
             <option value="label">色标</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="bar" id="barTimeTypeWrap">
+          <label>时间类型</label>
+          <select class="select" id="fBarTimeType">
+            <option value="shot_time" selected>拍摄时间</option>
+            <option value="imported_at">导入时间</option>
+            <option value="created_at">创建时间</option>
           </select>
         </div>
         <div class="field full" data-scope="bar">
@@ -1043,6 +1112,15 @@ def build_html() -> str:
             </div>
           </div>
         </div>
+        <div class="field full" data-scope="bar" id="barHideEmptyTimeWrap">
+          <label>显示选项</label>
+          <div class="barInlineRow">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-muted);">
+              <input type="checkbox" id="fBarHideEmptyTime" style="width:16px;height:16px;cursor:pointer;" />
+              <span>隐藏无数据的时间</span>
+            </label>
+          </div>
+        </div>
         <div class="field" data-scope="bar" id="barLocLevelWrap">
           <label>地点层级(暂仅 UI)</label>
           <select class="select" id="fBarLocLevel">
@@ -1065,26 +1143,219 @@ def build_html() -> str:
           </div>
         </div>
 
-        <div class="field" data-scope="pie">
-          <label>分类字段</label>
-          <select class="select" id="fPieCat"><option value="">加载中…</option></select>
+        <!-- 数据图（Number）配置 -->
+        <div class="field full" data-scope="number">
+          <label>数据类型</label>
+          <select class="select" id="fNumberType">
+            <option value="count" selected>图片数量</option>
+            <option value="species_count">鸟种数</option>
+            <option value="new_species">加新数量</option>
+          </select>
         </div>
-        <div class="field" data-scope="pie">
-          <label>数值统计</label>
-          <select class="select" id="fPieAgg"><option value="">加载中…</option></select>
+        <div class="field full" data-scope="number">
+          <label>时间类型</label>
+          <select class="select" id="fNumberTimeType">
+            <option value="shot_time" selected>拍摄时间</option>
+            <option value="imported_at">导入时间</option>
+            <option value="created_at">创建时间</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="number">
+          <label>时间范围</label>
+          <div class="barInlineRow">
+            <div class="valRange">
+              <input class="select" type="text" id="fNumberTimeStartShow" readonly />
+              <span class="sep">至</span>
+              <input class="select" type="text" id="fNumberTimeEndShow" readonly />
+              <button class="btn" id="btnNumberPickTime" type="button">选择范围</button>
+            </div>
+          </div>
+        </div>
+        <div class="field full" data-scope="number">
+          <div style="font-weight:800;color:var(--text-title);margin-top:2px">筛选</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:2px">参照图库筛选面板，支持 与 / 或 / 非</div>
+        </div>
+        <div class="field full" data-scope="number">
+          <div class="scrollPanel">
+            <div id="numberFilterList" class="filterList"></div>
+          </div>
+          <div class="row" style="justify-content:flex-start;gap:10px;margin-top:8px">
+            <button class="btn" id="btnNumberAddCond" type="button">添加条件</button>
+            <button class="btn" id="btnNumberClearCond" type="button">清空</button>
+          </div>
         </div>
 
-        <div class="field" data-scope="scatter">
-          <label>X 字段</label>
-          <select class="select" id="fSX"><option value="">加载中…</option></select>
+        <div class="field full" data-scope="pie">
+          <label>分类字段</label>
+          <select class="select" id="fPieCat">
+            <option value="order">目</option>
+            <option value="family">科</option>
+            <option value="genus">属</option>
+            <option value="species" selected>种</option>
+            <option value="rating">评星</option>
+            <option value="label">色标</option>
+            <option value="location">地点</option>
+          </select>
         </div>
-        <div class="field" data-scope="scatter">
-          <label>Y 字段</label>
-          <select class="select" id="fSY"><option value="">加载中…</option></select>
+        <div class="field full" data-scope="pie">
+          <label>数值统计</label>
+          <select class="select" id="fPieAgg">
+            <option value="count" selected>图片数量</option>
+            <option value="species_count">鸟种数</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="pie">
+          <label>时间类型</label>
+          <select class="select" id="fPieTimeType">
+            <option value="all" selected>所有时间</option>
+            <option value="shot_time">拍摄时间</option>
+            <option value="imported_at">导入时间</option>
+            <option value="created_at">创建时间</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="pie" id="pieTimeRangeWrap" style="display:none;">
+          <label>时间范围</label>
+          <div class="barInlineRow">
+            <div class="valRange">
+              <input class="select" type="text" id="fPieTimeStartShow" readonly />
+              <span class="sep">至</span>
+              <input class="select" type="text" id="fPieTimeEndShow" readonly />
+              <button class="btn" id="btnPiePickTime" type="button">选择范围</button>
+            </div>
+          </div>
+        </div>
+        <div class="field full" data-scope="pie">
+          <div style="font-weight:800;color:var(--text-title);margin-top:2px">筛选</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:2px">参照图库筛选面板，支持 与 / 或 / 非；分类字段不会出现在筛选项中</div>
+        </div>
+        <div class="field full" data-scope="pie">
+          <div class="scrollPanel">
+            <div id="pieFilterList" class="filterList"></div>
+          </div>
+          <div class="row" style="justify-content:flex-start;gap:10px;margin-top:8px">
+            <button class="btn" id="btnPieAddCond" type="button">添加条件</button>
+            <button class="btn" id="btnPieClearCond" type="button">清空</button>
+          </div>
+        </div>
+
+        <div class="field full" data-scope="tree">
+          <label>显示层级</label>
+          <div class="checkbox-group">
+            <label class="checkbox-label"><input type="checkbox" id="fTreeLevelOrder" checked /><span>目</span></label>
+            <label class="checkbox-label"><input type="checkbox" id="fTreeLevelFamily" checked /><span>科</span></label>
+            <label class="checkbox-label"><input type="checkbox" id="fTreeLevelGenus" checked /><span>属</span></label>
+            <label class="checkbox-label"><input type="checkbox" id="fTreeLevelSpecies" checked /><span>种</span></label>
+          </div>
+        </div>
+        <div class="field full" data-scope="tree">
+          <label>显示图片数量</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="fTreeShowCount" checked />
+            <span>在节点上显示对应物种的图片数量</span>
+          </label>
+        </div>
+        <div class="field full" data-scope="tree">
+          <label>树图布局</label>
+          <select class="select" id="fTreeLayout">
+            <option value="LR" selected>从左到右</option>
+            <option value="RL">从右到左</option>
+            <option value="TB">从上到下</option>
+            <option value="BT">从下到上</option>
+            <option value="radial">径向</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="tree">
+          <label>时间范围</label>
+          <select class="select" id="fTreeTimeType">
+            <option value="all" selected>全部时间</option>
+            <option value="custom">自定义范围</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="tree" id="treeTimeRangeWrap" style="display:none;">
+          <label>时间范围</label>
+          <div class="barInlineRow">
+            <div class="valRange">
+              <input class="select" type="text" id="fTreeTimeStartShow" readonly />
+              <span class="sep">至</span>
+              <input class="select" type="text" id="fTreeTimeEndShow" readonly />
+              <button class="btn" id="btnTreePickTime" type="button">选择范围</button>
+            </div>
+          </div>
+        </div>
+        <div class="field full" data-scope="tree">
+          <div style="font-weight:800;color:var(--text-title);margin-top:2px">筛选</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:2px">参照图库筛选面板，支持 与 / 或 / 非；分类字段不会出现在筛选项中</div>
+        </div>
+        <div class="field full" data-scope="tree">
+          <div class="scrollPanel">
+            <div id="treeFilterList" class="filterList"></div>
+          </div>
+          <div class="row" style="justify-content:flex-start;gap:10px;margin-top:8px">
+            <button class="btn" id="btnTreeAddCond" type="button">添加条件</button>
+            <button class="btn" id="btnTreeClearCond" type="button">清空</button>
+          </div>
+        </div>
+
+        <div class="field full" data-scope="scatter">
+          <label>X轴字段</label>
+          <select class="select" id="fSX">
+            <option value="score">评分</option>
+            <option value="rating" selected>评星</option>
+            <option value="iso">ISO</option>
+            <option value="shutter">快门</option>
+            <option value="fnumber">光圈</option>
+            <option value="focal_length">焦距</option>
+            <option value="shot_time">拍摄时间</option>
+            <option value="created_at">创建时间</option>
+          </select>
         </div>
         <div class="field full" data-scope="scatter">
-          <label>大小字段(可选)</label>
-          <select class="select" id="fSS"><option value="">加载中…</option></select>
+          <label>Y轴字段</label>
+          <select class="select" id="fSY">
+            <option value="count" selected>图片数量</option>
+            <option value="species_count">鸟种数</option>
+            <option value="new_count">加新数量</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="scatter">
+          <label>气泡大小</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="fScatterAutoSize" />
+            <span>根据Y轴数据自动调整</span>
+          </label>
+        </div>
+        <div class="field full" data-scope="scatter" id="scatterTimeRangeWrap" style="display:none;">
+          <label>时间范围</label>
+          <div class="barInlineRow">
+            <div class="valRange">
+              <input class="select" type="text" id="fScatterTimeStartShow" readonly />
+              <span class="sep">至</span>
+              <input class="select" type="text" id="fScatterTimeEndShow" readonly />
+              <button class="btn" id="btnScatterPickTime" type="button">选择范围</button>
+            </div>
+          </div>
+        </div>
+        <div class="field full" data-scope="scatter" id="scatterTimeGroupWrap" style="display:none;">
+          <label>时间分组</label>
+          <select class="select" id="fScatterTimeGroup">
+            <option value="day" selected>按天</option>
+            <option value="week">按周</option>
+            <option value="month">按月</option>
+            <option value="year">按年</option>
+          </select>
+        </div>
+        <div class="field full" data-scope="scatter">
+          <div style="font-weight:800;color:var(--text-title);margin-top:2px">筛选</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-top:2px">参照图库筛选面板，支持 与 / 或 / 非；X轴和Y轴字段不会出现在筛选项中</div>
+        </div>
+        <div class="field full" data-scope="scatter">
+          <div class="scrollPanel">
+            <div id="scatterFilterList" class="filterList"></div>
+          </div>
+          <div class="row" style="justify-content:flex-start;gap:10px;margin-top:8px">
+            <button class="btn" id="btnScatterAddCond" type="button">添加条件</button>
+            <button class="btn" id="btnScatterClearCond" type="button">清空</button>
+          </div>
         </div>
       </div>
       <div class="modalFoot">
@@ -1456,17 +1727,22 @@ def build_html() -> str:
       if(scope === "bar"){
         try{ barEnsureInit(); }catch(e){}
         try{ barLoadFromOptions(opt); }catch(e){}
+      }else if(scope === "number"){
+        try{ numberEnsureInit(); }catch(e){}
+        try{ numberLoadFromOptions(opt); }catch(e){}
       }else if(scope === "xy"){
         try{ $("fXField").value = String(opt.x_field || ""); refreshSelectLabel($("fXField")); }catch(e){}
         try{ $("fYAgg").value = String(opt.y_agg || "count"); refreshSelectLabel($("fYAgg")); }catch(e){}
         try{ $("fGroup").value = String(opt.group_field || ""); refreshSelectLabel($("fGroup")); }catch(e){}
       }else if(scope === "pie"){
-        try{ $("fPieCat").value = String(opt.category_field || ""); refreshSelectLabel($("fPieCat")); }catch(e){}
-        try{ $("fPieAgg").value = String(opt.value_agg || "count"); refreshSelectLabel($("fPieAgg")); }catch(e){}
+        try{ pieEnsureInit(); }catch(e){}
+        try{ pieLoadFromOptions(opt); }catch(e){}
+      }else if(scope === "tree"){
+        try{ treeEnsureInit(); }catch(e){}
+        try{ treeLoadFromOptions(opt); }catch(e){}
       }else if(scope === "scatter"){
-        try{ $("fSX").value = String(opt.x_field || ""); refreshSelectLabel($("fSX")); }catch(e){}
-        try{ $("fSY").value = String(opt.y_field || ""); refreshSelectLabel($("fSY")); }catch(e){}
-        try{ $("fSS").value = String(opt.size_field || ""); refreshSelectLabel($("fSS")); }catch(e){}
+        try{ scatterEnsureInit(); }catch(e){}
+        try{ scatterLoadFromOptions(opt); }catch(e){}
       }
     }
     function openManageModal(){ openModal("modalManage"); try{ refreshManageList(); }catch(e){} }
@@ -1997,7 +2273,12 @@ def build_html() -> str:
     }
 
     function setEditMode(on){
+      const wasEditMode = editMode;
       editMode = !!on;
+      // 从编辑模式切换到显示模式时，保存图表位置
+      if(wasEditMode && !editMode){
+        try{ saveAllChartLayouts(); }catch(e){}
+      }
       try{ document.body.classList.toggle("edit-mode", editMode); }catch(e){}
       try{ setDisabled("btnAdd", !editMode); }catch(e){}
       try{
@@ -2012,14 +2293,43 @@ def build_html() -> str:
         if(w) w.setAttribute("data-on", editMode ? "1" : "0");
       }catch(e){}
     }
+    
+    // 保存所有图表位置
+    async function saveAllChartLayouts(){
+      if(!bridge) return;
+      const layouts = [];
+      document.querySelectorAll("#desk .win").forEach(el => {
+        const cid = String(el.getAttribute("data-id") || "");
+        if(cid){
+          layouts.push({
+            chart_id: cid,
+            layout: {
+              x: parseFloat(el.style.left || "0"),
+              y: parseFloat(el.style.top || "0"),
+              w: parseFloat(el.style.width || "520"),
+              h: parseFloat(el.style.height || "360"),
+              z: parseInt(el.style.zIndex || "1"),
+              locked: String(el.getAttribute("data-lock") || "") === "1"
+            }
+          });
+        }
+      });
+      if(layouts.length > 0){
+        try{
+          await bridgeCall(bridge, "update_chart_layouts", {layouts}, token);
+        }catch(e){}
+      }
+    }
 
     function pickTypeScope(t){
       if(t === "bar") return "bar";
       if(t === "line") return "bar";
+      if(t === "number") return "number";
       const xy = ["timelineLine","bar3D"];
       if(xy.includes(t)) return "xy";
       if(t === "pie") return "pie";
       if(t === "scatter") return "scatter";
+      if(t === "tree") return "tree";
       return "none";
     }
     function pickTypeScopeByOptions(t, opt){
@@ -2042,6 +2352,9 @@ def build_html() -> str:
         try{ barEnsureInit(); }catch(e){}
         try{ barSyncModeUI(); }catch(e){}
       }
+      if(scope === "number"){
+        try{ numberEnsureInit(); }catch(e){}
+      }
     }
 
     let barInited = false;
@@ -2049,12 +2362,32 @@ def build_html() -> str:
     let barTimeEnd = "";
     let barTimeEndNow = false;
     let barTimePreset = "";
+
+    // 数据图变量
+    let numberInited = false;
+    let numberTimeStart = "";
+    let numberTimeEnd = "";
+    let numberTimeEndNow = false;
+    let numberTimePreset = "";
+
+    // 饼图变量
+    let pieInited = false;
+    let pieTimeStart = "";
+    let pieTimeEnd = "";
+    let pieTimeEndNow = false;
+    let pieTimePreset = "";
+
     function barXExcludeField(kind){
       const k = String(kind || "time");
       if(k === "time") return "拍摄时间";
       if(k === "location") return "拍摄地址";
       if(k === "rating") return "评星";
       if(k === "label") return "色标";
+      if(k === "score") return "分数";
+      if(k === "species") return "种";
+      if(k === "order") return "目";
+      if(k === "family") return "科";
+      if(k === "genus") return "属";
       return "";
     }
     function barAllFilterFields(){
@@ -2164,6 +2497,165 @@ def build_html() -> str:
     function barSetQuickRange(kind){
       const k = String(kind || "");
       const now = new Date();
+      // 检查是否为饼图上下文
+      const isPieContext = !!window._tempPieContext;
+      const isNumberContext = !!window._tempNumberContext;
+      const isScatterContext = !!window._tempScatterContext;
+      // 散点图上下文
+      if(isScatterContext){
+        if(k === "now"){
+          try{
+            const nextNow = !scatterTimeEndNow;
+            scatterTimeEndNow = nextNow;
+            if(nextNow){
+              scatterTimePreset = "now";
+            }else{
+              scatterTimePreset = "";
+            }
+            try{ $("barTimePickStart").disabled = false; }catch(e){}
+            try{ $("barTimePickEnd").disabled = nextNow; }catch(e){}
+            try{ barSyncTimePickerPresetUI(); }catch(e){}
+          }catch(e){}
+          return;
+        }
+        let start = "";
+        let end = barFmtDate(now);
+        if(k === "today"){
+          start = end;
+        }else if(k === "week"){
+          const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else if(k === "month"){
+          const s = new Date(now.getFullYear(), now.getMonth(), 1);
+          start = barFmtDate(s);
+        }else if(k === "year"){
+          const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else{
+          return;
+        }
+        try{
+          scatterTimePreset = k;
+          scatterTimeEndNow = true;
+          if($("barTimePickStart")) $("barTimePickStart").value = start;
+          if($("barTimePickEnd")) $("barTimePickEnd").value = end;
+          try{
+            $("barTimePickStart").disabled = true;
+            $("barTimePickEnd").disabled = true;
+          }catch(e){}
+          try{ barSyncTimePickerPresetUI(); }catch(e){}
+        }catch(e){}
+        return;
+      }
+      // 饼图上下文
+      if(isPieContext){
+        if(k === "now"){
+          try{
+            const nextNow = !pieTimeEndNow;
+            pieTimeEndNow = nextNow;
+            if(nextNow){
+              pieTimePreset = "now";
+            }else{
+              pieTimePreset = "";
+            }
+            try{ $("barTimePickStart").disabled = false; }catch(e){}
+            try{ $("barTimePickEnd").disabled = nextNow; }catch(e){}
+            try{ barSyncTimePickerPresetUI(); }catch(e){}
+          }catch(e){}
+          return;
+        }
+        let start = "";
+        let end = barFmtDate(now);
+        if(k === "today"){
+          start = end;
+        }else if(k === "week"){
+          const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else if(k === "month"){
+          const s = new Date(now.getFullYear(), now.getMonth(), 1);
+          start = barFmtDate(s);
+        }else if(k === "year"){
+          const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else{
+          return;
+        }
+        try{
+          const nextPreset = (pieTimePreset === k) ? "" : k;
+          pieTimePreset = nextPreset;
+          if(pieTimePreset){
+            pieTimeEndNow = true;
+            if($("barTimePickStart")) $("barTimePickStart").value = start;
+            if($("barTimePickEnd")) $("barTimePickEnd").value = end;
+            try{
+              $("barTimePickStart").disabled = true;
+              $("barTimePickEnd").disabled = true;
+            }catch(e){}
+          }else{
+            try{
+              $("barTimePickStart").disabled = false;
+              $("barTimePickEnd").disabled = !!pieTimeEndNow;
+            }catch(e){}
+          }
+          try{ barSyncTimePickerPresetUI(); }catch(e){}
+        }catch(e){}
+        return;
+      }
+      // 数据图上下文
+      if(isNumberContext){
+        if(k === "now"){
+          try{
+            const nextNow = !numberTimeEndNow;
+            numberTimeEndNow = nextNow;
+            if(nextNow){
+              numberTimePreset = "now";
+            }else{
+              numberTimePreset = "";
+            }
+            try{ $("barTimePickStart").disabled = false; }catch(e){}
+            try{ $("barTimePickEnd").disabled = nextNow; }catch(e){}
+            try{ barSyncTimePickerPresetUI(); }catch(e){}
+          }catch(e){}
+          return;
+        }
+        let start = "";
+        let end = barFmtDate(now);
+        if(k === "today"){
+          start = end;
+        }else if(k === "week"){
+          const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else if(k === "month"){
+          const s = new Date(now.getFullYear(), now.getMonth(), 1);
+          start = barFmtDate(s);
+        }else if(k === "year"){
+          const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+          start = barFmtDate(s);
+        }else{
+          return;
+        }
+        try{
+          const nextPreset = (numberTimePreset === k) ? "" : k;
+          numberTimePreset = nextPreset;
+          if(numberTimePreset){
+            numberTimeEndNow = true;
+            if($("barTimePickStart")) $("barTimePickStart").value = start;
+            if($("barTimePickEnd")) $("barTimePickEnd").value = end;
+            try{
+              $("barTimePickStart").disabled = true;
+              $("barTimePickEnd").disabled = true;
+            }catch(e){}
+          }else{
+            try{
+              $("barTimePickStart").disabled = false;
+              $("barTimePickEnd").disabled = !!numberTimeEndNow;
+            }catch(e){}
+          }
+          try{ barSyncTimePickerPresetUI(); }catch(e){}
+        }catch(e){}
+        return;
+      }
+      // 柱状图上下文
       if(k === "now"){
         try{
           const nextNow = !barTimeEndNow;
@@ -2302,7 +2794,99 @@ def build_html() -> str:
       openModal("modalBarTime");
     }
     function barApplyTimePicker(){
+      // 检查是否为饼图上下文
+      const isPieContext = !!window._tempPieContext;
+      const isNumberContext = !!window._tempNumberContext;
+      const isScatterContext = !!window._tempScatterContext;
       try{
+        // 散点图上下文
+        if(isScatterContext){
+          const preset = String(scatterTimePreset || "").trim();
+          if(preset && preset !== "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) scatterTimeStart = s;
+            scatterTimeEndNow = true;
+            scatterTimeEnd = "";
+          }else if(preset === "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) scatterTimeStart = s;
+            scatterTimeEndNow = true;
+            scatterTimeEnd = "";
+          }else{
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            const e = String(($("barTimePickEnd") && $("barTimePickEnd").value) || "").trim();
+            if(s) scatterTimeStart = s;
+            if(e){
+              scatterTimeEndNow = false;
+              scatterTimeEnd = e;
+            }else if(scatterTimeEndNow){
+              scatterTimeEnd = "";
+            }
+          }
+          scatterSyncTimeRangeUI();
+          window._tempScatterContext = false;
+          closeModal("modalBarTime");
+          return;
+        }
+        // 饼图上下文
+        if(isPieContext){
+          const preset = String(pieTimePreset || "").trim();
+          if(preset && preset !== "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) pieTimeStart = s;
+            pieTimeEndNow = true;
+            pieTimeEnd = "";
+          }else if(preset === "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) pieTimeStart = s;
+            pieTimeEndNow = true;
+            pieTimeEnd = "";
+          }else{
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            const e = String(($("barTimePickEnd") && $("barTimePickEnd").value) || "").trim();
+            if(s) pieTimeStart = s;
+            if(e){
+              pieTimeEndNow = false;
+              pieTimeEnd = e;
+            }else if(pieTimeEndNow){
+              pieTimeEnd = "";
+            }
+          }
+          pieSyncTimeRangeUI();
+          window._tempPieContext = false;
+          closeModal("modalBarTime");
+          return;
+        }
+        // 数据图上下文
+        if(isNumberContext){
+          const preset = String(numberTimePreset || "").trim();
+          if(preset && preset !== "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) numberTimeStart = s;
+            numberTimeEndNow = true;
+            numberTimeEnd = "";
+          }else if(preset === "now"){
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            if(s) numberTimeStart = s;
+            numberTimeEndNow = true;
+            numberTimeEnd = "";
+          }else{
+            const s = String(($("barTimePickStart") && $("barTimePickStart").value) || "").trim();
+            const e = String(($("barTimePickEnd") && $("barTimePickEnd").value) || "").trim();
+            if(s) numberTimeStart = s;
+            if(e){
+              numberTimeEndNow = false;
+              numberTimeEnd = e;
+            }else if(numberTimeEndNow){
+              numberTimeEnd = "";
+            }
+          }
+          numberSyncTimeRangeUI();
+          window._tempNumberContext = false;
+          closeModal("modalBarTime");
+          return;
+        }
+        // 柱状图上下文
         const preset = String(barTimePreset || "").trim();
         if(preset && preset !== "now"){
           barTimeEndNow = true;
@@ -2331,11 +2915,744 @@ def build_html() -> str:
       const kind = String(($("fBarXKind") && $("fBarXKind").value) || "time");
       const timeOn = (kind === "time");
       const locOn = (kind === "location");
+      // 控制时间相关选项的显示/隐藏
       try{ $("barTimeRangeWrap").style.display = timeOn ? "" : "none"; }catch(e){}
       try{ $("barTimeUnitWrap").style.display = timeOn ? "" : "none"; }catch(e){}
+      // 控制时间类型选择框的显示/隐藏，仅在横坐标选择时间时显示
+      try{ $("barTimeTypeWrap").style.display = timeOn ? "" : "none"; }catch(e){}
+      // 控制隐藏无数据时间选项的显示/隐藏
+      try{ $("barHideEmptyTimeWrap").style.display = timeOn ? "" : "none"; }catch(e){}
       try{ $("barLocLevelWrap").style.display = locOn ? "" : "none"; }catch(e){}
       try{ barRefreshFilterFieldOptions(); }catch(e){}
     }
+
+    // ==================== 数据图（Number）相关函数 ====================
+
+    function numberEnsureInit(){
+      if(numberInited) return;
+      numberInited = true;
+      // 数据图默认不设置时间范围（即所有时间），让用户自己选择
+      try{ numberSyncTimeRangeUI(); }catch(e){}
+      try{
+        // 使用柱状图的筛选函数，传入数据图的列表ID
+        $("btnNumberAddCond").addEventListener("click", () => { barAddFilterRow(null, "numberFilterList"); });
+        $("btnNumberClearCond").addEventListener("click", () => { barClearFilters("numberFilterList"); });
+      }catch(e){}
+      try{
+        $("btnNumberPickTime").addEventListener("click", () => { numberOpenTimePicker(); });
+        try{
+          const a = $("fNumberTimeStartShow");
+          if(a){
+            a.addEventListener("click", (ev) => {
+              const t = ev && ev.target ? ev.target : a;
+              openDatePop(t, String(numberTimeStart || ""), (v) => {
+                try{
+                  numberTimeStart = String(v || "");
+                  if(numberTimePreset){
+                    numberTimePreset = "";
+                  }
+                  if(numberTimeEndNow){
+                    numberTimeEndNow = false;
+                  }
+                  numberSyncTimeRangeUI();
+                }catch(e){}
+              });
+            });
+            a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); a.click(); } });
+          }
+          const b = $("fNumberTimeEndShow");
+          if(b){
+            b.addEventListener("click", (ev) => {
+              const t = ev && ev.target ? ev.target : b;
+              openDatePop(t, String(numberTimeEnd || ""), (v) => {
+                try{
+                  numberTimeEnd = String(v || "");
+                  if(numberTimePreset){
+                    numberTimePreset = "";
+                  }
+                  if(numberTimeEndNow){
+                    numberTimeEndNow = false;
+                  }
+                  numberSyncTimeRangeUI();
+                }catch(e){}
+              });
+            });
+            b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); b.click(); } });
+          }
+        }catch(e){}
+      }catch(e){}
+    }
+
+    function numberSyncTimeRangeUI(){
+      try{
+        const s = $("fNumberTimeStartShow");
+        const e = $("fNumberTimeEndShow");
+        if(!s || !e) return;
+        if(numberTimePreset){
+          const name = numberTimePreset === "now" ? "至今" :
+                       numberTimePreset === "today" ? "今天" :
+                       numberTimePreset === "week" ? "最近7天" :
+                       numberTimePreset === "month" ? "本月" :
+                       numberTimePreset === "year" ? "最近一年" : numberTimePreset;
+          if(numberTimePreset === "now"){
+            if(s) s.value = String(numberTimeStart || "");
+            if(e) e.value = "至今";
+          }else{
+            if(s) s.value = name;
+            if(e) e.value = name;
+          }
+          return;
+        }
+        if(s) s.value = String(numberTimeStart || "");
+        if(e) e.value = numberTimeEndNow ? "至今" : String(numberTimeEnd || "");
+      }catch(e){}
+    }
+
+    function numberOpenTimePicker(){
+      try{ numberEnsureInit(); }catch(e){}
+      try{
+        const now = new Date();
+        let displayStart = numberTimeStart || "";
+        let displayEnd = numberTimeEnd || "";
+        if(numberTimePreset && numberTimePreset !== "now"){
+          const today = barFmtDate(now);
+          if(numberTimePreset === "today"){
+            displayStart = today;
+            displayEnd = today;
+          }else if(numberTimePreset === "week"){
+            const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(numberTimePreset === "month"){
+            const s = new Date(now.getFullYear(), now.getMonth(), 1);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(numberTimePreset === "year"){
+            const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }
+        }
+        // 复用柱状图的时间选择器
+        if($("barTimePickStart")) $("barTimePickStart").value = String(displayStart || "");
+        if($("barTimePickEnd")) $("barTimePickEnd").value = String(displayEnd || "");
+        try{
+          if(numberTimePreset === "now"){
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = true;
+          }else{
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = !!numberTimeEndNow;
+          }
+        }catch(e){}
+        try{ barSyncTimePickerPresetUI(); }catch(e){}
+      }catch(e){}
+      try{ upgradeAllSelects(); }catch(e){}
+      openModal("modalBarTime");
+      // 临时保存当前上下文为数据图
+      window._tempNumberContext = true;
+    }
+
+    function numberAllFilterFields(){
+      return ["文件名","标签","路径","评星","分数","鸟的位置","色标","目","科","属","种","备注","拍摄时间","拍摄地址"];
+    }
+
+    function numberGetFilters(){
+      // 使用柱状图的筛选获取函数，传入数据图的列表ID
+      return barGetFilters("numberFilterList");
+    }
+
+    function numberLoadFromOptions(opt){
+      const o = opt && typeof opt === "object" ? opt : {};
+      try{ $("fNumberType").value = String(o.number_type || "count"); refreshSelectLabel($("fNumberType")); }catch(e){}
+      try{ $("fNumberTimeType").value = String(o.number_time_type || "shot_time"); refreshSelectLabel($("fNumberTimeType")); }catch(e){}
+      try{ numberTimePreset = String(o.number_time_preset || ""); }catch(e){ numberTimePreset = ""; }
+      try{ numberTimeStart = String(o.number_time_start || ""); }catch(e){ numberTimeStart = ""; }
+      try{ numberTimeEnd = String(o.number_time_end || ""); }catch(e){ numberTimeEnd = ""; }
+      try{ numberTimeEndNow = !!o.number_time_end_now; }catch(e){ numberTimeEndNow = false; }
+      try{ numberSyncTimeRangeUI(); }catch(e){}
+      try{
+        barClearFilters("numberFilterList");
+        const filters = o.number_filters || [];
+        for(const c of filters){
+          try{ barAddFilterRow(c, "numberFilterList"); }catch(e){}
+        }
+      }catch(e){}
+    }
+
+    // ========== 饼图相关函数 ==========
+
+    // 饼图分类字段与筛选项的映射关系
+    function pieCategoryToFilterField(cat){
+      const map = {
+        "order": "目",
+        "family": "科",
+        "genus": "属",
+        "species": "种",
+        "rating": "评星",
+        "label": "色标",
+        "location": "拍摄地址"
+      };
+      return map[cat] || "";
+    }
+
+    // 获取饼图可用的筛选字段（排除当前分类字段）
+    function pieAllFilterFields(){
+      const all = ["文件名","标签","路径","评星","分数","鸟的位置","色标","目","科","属","种","备注","拍摄时间","拍摄地址"];
+      const cat = String(($("fPieCat") && $("fPieCat").value) || "species");
+      const excluded = pieCategoryToFilterField(cat);
+      if(excluded){
+        return all.filter(f => f !== excluded);
+      }
+      return all;
+    }
+
+    // 刷新饼图筛选字段选项
+    function pieRefreshFilterFieldOptions(){
+      const list = $("pieFilterList");
+      if(!list) return;
+      const rows = Array.from(list.querySelectorAll(".filterRow"));
+      const availableFields = pieAllFilterFields();
+      for(const row of rows){
+        const fieldSel = row.querySelector("select[data-role='field']");
+        if(!fieldSel) continue;
+        const prev = String(fieldSel.value || "");
+        fieldSel.innerHTML = "";
+        for(const f of availableFields){
+          const o = document.createElement("option");
+          o.value = f;
+          o.textContent = f;
+          fieldSel.appendChild(o);
+        }
+        try{
+          if(prev && Array.from(fieldSel.options).some(o => String(o.value) === prev)){
+            fieldSel.value = prev;
+          }else{
+            fieldSel.selectedIndex = 0;
+          }
+        }catch(e){}
+        try{ refreshSelectLabel(fieldSel); }catch(e){}
+        try{ barUpdateRowUI(row); }catch(e){}
+      }
+    }
+
+    // 饼图初始化
+    function pieEnsureInit(){
+      if(pieInited) return;
+      pieInited = true;
+      try{ pieSyncTimeRangeUI(); }catch(e){}
+      try{ pieSyncTimeTypeUI(); }catch(e){}
+      // 绑定筛选按钮事件
+      try{
+        $("btnPieAddCond").addEventListener("click", () => { barAddFilterRow(null, "pieFilterList"); pieRefreshFilterFieldOptions(); });
+        $("btnPieClearCond").addEventListener("click", () => { barClearFilters("pieFilterList"); });
+      }catch(e){}
+      // 绑定时间选择按钮事件
+      try{
+        $("btnPiePickTime").addEventListener("click", () => { pieOpenTimePicker(); });
+        const a = $("fPieTimeStartShow");
+        if(a){
+          a.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : a;
+            openDatePop(t, String(pieTimeStart || ""), (v) => {
+              try{
+                pieTimeStart = String(v || "");
+                if(pieTimePreset) pieTimePreset = "";
+                if(pieTimeEndNow) pieTimeEndNow = false;
+                pieSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+          a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); a.click(); } });
+        }
+        const b = $("fPieTimeEndShow");
+        if(b){
+          b.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : b;
+            openDatePop(t, String(pieTimeEnd || ""), (v) => {
+              try{
+                pieTimeEnd = String(v || "");
+                if(pieTimePreset) pieTimePreset = "";
+                if(pieTimeEndNow) pieTimeEndNow = false;
+                pieSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+          b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); b.click(); } });
+        }
+      }catch(e){}
+      // 绑定分类字段变化事件
+      try{
+        $("fPieCat").addEventListener("change", () => { pieRefreshFilterFieldOptions(); });
+      }catch(e){}
+      // 绑定时间类型变化事件
+      try{
+        $("fPieTimeType").addEventListener("change", () => { pieSyncTimeTypeUI(); });
+      }catch(e){}
+    }
+
+    // 同步时间类型UI显示
+    function pieSyncTimeTypeUI(){
+      try{
+        const timeType = String(($("fPieTimeType") && $("fPieTimeType").value) || "all");
+        const showTimeOptions = timeType !== "all";
+        const rangeWrap = $("pieTimeRangeWrap");
+        if(rangeWrap) rangeWrap.style.display = showTimeOptions ? "" : "none";
+      }catch(e){}
+    }
+
+    // 同步时间范围UI显示
+    function pieSyncTimeRangeUI(){
+      try{
+        const s = $("fPieTimeStartShow");
+        const e = $("fPieTimeEndShow");
+        if(!s || !e) return;
+        if(pieTimePreset){
+          const name = pieTimePreset === "now" ? "至今" :
+                       pieTimePreset === "today" ? "今天" :
+                       pieTimePreset === "week" ? "最近7天" :
+                       pieTimePreset === "month" ? "本月" :
+                       pieTimePreset === "year" ? "最近一年" : pieTimePreset;
+          if(pieTimePreset === "now"){
+            if(s) s.value = String(pieTimeStart || "");
+            if(e) e.value = "至今";
+          }else{
+            if(s) s.value = name;
+            if(e) e.value = name;
+          }
+          return;
+        }
+        if(s) s.value = String(pieTimeStart || "");
+        if(e) e.value = pieTimeEndNow ? "至今" : String(pieTimeEnd || "");
+      }catch(e){}
+    }
+
+    // 打开时间选择器
+    function pieOpenTimePicker(){
+      try{ pieEnsureInit(); }catch(e){}
+      try{
+        const now = new Date();
+        let displayStart = pieTimeStart || "";
+        let displayEnd = pieTimeEnd || "";
+        if(pieTimePreset && pieTimePreset !== "now"){
+          const today = barFmtDate(now);
+          if(pieTimePreset === "today"){
+            displayStart = today;
+            displayEnd = today;
+          }else if(pieTimePreset === "week"){
+            const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(pieTimePreset === "month"){
+            const s = new Date(now.getFullYear(), now.getMonth(), 1);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(pieTimePreset === "year"){
+            const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }
+        }
+        // 复用柱状图的时间选择器
+        if($("barTimePickStart")) $("barTimePickStart").value = String(displayStart || "");
+        if($("barTimePickEnd")) $("barTimePickEnd").value = String(displayEnd || "");
+        try{
+          if(pieTimePreset === "now"){
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = true;
+          }else{
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = !!pieTimeEndNow;
+          }
+        }catch(e){}
+        try{ barSyncTimePickerPresetUI(); }catch(e){}
+      }catch(e){}
+      try{ upgradeAllSelects(); }catch(e){}
+      openModal("modalBarTime");
+      // 临时保存当前上下文为饼图
+      window._tempPieContext = true;
+    }
+
+    // 获取饼图筛选条件
+    function pieGetFilters(){
+      return barGetFilters("pieFilterList");
+    }
+
+    // 从配置加载饼图选项
+    function pieLoadFromOptions(opt){
+      try{ pieEnsureInit(); }catch(e){}
+      const o = opt && typeof opt === "object" ? opt : {};
+      try{ $("fPieCat").value = String(o.category_field || "species"); refreshSelectLabel($("fPieCat")); }catch(e){}
+      try{ $("fPieAgg").value = String(o.value_agg || "count"); refreshSelectLabel($("fPieAgg")); }catch(e){}
+      try{ $("fPieTimeType").value = String(o.pie_time_type || "all"); refreshSelectLabel($("fPieTimeType")); }catch(e){}
+      try{ pieTimePreset = String(o.pie_time_preset || ""); }catch(e){ pieTimePreset = ""; }
+      try{ pieTimeStart = String(o.pie_time_start || ""); }catch(e){ pieTimeStart = ""; }
+      try{ pieTimeEnd = String(o.pie_time_end || ""); }catch(e){ pieTimeEnd = ""; }
+      try{ pieTimeEndNow = !!o.pie_time_end_now; }catch(e){ pieTimeEndNow = false; }
+      try{ pieSyncTimeTypeUI(); }catch(e){}
+      try{ pieSyncTimeRangeUI(); }catch(e){}
+      try{
+        barClearFilters("pieFilterList");
+        const filters = o.pie_filters || [];
+        for(const c of filters){
+          try{ barAddFilterRow(c, "pieFilterList"); }catch(e){}
+        }
+        try{ pieRefreshFilterFieldOptions(); }catch(e){}
+      }catch(e){}
+    }
+
+    
+    // ========== 散点图相关函数 ==========
+    let scatterInited = false;
+    let scatterTimeStart = "";
+    let scatterTimeEnd = "";
+    let scatterTimeEndNow = false;
+    let scatterTimePreset = "";
+    
+    // 散点图字段与筛选项的映射关系
+    function scatterFieldToFilterField(field){
+      const map = {
+        "score": "分数",
+        "rating": "评星",
+        "shot_time": "拍摄时间",
+        "created_at": "创建时间"
+      };
+      return map[field] || "";
+    }
+    
+    // 同步散点图时间类型UI显示
+    function scatterSyncTimeTypeUI(){
+      try{
+        const xField = String(($("fSX") && $("fSX").value) || "rating");
+        const isXTime = (xField === "shot_time" || xField === "created_at");
+        const timeRangeWrap = $("scatterTimeRangeWrap");
+        const timeGroupWrap = $("scatterTimeGroupWrap");
+        if(timeRangeWrap) timeRangeWrap.style.display = isXTime ? "" : "none";
+        if(timeGroupWrap) timeGroupWrap.style.display = isXTime ? "" : "none";
+      }catch(e){}
+    }
+    
+    // 同步散点图时间范围UI显示
+    function scatterSyncTimeRangeUI(){
+      try{
+        const s = $("fScatterTimeStartShow");
+        const e = $("fScatterTimeEndShow");
+        if(!s || !e) return;
+        if(scatterTimePreset){
+          const name = scatterTimePreset === "now" ? "至今" :
+                       scatterTimePreset === "today" ? "今天" :
+                       scatterTimePreset === "week" ? "最近7天" :
+                       scatterTimePreset === "month" ? "本月" :
+                       scatterTimePreset === "year" ? "最近一年" : scatterTimePreset;
+          if(scatterTimePreset === "now"){
+            if(s) s.value = String(scatterTimeStart || "");
+            if(e) e.value = "至今";
+          }else{
+            if(s) s.value = name;
+            if(e) e.value = name;
+          }
+          return;
+        }
+        if(s) s.value = String(scatterTimeStart || "");
+        if(e) e.value = scatterTimeEndNow ? "至今" : String(scatterTimeEnd || "");
+      }catch(e){}
+    }
+    
+    // 打开散点图时间选择器
+    function scatterOpenTimePicker(){
+      try{ scatterEnsureInit(); }catch(e){}
+      try{
+        const now = new Date();
+        let displayStart = scatterTimeStart || "";
+        let displayEnd = scatterTimeEnd || "";
+        if(scatterTimePreset && scatterTimePreset !== "now"){
+          const today = barFmtDate(now);
+          if(scatterTimePreset === "today"){
+            displayStart = today;
+            displayEnd = today;
+          }else if(scatterTimePreset === "week"){
+            const s = new Date(now.getTime() - 6 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(scatterTimePreset === "month"){
+            const s = new Date(now.getFullYear(), now.getMonth(), 1);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }else if(scatterTimePreset === "year"){
+            const s = new Date(now.getTime() - 364 * 24 * 3600 * 1000);
+            displayStart = barFmtDate(s);
+            displayEnd = today;
+          }
+        }
+        if($("barTimePickStart")) $("barTimePickStart").value = String(displayStart || "");
+        if($("barTimePickEnd")) $("barTimePickEnd").value = String(displayEnd || "");
+        try{
+          if(scatterTimePreset === "now"){
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = true;
+          }else{
+            $("barTimePickStart").disabled = false;
+            $("barTimePickEnd").disabled = !!scatterTimeEndNow;
+          }
+        }catch(e){}
+        try{ barSyncTimePickerPresetUI(); }catch(e){}
+      }catch(e){}
+      try{ upgradeAllSelects(); }catch(e){}
+      openModal("modalBarTime");
+      window._tempScatterContext = true;
+    }
+    
+    // 获取散点图可用的筛选字段（排除当前X和Y字段）
+    function scatterAllFilterFields(){
+      const all = ["文件名","标签","路径","评星","分数","鸟的位置","色标","目","科","属","种","备注","拍摄时间","拍摄地址"];
+      const xField = String(($("fSX") && $("fSX").value) || "");
+      const yField = String(($("fSY") && $("fSY").value) || "");
+      const excludedX = scatterFieldToFilterField(xField);
+      const excludedY = scatterFieldToFilterField(yField);
+      return all.filter(f => f !== excludedX && f !== excludedY);
+    }
+    
+    // 刷新散点图筛选字段选项
+    function scatterRefreshFilterFieldOptions(){
+      const list = $("scatterFilterList");
+      if(!list) return;
+      const rows = Array.from(list.querySelectorAll(".filterRow"));
+      const availableFields = scatterAllFilterFields();
+      for(const row of rows){
+        const fieldSel = row.querySelector("select[data-role='field']");
+        if(!fieldSel) continue;
+        const prev = String(fieldSel.value || "");
+        fieldSel.innerHTML = "";
+        for(const f of availableFields){
+          const o = document.createElement("option");
+          o.value = f;
+          o.textContent = f;
+          fieldSel.appendChild(o);
+        }
+        try{
+          if(prev && Array.from(fieldSel.options).some(o => String(o.value) === prev)){
+            fieldSel.value = prev;
+          }else{
+            fieldSel.selectedIndex = 0;
+          }
+        }catch(e){}
+        try{ refreshSelectLabel(fieldSel); }catch(e){}
+        try{ barUpdateRowUI(row); }catch(e){}
+      }
+    }
+    
+    // 树图相关变量
+    let treeInited = false;
+    let treeTimeStart = "";
+    let treeTimeEnd = "";
+    
+    // 树图初始化
+    function treeEnsureInit(){
+      if(treeInited) return;
+      treeInited = true;
+      try{ treeSyncLayoutUI(); }catch(e){}
+      try{ treeSyncTimeTypeUI(); }catch(e){}
+      try{ treeSyncTimeRangeUI(); }catch(e){}
+      // 绑定筛选按钮事件
+      try{
+        $("btnTreeAddCond").addEventListener("click", () => { barAddFilterRow(null, "treeFilterList"); treeRefreshFilterFieldOptions(); });
+        $("btnTreeClearCond").addEventListener("click", () => { barClearFilters("treeFilterList"); });
+      }catch(e){}
+      // 绑定布局变化事件
+      try{
+        $("fTreeLayout").addEventListener("change", () => { treeSyncLayoutUI(); });
+      }catch(e){}
+      // 绑定时间类型变化事件
+      try{
+        $("fTreeTimeType").addEventListener("change", () => { treeSyncTimeTypeUI(); });
+      }catch(e){}
+      // 绑定时间选择按钮事件
+      try{
+        $("btnTreePickTime").addEventListener("click", () => { treeOpenTimePicker(); });
+        const a = $("fTreeTimeStartShow");
+        if(a){
+          a.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : a;
+            openDatePop(t, String(treeTimeStart || ""), (v) => {
+              try{
+                treeTimeStart = String(v || "");
+                treeSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+        }
+        const b = $("fTreeTimeEndShow");
+        if(b){
+          b.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : b;
+            openDatePop(t, String(treeTimeEnd || ""), (v) => {
+              try{
+                treeTimeEnd = String(v || "");
+                treeSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+        }
+      }catch(e){}
+    }
+    
+    // 同步树图布局UI
+    function treeSyncLayoutUI(){
+      // 布局选项已合并，无需额外处理
+    }
+    
+    // 同步树图时间类型UI
+    function treeSyncTimeTypeUI(){
+      try{
+        const timeType = String(($("fTreeTimeType") && $("fTreeTimeType").value) || "all");
+        const timeRangeWrap = $("treeTimeRangeWrap");
+        if(timeRangeWrap) timeRangeWrap.style.display = timeType === "custom" ? "" : "none";
+      }catch(e){}
+    }
+    
+    // 同步树图时间范围UI
+    function treeSyncTimeRangeUI(){
+      try{
+        const s = $("fTreeTimeStartShow");
+        const e = $("fTreeTimeEndShow");
+        if(s) s.value = String(treeTimeStart || "");
+        if(e) e.value = String(treeTimeEnd || "");
+      }catch(e){}
+    }
+    
+    // 树图时间选择器
+    function treeOpenTimePicker(){
+      try{
+        if(window.openBarTimePickerModal){
+          openBarTimePickerModal("tree");
+        }
+      }catch(e){}
+    }
+    
+    // 获取树图筛选条件
+    function treeGetFilters(){
+      return barGetFilters("treeFilterList");
+    }
+    
+    // 刷新树图筛选字段选项
+    function treeRefreshFilterFieldOptions(){
+      try{
+        const excluded = new Set(["目", "科", "属", "种", "拍摄时间"]);
+        barRefreshFilterFieldOptionsFor("treeFilterList", excluded);
+      }catch(e){}
+    }
+    
+    // 加载树图配置
+    function treeLoadFromOptions(opt){
+      try{ treeEnsureInit(); }catch(e){}
+      const o = opt && typeof opt === "object" ? opt : {};
+      // 加载层级
+      const levels = o.tree_levels || ["order", "family", "genus", "species"];
+      try{ $("fTreeLevelOrder").checked = levels.includes("order"); }catch(e){}
+      try{ $("fTreeLevelFamily").checked = levels.includes("family"); }catch(e){}
+      try{ $("fTreeLevelGenus").checked = levels.includes("genus"); }catch(e){}
+      try{ $("fTreeLevelSpecies").checked = levels.includes("species"); }catch(e){}
+      // 加载其他选项
+      try{ $("fTreeShowCount").checked = o.tree_show_count !== false; }catch(e){}
+      try{ $("fTreeLayout").value = String(o.tree_layout || "LR"); refreshSelectLabel($("fTreeLayout")); }catch(e){}
+      try{ $("fTreeTimeType").value = String(o.tree_time_type || "all"); refreshSelectLabel($("fTreeTimeType")); }catch(e){}
+      try{ treeTimeStart = String(o.tree_time_start || ""); }catch(e){ treeTimeStart = ""; }
+      try{ treeTimeEnd = String(o.tree_time_end || ""); }catch(e){ treeTimeEnd = ""; }
+      try{ treeSyncLayoutUI(); }catch(e){}
+      try{ treeSyncTimeTypeUI(); }catch(e){}
+      try{ treeSyncTimeRangeUI(); }catch(e){}
+      // 加载筛选条件
+      try{
+        barClearFilters("treeFilterList");
+        const filters = o.tree_filters || [];
+        for(const c of filters){
+          try{ barAddFilterRow(c, "treeFilterList"); }catch(e){}
+        }
+        try{ treeRefreshFilterFieldOptions(); }catch(e){}
+      }catch(e){}
+    }
+    
+    // 散点图初始化
+    function scatterEnsureInit(){
+      if(scatterInited) return;
+      scatterInited = true;
+      try{ scatterSyncTimeTypeUI(); }catch(e){}
+      try{ scatterSyncTimeRangeUI(); }catch(e){}
+      // 绑定筛选按钮事件
+      try{
+        $("btnScatterAddCond").addEventListener("click", () => { barAddFilterRow(null, "scatterFilterList"); scatterRefreshFilterFieldOptions(); });
+        $("btnScatterClearCond").addEventListener("click", () => { barClearFilters("scatterFilterList"); });
+      }catch(e){}
+      // 绑定X/Y字段变化事件
+      try{
+        $("fSX").addEventListener("change", () => { scatterRefreshFilterFieldOptions(); scatterSyncTimeTypeUI(); });
+        $("fSY").addEventListener("change", () => { scatterRefreshFilterFieldOptions(); scatterSyncTimeTypeUI(); });
+      }catch(e){}
+      // 绑定时间选择按钮事件
+      try{
+        $("btnScatterPickTime").addEventListener("click", () => { scatterOpenTimePicker(); });
+        const a = $("fScatterTimeStartShow");
+        if(a){
+          a.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : a;
+            openDatePop(t, String(scatterTimeStart || ""), (v) => {
+              try{
+                scatterTimeStart = String(v || "");
+                if(scatterTimePreset) scatterTimePreset = "";
+                if(scatterTimeEndNow) scatterTimeEndNow = false;
+                scatterSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+          a.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); a.click(); } });
+        }
+        const b = $("fScatterTimeEndShow");
+        if(b){
+          b.addEventListener("click", (ev) => {
+            const t = ev && ev.target ? ev.target : b;
+            openDatePop(t, String(scatterTimeEnd || ""), (v) => {
+              try{
+                scatterTimeEnd = String(v || "");
+                if(scatterTimePreset) scatterTimePreset = "";
+                if(scatterTimeEndNow) scatterTimeEndNow = false;
+                scatterSyncTimeRangeUI();
+              }catch(e){}
+            });
+          });
+          b.addEventListener("keydown", (ev) => { if(ev && (ev.key === "Enter" || ev.key === " ")){ ev.preventDefault(); b.click(); } });
+        }
+      }catch(e){}
+    }
+    
+    // 获取散点图筛选条件
+    function scatterGetFilters(){
+      return barGetFilters("scatterFilterList");
+    }
+    
+    // 从配置加载散点图选项
+    function scatterLoadFromOptions(opt){
+      try{ scatterEnsureInit(); }catch(e){}
+      const o = opt && typeof opt === "object" ? opt : {};
+      try{ $("fSX").value = String(o.x_field || "score"); refreshSelectLabel($("fSX")); }catch(e){}
+      try{ $("fSY").value = String(o.y_field || "count"); refreshSelectLabel($("fSY")); }catch(e){}
+      try{ $("fScatterAutoSize").checked = !!o.scatter_auto_size; }catch(e){}
+      try{ $("fScatterTimeGroup").value = String(o.scatter_time_group || "day"); refreshSelectLabel($("fScatterTimeGroup")); }catch(e){}
+      try{ scatterTimePreset = String(o.scatter_time_preset || ""); }catch(e){ scatterTimePreset = ""; }
+      try{ scatterTimeStart = String(o.scatter_time_start || ""); }catch(e){ scatterTimeStart = ""; }
+      try{ scatterTimeEnd = String(o.scatter_time_end || ""); }catch(e){ scatterTimeEnd = ""; }
+      try{ scatterTimeEndNow = !!o.scatter_time_end_now; }catch(e){ scatterTimeEndNow = false; }
+      try{ scatterSyncTimeTypeUI(); }catch(e){}
+      try{ scatterSyncTimeRangeUI(); }catch(e){}
+      try{
+        barClearFilters("scatterFilterList");
+        const filters = o.scatter_filters || [];
+        for(const c of filters){
+          try{ barAddFilterRow(c, "scatterFilterList"); }catch(e){}
+        }
+        try{ scatterRefreshFilterFieldOptions(); }catch(e){}
+      }catch(e){}
+    }
+
     function barRefreshFilterFieldOptions(){
       const kind = String(($("fBarXKind") && $("fBarXKind").value) || "time");
       const excluded = barXExcludeField(kind);
@@ -2365,13 +3682,13 @@ def build_html() -> str:
         try{ barUpdateRowUI(row); }catch(e){}
       }
     }
-    function barClearFilters(){
-      const list = $("barFilterList");
+    function barClearFilters(listId){
+      const list = $(listId || "barFilterList");
       if(!list) return;
       list.innerHTML = "";
     }
-    function barAddFilterRow(data){
-      const list = $("barFilterList");
+    function barAddFilterRow(data, listId){
+      const list = $(listId || "barFilterList");
       if(!list) return;
       const isFirst = list.children.length === 0;
       const row = document.createElement("div");
@@ -2399,10 +3716,11 @@ def build_html() -> str:
       const opSel = document.createElement("select");
       opSel.className = "select op";
       opSel.setAttribute("data-role", "op");
+      const opMap = {"=": "等于", ">=": "大于等于", "<=": "小于等于"};
       for(const v of ["=" , ">=", "<="]){
         const o = document.createElement("option");
         o.value = v;
-        o.textContent = v;
+        o.textContent = opMap[v] || v;
         opSel.appendChild(o);
       }
       opSel.style.display = "none";
@@ -2429,7 +3747,7 @@ def build_html() -> str:
       rmBtn.addEventListener("click", () => {
         try{ row.remove(); }catch(e){}
         try{
-          const first = $("barFilterList") && $("barFilterList").firstElementChild;
+          const first = $(listId || "barFilterList") && $(listId || "barFilterList").firstElementChild;
           if(first){
             const ls = first.querySelector("select[data-role='logic']");
             if(ls){
@@ -2655,8 +3973,8 @@ def build_html() -> str:
       try{ if(preset) inp.value = String(preset.value || ""); }catch(e){}
       valWrap.appendChild(inp);
     }
-    function barGetFilters(){
-      const list = $("barFilterList");
+    function barGetFilters(listId){
+      const list = $(listId || "barFilterList");
       if(!list) return [];
       const rows = Array.from(list.querySelectorAll(".filterRow"));
       const out = [];
@@ -2694,6 +4012,8 @@ def build_html() -> str:
       const o = opt && typeof opt === "object" ? opt : {};
       try{ $("fBarXKind").value = String(o.bar_x_kind || "time"); refreshSelectLabel($("fBarXKind")); }catch(e){}
       try{ $("fBarYKind").value = String(o.bar_y_kind || "count"); refreshSelectLabel($("fBarYKind")); }catch(e){}
+      // 加载时间类型选择，默认为拍摄时间
+      try{ $("fBarTimeType").value = String(o.bar_time_type || "shot_time"); refreshSelectLabel($("fBarTimeType")); }catch(e){}
       try{ barTimePreset = String(o.bar_time_preset || ""); }catch(e){ barTimePreset = ""; }
       try{ barTimeStart = String(o.bar_time_start || barTimeStart || ""); }catch(e){}
       try{ barTimeEnd = String(o.bar_time_end || ""); }catch(e){}
@@ -2707,6 +4027,7 @@ def build_html() -> str:
       try{ $("fBarTimeStep").value = String(o.bar_time_step || 1); }catch(e){}
       try{ $("fBarTimeUnit").value = String(o.bar_time_unit || "day"); refreshSelectLabel($("fBarTimeUnit")); }catch(e){}
       try{ $("fBarLocLevel").value = String(o.bar_location_level || "country"); refreshSelectLabel($("fBarLocLevel")); }catch(e){}
+      try{ $("fBarHideEmptyTime").checked = !!o.bar_ignore_empty_dates; }catch(e){}
       try{ barClearFilters(); }catch(e){}
       try{
         const fs = o.bar_filters;
@@ -2770,7 +4091,117 @@ def build_html() -> str:
       return Math.round(n / g) * g;
     }
     function clamp(v, min, max){ return Math.max(min, Math.min(max, v)); }
-    function deskRect(){ return desk.getBoundingClientRect(); }
+    function deskRect(){ 
+      const rect = desk.getBoundingClientRect();
+      // 返回一个足够大的矩形，允许动态扩展
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: Math.max(rect.width, getMinDeskWidth()),
+        height: Math.max(rect.height, getMinDeskHeight()),
+        left: rect.left,
+        top: rect.top,
+        right: Math.max(rect.right, getMinDeskWidth()),
+        bottom: Math.max(rect.bottom, getMinDeskHeight())
+      };
+    }
+    
+    function getMinDeskHeight(){
+      // 计算所有图表的底部位置，确保desk足够高
+      let maxY = window.innerHeight;
+      const wins = document.querySelectorAll("#desk .win");
+      wins.forEach(el => {
+        const y = parseFloat(el.style.top || "0");
+        const h = parseFloat(el.style.height || "360");
+        maxY = Math.max(maxY, y + h + 100);
+      });
+      return maxY;
+    }
+    
+    function getMinDeskWidth(){
+      // 计算所有图表的右边界位置，确保desk足够宽
+      let maxX = window.innerWidth;
+      const wins = document.querySelectorAll("#desk .win");
+      wins.forEach(el => {
+        const x = parseFloat(el.style.left || "0");
+        const w = parseFloat(el.style.width || "520");
+        maxX = Math.max(maxX, x + w + 100);
+      });
+      return maxX;
+    }
+    
+    function expandDeskIfNeeded(){
+      const minH = getMinDeskHeight();
+      const minW = getMinDeskWidth();
+      const currentH = desk.offsetHeight;
+      const currentW = desk.offsetWidth;
+      if(minH > currentH){
+        desk.style.height = minH + "px";
+        desk.style.minHeight = minH + "px";
+      }
+      if(minW > currentW){
+        desk.style.width = minW + "px";
+        desk.style.minWidth = minW + "px";
+      }
+      // 同时更新背景canvas的大小
+      try{
+        const gridCanvas = $("gridGuideCanvas");
+        if(gridCanvas){
+          gridCanvas.width = desk.offsetWidth;
+          gridCanvas.height = desk.offsetHeight;
+        }
+      }catch(e){}
+    }
+    
+    // 拖拽空白处移动视图
+    let isPanning = false;
+    let panStartX = 0;
+    let panStartY = 0;
+    let panStartScrollX = 0;
+    let panStartScrollY = 0;
+    
+    function initPanning(){
+      const workspace = document.querySelector('.workspace');
+      if(!workspace) return;
+      
+      workspace.addEventListener('pointerdown', (e) => {
+        // 只在点击空白处（不是图表）时触发
+        if(e.target.closest('.win')) return;
+        if(e.button !== 0) return;
+        
+        isPanning = true;
+        panStartX = e.clientX;
+        panStartY = e.clientY;
+        panStartScrollX = workspace.scrollLeft;
+        panStartScrollY = workspace.scrollTop;
+        workspace.setPointerCapture(e.pointerId);
+        workspace.style.cursor = 'grabbing';
+        e.preventDefault();
+      });
+      
+      workspace.addEventListener('pointermove', (e) => {
+        if(!isPanning) return;
+        
+        const dx = e.clientX - panStartX;
+        const dy = e.clientY - panStartY;
+        workspace.scrollLeft = panStartScrollX - dx;
+        workspace.scrollTop = panStartScrollY - dy;
+      });
+      
+      workspace.addEventListener('pointerup', (e) => {
+        if(!isPanning) return;
+        isPanning = false;
+        workspace.releasePointerCapture(e.pointerId);
+        workspace.style.cursor = '';
+      });
+      
+      workspace.addEventListener('pointercancel', (e) => {
+        if(!isPanning) return;
+        isPanning = false;
+        workspace.releasePointerCapture(e.pointerId);
+        workspace.style.cursor = '';
+      });
+    }
 
     function cssVar(name, fallback){
       try{
@@ -2871,15 +4302,24 @@ def build_html() -> str:
     function applyWindowStyle(){
       const r = document.documentElement.style;
       const dk = ui().dark;
-      r.setProperty("--card-saturate", "140%");
-      r.setProperty("--card-border-color", dk ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)");
-      r.setProperty("--card-shadow", "0 1px 2px rgba(0,0,0,0.24),0 4px 12px rgba(0,0,0,0.18),0 12px 28px rgba(0,0,0,0.12)");
-      r.setProperty("--card-layer-blur", "0px");
-      r.setProperty("--card-layer-opacity", "0");
-      r.setProperty("--card-layer-scale", "1");
-      r.setProperty("--card-overlay-color", "transparent");
-      r.setProperty("--card-overlay-opacity", "0");
-      r.setProperty("--card-overlay-image", "none");
+      // 亚克力 - 默认模式，类似Windows 11的亚克力材质
+      // 特点：背景模糊、噪点纹理、半透明、柔和边缘
+      r.setProperty("--card-saturate", "200%");
+      r.setProperty("--card-border-color", dk ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.08)");
+      r.setProperty("--card-shadow", dk 
+        ? "0 2px 8px rgba(0,0,0,0.22),0 8px 24px rgba(0,0,0,0.18),0 16px 48px rgba(0,0,0,0.12)"
+        : "0 2px 6px rgba(0,0,0,0.06),0 8px 20px rgba(0,0,0,0.04),0 16px 40px rgba(0,0,0,0.02)");
+      r.setProperty("--card-blur", dk ? "24px" : "20px");
+      r.setProperty("--card-layer-blur", dk ? "12px" : "10px");
+      r.setProperty("--card-layer-opacity", dk ? "0.20" : "0.12");
+      r.setProperty("--card-layer-scale", "1.012");
+      r.setProperty("--card-overlay-color", dk ? "rgba(25,30,45,0.55)" : "rgba(248,250,255,0.45)");
+      r.setProperty("--card-overlay-opacity", dk ? "0.70" : "0.55");
+      r.setProperty("--card-overlay-image", dk 
+        ? "linear-gradient(180deg,rgba(50,60,90,0.15) 0%,rgba(25,30,45,0.35) 100%)"
+        : "linear-gradient(180deg,rgba(255,255,255,0.60) 0%,rgba(248,250,255,0.30) 50%,rgba(240,245,255,0.10) 100%)");
+      r.setProperty("--scene-texture-opacity", dk ? "0.040" : "0.028");
+      r.setProperty("--card-noise-opacity", dk ? "0.035" : "0.025");
 
       if(windowStyle === "flat"){
         r.setProperty("--card-saturate","100%");
@@ -2889,6 +4329,7 @@ def build_html() -> str:
         r.setProperty("--card-header-bg", dk ? "#2E3B66" : "#EEF3FB");
         r.setProperty("--menu-bg", dk ? "#1F294A" : "#FFFFFF");
         r.setProperty("--scene-texture-opacity", dk ? "0.012" : "0.008");
+        r.setProperty("--card-noise-opacity", "0");
         return;
       }
       if(windowStyle === "executive"){
@@ -2906,6 +4347,7 @@ def build_html() -> str:
         r.setProperty("--card-header-bg", dk ? "rgba(20,32,60,0.60)" : "rgba(248,250,255,0.68)");
         r.setProperty("--menu-bg", dk ? "rgba(10,16,34,0.92)" : "rgba(255,255,255,0.95)");
         r.setProperty("--scene-texture-opacity", dk ? "0.022" : "0.016");
+        r.setProperty("--card-noise-opacity", "0");
         return;
       }
       if(windowStyle === "opaque"){
@@ -2914,6 +4356,7 @@ def build_html() -> str:
         r.setProperty("--card-header-bg", dk ? "#2E3A66" : "#EDF2FA");
         r.setProperty("--menu-bg", dk ? "#1F294B" : "#FFFFFF");
         r.setProperty("--scene-texture-opacity", dk ? "0.024" : "0.018");
+        r.setProperty("--card-noise-opacity", "0");
         r.setProperty("--toolbar-border", dk ? "rgba(255,255,255,0.10)" : "rgba(26,39,72,0.12)");
         return;
       }
@@ -2925,26 +4368,139 @@ def build_html() -> str:
         r.setProperty("--card-header-bg", dk ? "rgba(58,76,126,0.16)" : "rgba(242,245,250,0.24)");
         r.setProperty("--menu-bg", dk ? "rgba(28,34,62,0.26)" : "rgba(255,255,255,0.30)");
         r.setProperty("--scene-texture-opacity", dk ? "0.018" : "0.014");
+        r.setProperty("--card-noise-opacity", "0");
         return;
       }
       if(windowStyle === "frosted"){
-        r.setProperty("--card-saturate","92%");
-        r.setProperty("--card-border-color","rgba(116,136,166,0.34)");
-        r.setProperty("--card-shadow","0 6px 14px rgba(15,23,42,0.12),0 1px 4px rgba(15,23,42,0.08)");
-        r.setProperty("--card-blur","14px");
+        // 磨砂玻璃 - 柔和的毛玻璃效果，类似磨砂窗户
+        r.setProperty("--card-saturate","88%");
+        r.setProperty("--card-border-color","rgba(180,190,200,0.35)");
+        r.setProperty("--card-shadow","0 4px 16px rgba(0,0,0,0.08),0 1px 3px rgba(0,0,0,0.04)");
+        r.setProperty("--card-blur","20px");
+        r.setProperty("--card-layer-blur","10px");
+        r.setProperty("--card-layer-opacity","0.25");
+        r.setProperty("--card-layer-scale","1.02");
+        r.setProperty("--card-overlay-color","rgba(255,255,255,0.28)");
+        r.setProperty("--card-overlay-opacity","0.65");
+        r.setProperty("--card-overlay-image","linear-gradient(180deg,rgba(255,255,255,0.40) 0%,rgba(255,255,255,0.15) 50%,rgba(255,255,255,0.05) 100%)");
+        r.setProperty("--toolbar-bg","rgba(245,248,252,0.72)");
+        r.setProperty("--card-bg","rgba(250,253,255,0.38)");
+        r.setProperty("--card-header-bg","rgba(255,255,255,0.35)");
+        r.setProperty("--menu-bg","rgba(248,251,255,0.90)");
+        r.setProperty("--text","#2D3748");
+        r.setProperty("--text-title","#1A202C");
+        r.setProperty("--scene-texture-opacity","0.020");
+        r.setProperty("--card-noise-opacity","0.020");
+        return;
+      }
+      if(windowStyle === "glass"){
+        // 水晶玻璃 - 清澈透明，高光折射效果
+        r.setProperty("--card-saturate","115%");
+        r.setProperty("--card-border-color","rgba(255,255,255,0.65)");
+        r.setProperty("--card-shadow","0 2px 12px rgba(100,150,200,0.12),0 8px 32px rgba(100,150,200,0.08),inset 0 1px 0 rgba(255,255,255,0.80)");
+        r.setProperty("--card-blur","6px");
+        r.setProperty("--card-layer-blur","3px");
+        r.setProperty("--card-layer-opacity","0.08");
+        r.setProperty("--card-layer-scale","1.003");
+        r.setProperty("--card-overlay-color","rgba(255,255,255,0.45)");
+        r.setProperty("--card-overlay-opacity","0.35");
+        r.setProperty("--card-overlay-image","linear-gradient(135deg,rgba(255,255,255,0.70) 0%,rgba(255,255,255,0.25) 30%,rgba(200,220,255,0.15) 60%,rgba(255,255,255,0.10) 100%)");
+        r.setProperty("--toolbar-bg","rgba(255,255,255,0.58)");
+        r.setProperty("--card-bg","rgba(255,255,255,0.48)");
+        r.setProperty("--card-header-bg","rgba(255,255,255,0.55)");
+        r.setProperty("--menu-bg","rgba(255,255,255,0.82)");
+        r.setProperty("--text","#1e3a5f");
+        r.setProperty("--text-title","#0f2942");
+        r.setProperty("--scene-texture-opacity","0.008");
+        r.setProperty("--card-noise-opacity","0.010");
+        return;
+      }
+      if(windowStyle === "glass-dark"){
+        // 暗夜玻璃 - 深邃神秘的暗色玻璃，带有微妙的反光
+        r.setProperty("--card-saturate","90%");
+        r.setProperty("--card-border-color","rgba(255,255,255,0.08)");
+        r.setProperty("--card-shadow","0 8px 40px rgba(0,0,0,0.50),0 2px 10px rgba(0,0,0,0.30),inset 0 1px 0 rgba(255,255,255,0.05)");
+        r.setProperty("--card-blur","24px");
+        r.setProperty("--card-layer-blur","12px");
+        r.setProperty("--card-layer-opacity","0.30");
+        r.setProperty("--card-layer-scale","1.02");
+        r.setProperty("--card-overlay-color","rgba(20,25,40,0.70)");
+        r.setProperty("--card-overlay-opacity","0.75");
+        r.setProperty("--card-overlay-image","linear-gradient(180deg,rgba(60,70,100,0.25) 0%,rgba(30,35,55,0.50) 50%,rgba(15,20,35,0.60) 100%)");
+        r.setProperty("--toolbar-bg","rgba(15,18,30,0.75)");
+        r.setProperty("--card-bg","rgba(20,25,45,0.50)");
+        r.setProperty("--card-header-bg","rgba(30,35,60,0.45)");
+        r.setProperty("--menu-bg","rgba(15,18,30,0.88)");
+        r.setProperty("--text","#c8cad8");
+        r.setProperty("--text-title","#e8eaf6");
+        r.setProperty("--scene-texture-opacity","0.030");
+        r.setProperty("--card-noise-opacity","0.025");
+        return;
+      }
+      if(windowStyle === "neon"){
+        // 霓虹光效 - 发光边框效果
+        r.setProperty("--card-saturate","120%");
+        r.setProperty("--card-border-color","rgba(100,200,255,0.60)");
+        r.setProperty("--card-shadow","0 0 20px rgba(100,200,255,0.30),0 0 40px rgba(100,200,255,0.15),0 4px 12px rgba(0,0,0,0.20)");
+        r.setProperty("--card-blur","12px");
         r.setProperty("--card-layer-blur","6px");
-        r.setProperty("--card-layer-opacity","0.18");
+        r.setProperty("--card-layer-opacity","0.20");
         r.setProperty("--card-layer-scale","1.01");
-        r.setProperty("--card-overlay-color","rgba(255,255,255,0.20)");
-        r.setProperty("--card-overlay-opacity","0.56");
-        r.setProperty("--card-overlay-image","linear-gradient(180deg,rgba(255,255,255,0.28) 0%,rgba(255,255,255,0.12) 45%,rgba(255,255,255,0.04) 100%)");
-        r.setProperty("--toolbar-bg","rgba(246,250,255,0.80)");
-        r.setProperty("--card-bg","rgba(252,255,255,0.44)");
-        r.setProperty("--card-header-bg","rgba(255,255,255,0.30)");
-        r.setProperty("--menu-bg","rgba(250,253,255,0.92)");
-        r.setProperty("--text","#1F2E45");
-        r.setProperty("--text-title","#0F172A");
-        r.setProperty("--scene-texture-opacity","0.016");
+        r.setProperty("--card-overlay-color","rgba(100,200,255,0.10)");
+        r.setProperty("--card-overlay-opacity","0.50");
+        r.setProperty("--card-overlay-image","linear-gradient(180deg,rgba(100,200,255,0.15) 0%,rgba(50,100,200,0.05) 100%)");
+        r.setProperty("--toolbar-bg","rgba(10,20,40,0.80)");
+        r.setProperty("--card-bg","rgba(15,25,50,0.65)");
+        r.setProperty("--card-header-bg","rgba(20,35,70,0.55)");
+        r.setProperty("--menu-bg","rgba(10,20,40,0.90)");
+        r.setProperty("--text","#a0d8ff");
+        r.setProperty("--text-title","#64c8ff");
+        r.setProperty("--scene-texture-opacity","0.030");
+        r.setProperty("--card-noise-opacity","0.020");
+        return;
+      }
+      if(windowStyle === "cyber"){
+        // 赛博朋克 - 科技感效果
+        r.setProperty("--card-saturate","130%");
+        r.setProperty("--card-border-color","rgba(255,50,150,0.50)");
+        r.setProperty("--card-shadow","0 0 15px rgba(255,50,150,0.25),0 0 30px rgba(50,200,255,0.15),0 4px 15px rgba(0,0,0,0.30)");
+        r.setProperty("--card-blur","10px");
+        r.setProperty("--card-layer-blur","5px");
+        r.setProperty("--card-layer-opacity","0.22");
+        r.setProperty("--card-layer-scale","1.008");
+        r.setProperty("--card-overlay-color","rgba(255,50,150,0.08)");
+        r.setProperty("--card-overlay-opacity","0.55");
+        r.setProperty("--card-overlay-image","linear-gradient(135deg,rgba(255,50,150,0.12) 0%,rgba(50,200,255,0.08) 50%,rgba(100,50,200,0.12) 100%)");
+        r.setProperty("--toolbar-bg","rgba(20,10,30,0.85)");
+        r.setProperty("--card-bg","rgba(30,15,40,0.70)");
+        r.setProperty("--card-header-bg","rgba(40,20,55,0.60)");
+        r.setProperty("--menu-bg","rgba(20,10,30,0.92)");
+        r.setProperty("--text","#ff99cc");
+        r.setProperty("--text-title","#ff66aa");
+        r.setProperty("--scene-texture-opacity","0.035");
+        r.setProperty("--card-noise-opacity","0.025");
+        return;
+      }
+      if(windowStyle === "paper"){
+        // 纸质质感 - 温暖的纸张纹理，柔和的阴影
+        r.setProperty("--card-saturate","98%");
+        r.setProperty("--card-border-color","rgba(180,170,155,0.45)");
+        r.setProperty("--card-shadow","0 1px 3px rgba(0,0,0,0.06),0 4px 12px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.02)");
+        r.setProperty("--card-blur","0px");
+        r.setProperty("--card-layer-blur","0px");
+        r.setProperty("--card-layer-opacity","0.02");
+        r.setProperty("--card-layer-scale","1.0");
+        r.setProperty("--card-overlay-color","rgba(252,250,245,0.96)");
+        r.setProperty("--card-overlay-opacity","0.95");
+        r.setProperty("--card-overlay-image","linear-gradient(180deg,rgba(255,254,250,0.98) 0%,rgba(250,248,242,0.96) 100%)");
+        r.setProperty("--toolbar-bg","rgba(248,246,240,0.98)");
+        r.setProperty("--card-bg","rgba(255,253,248,0.96)");
+        r.setProperty("--card-header-bg","rgba(252,250,245,0.98)");
+        r.setProperty("--menu-bg","rgba(255,254,250,0.99)");
+        r.setProperty("--text","#3d3d3b");
+        r.setProperty("--text-title","#1f1f1d");
+        r.setProperty("--scene-texture-opacity","0.065");
+        r.setProperty("--card-noise-opacity","0.050");
         return;
       }
     }
@@ -3371,7 +4927,13 @@ def build_html() -> str:
           }
         }
       }
-      return null;
+      // 没有找到空闲位置，返回底部新位置
+      let bottomY = 0;
+      for(const ex of rects){
+        const exBottom = (ex.y || 0) + (ex.h || 0);
+        if(exBottom > bottomY) bottomY = exBottom;
+      }
+      return {x: gap, y: bottomY + gap};
     }
 
     function gridSize(){
@@ -3503,8 +5065,11 @@ def build_html() -> str:
           if(id && fixedIds.has(id)) continue;
         }catch(e){}
         if(lockedEl && el === lockedEl) continue;
-        const w0 = clamp(parseFloat(el.style.width || "520"), 320, Math.max(320, r.width - g*2));
-        const h0 = clamp(parseFloat(el.style.height || "360"), 240, Math.max(240, r.height - g*2));
+        // 最小尺寸：8x4 个格子，使用 gridSize() 获取当前格子大小
+        const minW = 8 * gridSize();
+        const minH = 4 * gridSize();
+        const w0 = clamp(parseFloat(el.style.width || "520"), minW, Math.max(minW, r.width - g*2));
+        const h0 = clamp(parseFloat(el.style.height || "360"), minH, Math.max(minH, r.height - g*2));
         let guard = 0;
         while(guard++ < 2000){
           if(x + w0 > maxW){
@@ -3562,6 +5127,7 @@ def build_html() -> str:
           <button class="tool danger" data-act="delete">删除</button>
         </div>
         <div class="refreshLamp"></div>
+        <div class="win-noise"></div>
         <div class="win-body"><div class="chart" id="c_${cid}"></div></div>
         <div class="drag-zone" title="拖拽移动"></div>
         <div class="resizer" title="拖拽缩放"></div>
@@ -3577,9 +5143,12 @@ def build_html() -> str:
       }catch(e){
         el.setAttribute("data-lock", "0");
       }
-      const r = deskRect();
-      const w = clamp(Number(lay.w || 520), 320, r.width);
-      const h = clamp(Number(lay.h || 360), 240, r.height);
+      // 最小尺寸：8x4 个格子，使用 gridSize() 获取当前格子大小
+      const minW = 8 * gridSize();
+      const minH = 4 * gridSize();
+      // 宽度和高度不再限制在当前窗口内，允许超出边界
+      const w = Math.max(minW, Number(lay.w || 520));
+      const h = Math.max(minH, Number(lay.h || 360));
       const hasX = (lay.x !== undefined && lay.x !== null);
       const hasY = (lay.y !== undefined && lay.y !== null);
       let x = hasX ? Number(lay.x) : NaN;
@@ -3594,14 +5163,17 @@ def build_html() -> str:
           y = 20 + (chartsById.size*14)%180;
         }
       }
-      x = clamp(Number(x), 0, Math.max(0, r.width - w));
-      y = clamp(Number(y), 0, Math.max(0, r.height - h));
+      // 位置不再限制在当前窗口内，允许超出边界
+      // 但如果位置无效，则使用计算出的位置
       const z = Number(lay.z || (zTop+=1));
       el.style.left = snap(x) + "px";
       el.style.top = snap(y) + "px";
       el.style.width = snap(w) + "px";
       el.style.height = snap(h) + "px";
       el.style.zIndex = String(z);
+      
+      // 扩展desk区域以容纳新图表
+      expandDeskIfNeeded();
 
       el.addEventListener("pointerdown", () => focusWin(el));
       try{
@@ -3654,10 +5226,8 @@ def build_html() -> str:
               el.setAttribute("data-lock", next ? "1" : "0");
               try{ t.textContent = next ? "已锁" : "锁定"; }catch(e){}
               try{ scheduleLayoutSave(cid, el); }catch(e){}
-              if(next){
-                try{ autoArrangeWins("", false); }catch(e){}
-                try{ scheduleAllLayoutSave(); }catch(e){}
-              }
+              // 锁定图表时不自动触发重排，保持其他图表位置不变
+              // 只有在解锁时才可能需要重排，但这里也不自动触发，让用户手动控制
               try{ setStatus(next ? "已锁定" : "已解锁"); }catch(e){}
               return;
             }
@@ -3694,20 +5264,165 @@ def build_html() -> str:
         beginGridInteract(el);
         dragZone.setPointerCapture(ev.pointerId);
         const startX = ev.clientX;
-        const startY = ev.clientY;
+        let startY = ev.clientY; // 改为let以便在滚动时更新
         const ox = parseFloat(el.style.left || "0");
-        const oy = parseFloat(el.style.top || "0");
+        let oy = parseFloat(el.style.top || "0"); // 改为let以便在滚动时更新
         const rect = deskRect();
         const w0 = parseFloat(el.style.width || "520");
         const h0 = parseFloat(el.style.height || "360");
         let lastX = ox;
         let lastY = oy;
+        // 记录上次重排时的位置
+        let lastArrangeX = ox;
+        let lastArrangeY = oy;
+        // 获取当前格子大小
+        const gSize = gridSize();
 
+        // 检测当前图表是否与其他图表重叠（距离小于一个格子）
+        function isOverlappingWithOthers(x, y, w, h) {
+          const gap = gSize; // 使用一个格子作为间隙阈值
+          const wins = Array.from(document.querySelectorAll("#desk .win"));
+          for(const other of wins){
+            const oid = String(other.getAttribute("data-id") || "");
+            if(oid === cid) continue; // 跳过自己
+            const ox = parseFloat(other.style.left || "0");
+            const oy = parseFloat(other.style.top || "0");
+            const ow = parseFloat(other.style.width || "520");
+            const oh = parseFloat(other.style.height || "360");
+            // 计算两个矩形之间的距离
+            const xDist = Math.max(0, Math.max(ox - (x + w), x - (ox + ow)));
+            const yDist = Math.max(0, Math.max(oy - (y + h), y - (oy + oh)));
+            // 如果距离小于一个格子，认为有重叠
+            if(xDist < gap && yDist < gap) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        let scrollAnimationId = null;
+        let scrollDirection = 0;
+        let lastClientY = 0;
+        let lastClientX = 0;
+        let lastScrollTop = 0;
+
+        function checkAndScroll(){
+          const workspace = document.querySelector('.workspace');
+          if(!workspace){
+            scrollAnimationId = null;
+            return;
+          }
+          // 使用鼠标位置判断是否仍在滚动区域（而不是图表边缘）
+          const workspaceRect = workspace.getBoundingClientRect();
+          const scrollZone = 80;
+          const viewBottom = workspace.scrollTop + workspaceRect.height;
+          const viewTop = workspace.scrollTop;
+          const viewRight = workspace.scrollLeft + workspaceRect.width;
+          const viewLeft = workspace.scrollLeft;
+
+          // 禁止在顶部时继续向上滚动
+          if(scrollDirection === -1 && workspace.scrollTop <= 0){
+            scrollDirection = 0;
+            scrollAnimationId = null;
+            return;
+          }
+
+          // 使用鼠标位置判断是否离开滚动区域
+          if(scrollDirection === 1 && lastClientY <= workspaceRect.bottom - scrollZone){
+            // 鼠标已离开底部滚动区域
+            scrollDirection = 0;
+            scrollAnimationId = null;
+            return;
+          }
+          if(scrollDirection === -1 && lastClientY >= workspaceRect.top + scrollZone){
+            // 鼠标已离开顶部滚动区域
+            scrollDirection = 0;
+            scrollAnimationId = null;
+            return;
+          }
+          if(scrollDirection === 0){
+            scrollAnimationId = null;
+            return;
+          }
+
+          // 计算滚动量
+          const scrollDelta = scrollDirection * 15;
+          workspace.scrollTop += scrollDelta;
+
+          // 滚动时图表在desk上的位置不变，但需要调整startY来保持鼠标和图表的相对位置
+          // 因为：ny = oy + (e.clientY - startY)
+          // 滚动后，图表在屏幕上的位置变了，需要调整startY来补偿
+          startY -= scrollDelta;
+
+          showGhost(parseFloat(el.style.left), parseFloat(el.style.top), w0, h0);
+          expandDeskIfNeeded();
+
+          scrollAnimationId = requestAnimationFrame(checkAndScroll);
+        }
+        
+        function startScrolling(direction){
+          if(scrollDirection === direction && scrollAnimationId) return;
+          scrollDirection = direction;
+          if(!scrollAnimationId){
+            scrollAnimationId = requestAnimationFrame(checkAndScroll);
+          }
+        }
+        
+        function stopAutoScroll(){
+          scrollDirection = 0;
+          if(scrollAnimationId){
+            cancelAnimationFrame(scrollAnimationId);
+            scrollAnimationId = null;
+          }
+        }
+        
         function onMove(e){
           const dx = e.clientX - startX;
           const dy = e.clientY - startY;
-          const nx = clamp(snap(ox + dx), 0, Math.max(0, rect.width - w0));
-          const ny = clamp(snap(oy + dy), 0, Math.max(0, rect.height - h0));
+          // 只有当实际移动距离超过阈值时才处理
+          if(Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+          
+          // 先计算新位置，X方向允许超出边界
+          const nx = snap(ox + dx);
+          let ny = snap(oy + dy);
+          // 限制图表不能拖动到顶部以上
+          if(ny < 0) ny = 0;
+          
+          // 更新鼠标位置
+          lastClientY = e.clientY;
+          lastClientX = e.clientX;
+
+          // 使用鼠标位置判断是否接近页面边缘，触发滚动（而不是图表边缘）
+          const workspace = document.querySelector('.workspace');
+          const workspaceRect = workspace.getBoundingClientRect();
+          const scrollZone = 80; // 触发滚动的区域大小
+          const viewBottom = workspace.scrollTop + workspaceRect.height; // 可见区域底部
+          const viewTop = workspace.scrollTop; // 可见区域顶部
+          const viewRight = workspace.scrollLeft + workspaceRect.width; // 可见区域右边界
+          const viewLeft = workspace.scrollLeft; // 可见区域左边界
+
+          // 向下滚动：鼠标接近可见区域底部
+          if(lastClientY > workspaceRect.bottom - scrollZone){
+            startScrolling(1);
+          }
+          // 向上滚动：鼠标接近可见区域顶部，且不在最顶部
+          else if(lastClientY < workspaceRect.top + scrollZone && workspace.scrollTop > 0){
+            startScrolling(-1);
+          }else{
+            stopAutoScroll();
+          }
+
+          // 水平方向自动滚动（也使用鼠标位置）
+          if(lastClientX > workspaceRect.right - scrollZone){
+            workspace.scrollLeft += 15;
+          }else if(lastClientX < workspaceRect.left + scrollZone && workspace.scrollLeft > 0){
+            workspace.scrollLeft -= 15;
+          }
+          
+          // 只有当位置实际变化时才更新
+          if(nx === lastX && ny === lastY) return;
+          lastX = nx;
+          lastY = ny;
           const cand = {x:nx, y:ny, w:w0, h:h0};
           if(hitLockedWithGap(cid, cand)){
             const candX = {x:nx, y:lastY, w:w0, h:h0};
@@ -3720,21 +5435,42 @@ def build_html() -> str:
             el.style.left = snap(lastX) + "px";
             el.style.top = snap(lastY) + "px";
             showGhost(snap(lastX), snap(lastY), w0, h0);
+            expandDeskIfNeeded();
+            // 只有当与上次重排位置相差超过1个格子且与其他图表重叠时才触发重排
+            if((Math.abs(lastX - lastArrangeX) >= gSize || Math.abs(lastY - lastArrangeY) >= gSize) &&
+               isOverlappingWithOthers(lastX, lastY, w0, h0)){
+              lastArrangeX = lastX;
+              lastArrangeY = lastY;
+              try{ autoArrangeWins(cid, false); }catch(ex){}
+            }
             return;
           }
-          lastX = nx;
-          lastY = ny;
           el.style.left = nx + "px";
           el.style.top = ny + "px";
           showGhost(nx, ny, w0, h0);
+          expandDeskIfNeeded();
+          // 只有当与上次重排位置相差超过1个格子且与其他图表重叠时才触发重排
+          if((Math.abs(nx - lastArrangeX) >= gSize || Math.abs(ny - lastArrangeY) >= gSize) &&
+             isOverlappingWithOthers(nx, ny, w0, h0)){
+            lastArrangeX = nx;
+            lastArrangeY = ny;
+            try{ autoArrangeWins(cid, false); }catch(ex){}
+          }
         }
         function onUp(e){
+          stopAutoScroll();
           dragZone.releasePointerCapture(ev.pointerId);
           dragZone.removeEventListener("pointermove", onMove);
           dragZone.removeEventListener("pointerup", onUp);
           dragZone.removeEventListener("pointercancel", onUp);
-          try{ autoArrangeWins(cid); }catch(ex){}
+          // 只有当位置实际变化且与其他图表重叠时才触发重排
+          const finalX = parseFloat(el.style.left || "0");
+          const finalY = parseFloat(el.style.top || "0");
+          if((finalX !== ox || finalY !== oy) && isOverlappingWithOthers(finalX, finalY, w0, h0)){
+            try{ autoArrangeWins(cid); }catch(ex){}
+          }
           endGridInteract();
+          expandDeskIfNeeded();
           try{ if(pauseRefreshOnMouseLeave()) bumpChartActive(cid, GRACE_REFRESH_MS); }catch(ex){}
         }
         dragZone.addEventListener("pointermove", onMove);
@@ -3760,11 +5496,38 @@ def build_html() -> str:
         const rect = deskRect();
         let lastW = ow;
         let lastH = oh;
+        // 最小尺寸：8x4 个格子，使用 gridSize() 获取当前格子大小
+        const minResizeW = 8 * gridSize();
+        const minResizeH = 4 * gridSize();
+        // 获取当前格子大小用于重叠检测
+        const gSize = gridSize();
+        // 检测当前图表是否与其他图表重叠（距离小于一个格子）
+        function isOverlappingWithOthers(x, y, w, h) {
+          const gap = gSize; // 使用一个格子作为间隙阈值
+          const wins = Array.from(document.querySelectorAll("#desk .win"));
+          for(const other of wins){
+            const oid = String(other.getAttribute("data-id") || "");
+            if(oid === cid) continue; // 跳过自己
+            const oox = parseFloat(other.style.left || "0");
+            const ooy = parseFloat(other.style.top || "0");
+            const oow = parseFloat(other.style.width || "520");
+            const ooh = parseFloat(other.style.height || "360");
+            // 计算两个矩形之间的距离
+            const xDist = Math.max(0, Math.max(oox - (x + w), x - (oox + oow)));
+            const yDist = Math.max(0, Math.max(ooy - (y + h), y - (ooy + ooh)));
+            // 如果距离小于一个格子，认为有重叠
+            if(xDist < gap && yDist < gap) {
+              return true;
+            }
+          }
+          return false;
+        }
         function onMove(e){
           const dx = e.clientX - startX;
           const dy = e.clientY - startY;
-          const nw = clamp(snap(ow + dx), 320, rect.width - ox);
-          const nh = clamp(snap(oh + dy), 240, rect.height - oy);
+          // 宽度和高度都允许超出边界
+          const nw = Math.max(minResizeW, snap(ow + dx));
+          const nh = Math.max(minResizeH, snap(oh + dy));
           const cand = {x:ox, y:oy, w:nw, h:nh};
           if(hitLockedWithGap(cid, cand)){
             const candW = {x:ox, y:oy, w:nw, h:lastH};
@@ -3786,14 +5549,32 @@ def build_html() -> str:
           showGhost(ox, oy, nw, nh);
           const inst = chartViews.get(cid);
           try{ if(inst) inst.resize(); }catch(ex){}
+          // 数据图需要重新渲染以更新数字位置
+          try{
+            const chartData = chartsById.get(cid);
+            if(chartData && chartData.type === "number"){
+              const payload = chartData._lastPayload;
+              if(payload){
+                renderChartFromPayload(cid, chartData, payload);
+              }
+            }
+          }catch(ex){}
         }
         function onUp(){
           resizer.releasePointerCapture(ev.pointerId);
           resizer.removeEventListener("pointermove", onMove);
           resizer.removeEventListener("pointerup", onUp);
           resizer.removeEventListener("pointercancel", onUp);
-          try{ autoArrangeWins(cid); }catch(ex){}
+          // 保存新的尺寸到布局
+          try{ scheduleLayoutSave(cid, el); }catch(ex){}
+          // 只有当尺寸实际变化且与其他图表重叠时才触发重排
+          const finalW = parseFloat(el.style.width || "520");
+          const finalH = parseFloat(el.style.height || "360");
+          if((finalW !== ow || finalH !== oh) && isOverlappingWithOthers(ox, oy, finalW, finalH)){
+            try{ autoArrangeWins(cid); }catch(ex){}
+          }
           endGridInteract();
+          expandDeskIfNeeded();
           try{ if(pauseRefreshOnMouseLeave()) bumpChartActive(cid, GRACE_REFRESH_MS); }catch(ex){}
         }
         resizer.addEventListener("pointermove", onMove);
@@ -3803,6 +5584,7 @@ def build_html() -> str:
 
       desk.appendChild(el);
       focusWin(el);
+      expandDeskIfNeeded();
 
       const node = el.querySelector("#c_"+cid);
       const inst = echarts.init(node, currentTheme);
@@ -3862,15 +5644,40 @@ def build_html() -> str:
       }, "base");
     }
 
-    function toTreeSeries(data){
-      return [{type:"tree", data:[data], top: 10, left: 10, bottom: 10, right: 10, symbolSize: 6, roam: true, initialTreeDepth: 3, label:{position:"left"}, leaves:{label:{position:"right"}}}];
+    function toTreeSeries(data, hasTitle, chartHeight){
+      // 计算树图的布局位置
+      const titleBottom = 24;
+      const padding = 10;
+      let top = padding;
+      let bottom = padding;
+      if(hasTitle && chartHeight){
+        // 有标题时：树图区域在标题下方和容器底部之间居中
+        const contentHeight = chartHeight - titleBottom - padding * 2;
+        top = titleBottom + padding;
+        bottom = padding;
+      }
+      return [{type:"tree", data:[data], top: top, left: padding, bottom: bottom, right: padding, symbolSize: 6, roam: true, initialTreeDepth: 3, label:{position:"left"}, leaves:{label:{position:"right"}}}];
     }
 
     function setChartOption(chartId, title, option){
       const inst = chartViews.get(chartId);
       if(!inst) return;
       const opt = stabilizeOption(Object.assign({}, option || {}), "base");
-      try{ if(opt && typeof opt === "object" && opt.title !== undefined) delete opt.title; }catch(e){}
+      // 根据设置决定是否显示标题
+      const showTitle = !!(state && state.display_options && state.display_options.show_title);
+      if(showTitle && title){
+        opt.title = {
+          text: title,
+          left: "center",
+          top: 10,
+          textStyle: {
+            fontSize: 14,
+            fontWeight: "bold"
+          }
+        };
+      }else{
+        try{ if(opt && typeof opt === "object" && opt.title !== undefined) delete opt.title; }catch(e){}
+      }
       const g = [];
       if(Array.isArray(opt.graphic)){
         g.push(...opt.graphic);
@@ -3878,6 +5685,16 @@ def build_html() -> str:
         g.push(opt.graphic);
       }
       opt.graphic = g;
+      // 保留 legend 的选中状态
+      try{
+        const currentOpt = inst.getOption();
+        if(currentOpt && currentOpt.legend && currentOpt.legend[0] && currentOpt.legend[0].selected){
+          const selected = currentOpt.legend[0].selected;
+          if(opt.legend && typeof opt.legend === "object"){
+            opt.legend.selected = selected;
+          }
+        }
+      }catch(e){}
       inst.setOption(opt, true, true);
       try{ inst.resize(); }catch(e){}
     }
@@ -3902,6 +5719,82 @@ def build_html() -> str:
         setChartOption(chartId, c.name, {graphic: messageGraphic(payload.message || "暂无数据")});
         return;
       }
+      if(kind === "number"){
+        // 保存 payload 以便缩放时重新渲染
+        const chartData = chartsById.get(chartId);
+        if(chartData){
+          chartData._lastPayload = payload;
+        }
+        // 数据图：显示单个数字
+        const value = payload.value || 0;
+        const inst = chartViews.get(chartId);
+        if(!inst) return;
+        // 获取当前主题颜色
+        const u = ui();
+        // 使用主题调色板的第一个颜色，如果没有则使用默认颜色
+        const themeColor = u && u.colorPalette && u.colorPalette[0] ? u.colorPalette[0] : "#4992FF";
+        // 检查是否显示标题（遵循全局设置）
+        const showTitle = !!(state && state.display_options && state.display_options.show_title);
+        // 检查图表是否有名称（作为标题）
+        const chartName = c.name;
+        const hasTitle = !!(showTitle && chartName && String(chartName).trim());
+        // 获取图表容器尺寸
+        const chartDom = inst.getDom();
+        const chartWidth = chartDom ? chartDom.clientWidth : 520;
+        const chartHeight = chartDom ? chartDom.clientHeight : 360;
+        // 数字字体大小
+        const fontSize = 72;
+        // 计算数字的垂直位置（像素）
+        // 标题底部约24px
+        const titleBottom = 24;
+        // 字体高度
+        const fontHeight = fontSize;
+        // 无标题时：容器高度的一半，减去字体高度的一半（让文字中心对齐）
+        // 有标题时：标题底部和容器底部的中间，减去字体高度的一半
+        const numCenterPx = hasTitle ? (titleBottom + chartHeight) / 2 : chartHeight / 2;
+        // ECharts 的 top 是文字顶部位置，所以要减去字体高度的一半
+        const numTopPx = Math.round(numCenterPx - fontHeight / 2);
+        // 数据图直接设置选项，不通过 setChartOption
+        const opt = {
+          backgroundColor: "transparent",
+          tooltip: {show: false},
+          grid: {left: 0, right: 0, top: 0, bottom: 0},
+          xAxis: {show: false, min: 0, max: 1},
+          yAxis: {show: false, min: 0, max: 1},
+          series: [],
+          graphic: [
+            {
+              type: "text",
+              left: "center",
+              top: numTopPx,
+              style: {
+                text: String(value),
+                fontSize: fontSize,
+                fontWeight: "bold",
+                // 使用当前主题的颜色
+                fill: themeColor,
+                textAlign: "center",
+                textVerticalAlign: "middle"
+              }
+            }
+          ]
+        };
+        // 只要图表有名称就显示标题
+        if(hasTitle){
+          opt.title = {
+            text: c.name,
+            left: "center",
+            top: 10,
+            textStyle: {
+              fontSize: 14,
+              fontWeight: "bold"
+            }
+          };
+        }
+        inst.setOption(opt, true, true);
+        try{ inst.resize(); }catch(e){}
+        return;
+      }
       if(kind === "xy"){
         const opt = baseOption();
         const ct = payload.chart_type || c.type;
@@ -3916,7 +5809,8 @@ def build_html() -> str:
             const unit = String(meta.unit || "day");
             xAxis.axisLabel = xAxis.axisLabel || {};
             xAxis.axisLabel.formatter = (v) => {
-              const s = String(v == null ? "" : v).replace(":", "-");
+              // 将所有冒号替换为横线，确保时间格式统一为2025-11而不是2025:11
+              const s = String(v == null ? "" : v).replace(/:/g, "-");
               if(unit === "month"){
                 return s.length >= 7 ? s.slice(0, 7) : s;
               }
@@ -3945,8 +5839,35 @@ def build_html() -> str:
             if(opt.grid.containLabel === undefined) opt.grid.containLabel = true;
             if(opt.grid.left === undefined) opt.grid.left = 42;
             if(opt.grid.right === undefined) opt.grid.right = 12;
-            if(opt.grid.top === undefined) opt.grid.top = 58;
-            if(opt.grid.bottom === undefined) opt.grid.bottom = rotate ? 52 : 34;
+            // 计算grid的top和bottom实现居中
+            const xyInst = chartViews.get(chartId);
+            if(xyInst){
+              const chartDom = xyInst.getDom();
+              const chartHeight = chartDom ? chartDom.clientHeight : 360;
+              const showTitle = !!(state && state.display_options && state.display_options.show_title);
+              const chartName = c.name;
+              const hasTitle = !!(showTitle && chartName && String(chartName).trim());
+              // X轴标签高度（考虑旋转）
+              const labelHeight = rotate ? 40 : 24;
+              // 图表内容高度
+              const contentHeight = chartHeight - labelHeight - (hasTitle ? 44 : 0);
+              // 有标题时：标题底部约24px，图表区域在标题下方和容器底部之间居中
+              if(hasTitle){
+                const titleBottom = 24;
+                const gridTop = titleBottom + contentHeight * 0.1;
+                const gridBottom = chartHeight - titleBottom - contentHeight * 0.9;
+                if(opt.grid.top === undefined) opt.grid.top = Math.max(10, Math.round(gridTop));
+                if(opt.grid.bottom === undefined) opt.grid.bottom = Math.max(labelHeight, Math.round(labelHeight + (chartHeight - titleBottom - contentHeight) / 2));
+              }else{
+                // 无标题时：图表区域在容器中间
+                const gridTop = contentHeight * 0.1;
+                if(opt.grid.top === undefined) opt.grid.top = Math.max(10, Math.round(gridTop));
+                if(opt.grid.bottom === undefined) opt.grid.bottom = Math.max(labelHeight, Math.round(labelHeight + (chartHeight - contentHeight) / 2));
+              }
+            }else{
+              if(opt.grid.top === undefined) opt.grid.top = 58;
+              if(opt.grid.bottom === undefined) opt.grid.bottom = rotate ? 52 : 34;
+            }
             let w = 0;
             try{
               const inst = chartViews.get(chartId);
@@ -3971,46 +5892,333 @@ def build_html() -> str:
       }
       if(kind === "pie"){
         const opt = baseOption();
+        const inst = chartViews.get(chartId);
+        // 计算饼图中心位置
+        let pieCenter = ['50%', '50%'];
+        if(inst){
+          const chartDom = inst.getDom();
+          const chartHeight = chartDom ? chartDom.clientHeight : 360;
+          // 检查是否显示标题
+          const showTitle = !!(state && state.display_options && state.display_options.show_title);
+          const chartName = c.name;
+          const hasTitle = !!(showTitle && chartName && String(chartName).trim());
+          // 检查是否显示图例
+          const showLegend = !!(state && state.display_options && state.display_options.show_legend !== false);
+          // 计算顶部占用高度
+          let topOffset = 0;
+          if(hasTitle){
+            topOffset = 34; // 标题高度
+          }
+          if(showLegend){
+            // 图例高度：根据数据项数量估算，每行约22px，最多2行
+            const itemCount = (payload.items || []).length;
+            const legendRows = Math.min(2, Math.ceil(itemCount / 4));
+            topOffset += legendRows * 22 + 10; // 图例高度 + 间距
+          }
+          // 饼图中心在顶部占用区域下方和容器底部之间居中
+          const centerY = (topOffset + chartHeight) / 2;
+          pieCenter = ['50%', Math.round(centerY) + 'px'];
+        }
         setChartOption(
           chartId,
           c.name,
-          stabilizeOption(Object.assign(opt, {tooltip:{trigger:"item"}, series:[{type:"pie", radius:["30%","65%"], data:(payload.items||[])}]}), "pie")
+          stabilizeOption(Object.assign(opt, {tooltip:{trigger:"item"}, series:[{type:"pie", radius:["30%","65%"], center: pieCenter, label:{distance: 25}, data:(payload.items||[])}]}), "pie")
+        );
+        return;
+      }
+      if(kind === "tree"){
+        const opt = baseOption();
+        const treeData = payload.data || {name: "鸟种", children: []};
+        const layout = payload.layout || "LR";
+        const showCount = payload.show_count !== false;
+        
+        // 获取主题颜色
+        const u = ui();
+        const textColor = u.textColor;
+        const lineColor = u.dark ? 'rgba(148,163,184,0.3)' : 'rgba(71,85,105,0.3)';
+        const colorPalette = u.colorPalette || ["#4992FF","#7CFFB2","#FDDD60","#FF6E76","#58D9F9","#05C091"];
+        
+        // 根据布局方向设置边距
+        let left, right, top, bottom;
+        if(layout === "LR"){
+          left = "5%"; right = "15%"; top = "5%"; bottom = "5%";
+        }else if(layout === "RL"){
+          left = "15%"; right = "5%"; top = "5%"; bottom = "5%";
+        }else if(layout === "TB"){
+          left = "5%"; right = "5%"; top = "8%"; bottom = "8%";
+        }else if(layout === "BT"){
+          left = "5%"; right = "5%"; top = "8%"; bottom = "8%";
+        }else{
+          left = "10%"; right = "10%"; top = "10%"; bottom = "10%";
+        }
+        
+        // 为树图节点添加层级颜色
+        function addLevelColor(node, level){
+          if(!node) return;
+          node.itemStyle = node.itemStyle || {};
+          node.itemStyle.color = colorPalette[level % colorPalette.length];
+          if(node.children && node.children.length > 0){
+            for(let i = 0; i < node.children.length; i++){
+              addLevelColor(node.children[i], level + 1);
+            }
+          }
+        }
+        addLevelColor(treeData, 0);
+        
+        // 根据布局配置树图
+        let seriesConfig;
+        if(layout === "radial"){
+          seriesConfig = {
+            type: "tree",
+            data: [treeData],
+            layout: "radial",
+            symbol: "circle",
+            symbolSize: 6,
+            initialTreeDepth: -1,
+            animationDurationUpdate: 750,
+            roam: false,
+            silent: true,
+            left: left,
+            right: right,
+            top: top,
+            bottom: bottom,
+            lineStyle: {
+              color: lineColor,
+              width: 1
+            },
+            label: {
+              show: true,
+              position: "right",
+              fontSize: 11,
+              color: textColor,
+              formatter: showCount ? function(params){ return params.name + (params.value ? ` (${params.value})` : ""); } : "{b}"
+            },
+            leaves: {
+              label: {
+                position: "right"
+              }
+            }
+          };
+        }else{
+          seriesConfig = {
+            type: "tree",
+            data: [treeData],
+            layout: "orthogonal",
+            orient: layout,
+            symbol: "circle",
+            symbolSize: 6,
+            initialTreeDepth: -1,
+            animationDurationUpdate: 750,
+            roam: false,
+            silent: true,
+            left: left,
+            right: right,
+            top: top,
+            bottom: bottom,
+            lineStyle: {
+              color: lineColor,
+              width: 1
+            },
+            label: {
+              show: true,
+              position: layout === "LR" ? "right" : layout === "RL" ? "left" : layout === "TB" ? "top" : "bottom",
+              fontSize: 11,
+              color: textColor,
+              formatter: showCount ? function(params){ return params.name + (params.value ? ` (${params.value})` : ""); } : "{b}"
+            },
+            leaves: {
+              label: {
+                position: layout === "LR" ? "right" : layout === "RL" ? "left" : layout === "TB" ? "top" : "bottom"
+              }
+            }
+          };
+        }
+        
+        setChartOption(
+          chartId,
+          c.name,
+          stabilizeOption(Object.assign(opt, {
+            color: colorPalette,
+            series: [seriesConfig]
+          }), "tree")
         );
         return;
       }
       if(kind === "scatter"){
         const opt = baseOption();
         const pts = payload.points || [];
+        const autoSize = !!payload.auto_size;
+        // 处理数据，将size信息合并到数据中
+        const seriesData = [];
+        let timeFormat = null; // null=数值, day=日期, week=周, month=月, year=年
+        
+        // 先收集所有Y值，用于计算气泡大小
+        let yMin = Infinity, yMax = -Infinity;
+        for(let i = 0; i < pts.length; i++){
+          const p = pts[i];
+          if(!Array.isArray(p) || p.length < 2) continue;
+          const y = parseFloat(p[1]);
+          if(!isNaN(y)){
+            if(y < yMin) yMin = y;
+            if(y > yMax) yMax = y;
+          }
+        }
+        const yRange = yMax - yMin;
+        
+        for(let i = 0; i < pts.length; i++){
+          const p = pts[i];
+          if(!Array.isArray(p) || p.length < 2){
+            continue;
+          }
+          const xRaw = p[0];
+          const y = parseFloat(p[1]);
+          if(isNaN(y)){
+            continue;
+          }
+          // 检测X轴时间格式
+          if(typeof xRaw === "string"){
+            if(/^\d{4}-\d{2}-\d{2}$/.test(xRaw)){
+              timeFormat = "day";
+            }else if(/^\d{4}-W\d{2}$/.test(xRaw)){
+              timeFormat = "week";
+            }else if(/^\d{4}-\d{2}$/.test(xRaw)){
+              timeFormat = "month";
+            }else if(/^\d{4}$/.test(xRaw)){
+              timeFormat = "year";
+            }
+          }
+          // 计算气泡大小
+          let size = 8;
+          if(autoSize && yRange > 0){
+            // 根据Y值在范围内的比例计算大小，范围4-20
+            const ratio = (y - yMin) / yRange;
+            size = Math.max(4, Math.min(20, 4 + ratio * 16));
+          }
+          seriesData.push({value: [xRaw, y], symbolSize: size});
+        }
+        // 计算grid实现居中
+        if(!opt.grid || typeof opt.grid !== "object"){ opt.grid = {}; }
+        const scatterInst = chartViews.get(chartId);
+        if(scatterInst){
+          const chartDom = scatterInst.getDom();
+          const chartHeight = chartDom ? chartDom.clientHeight : 360;
+          const showTitle = !!(state && state.display_options && state.display_options.show_title);
+          const chartName = c.name;
+          const hasTitle = !!(showTitle && chartName && String(chartName).trim());
+          const labelHeight = 24;
+          const contentHeight = chartHeight - labelHeight - (hasTitle ? 44 : 0);
+          if(hasTitle){
+            const titleBottom = 24;
+            const gridTop = titleBottom + contentHeight * 0.1;
+            if(opt.grid.top === undefined) opt.grid.top = Math.max(10, Math.round(gridTop));
+            if(opt.grid.bottom === undefined) opt.grid.bottom = Math.max(labelHeight, Math.round(labelHeight + (chartHeight - titleBottom - contentHeight) / 2));
+          }else{
+            const gridTop = contentHeight * 0.1;
+            if(opt.grid.top === undefined) opt.grid.top = Math.max(10, Math.round(gridTop));
+            if(opt.grid.bottom === undefined) opt.grid.bottom = Math.max(labelHeight, Math.round(labelHeight + (chartHeight - contentHeight) / 2));
+          }
+        }
+        if(opt.grid.containLabel === undefined) opt.grid.containLabel = true;
+        if(opt.grid.left === undefined) opt.grid.left = 42;
+        if(opt.grid.right === undefined) opt.grid.right = 12;
+        
+        // 根据时间格式配置X轴
+        let xAxisConfig;
+        if(timeFormat === "day"){
+          // 按天：使用时间轴，自动计算标签间隔避免重叠
+          xAxisConfig = {
+            type: "time",
+            axisLabel: {
+              formatter: "{MM}-{dd}",
+              rotate: 45,
+              interval: "auto"
+            }
+          };
+        }else if(timeFormat === "week"){
+          // 按周：使用类目轴，旋转标签
+          xAxisConfig = {
+            type: "category",
+            axisLabel: {
+              rotate: 45,
+              interval: 0
+            }
+          };
+        }else if(timeFormat === "month"){
+          // 按月：使用类目轴
+          xAxisConfig = {
+            type: "category",
+            axisLabel: {
+              interval: 0
+            }
+          };
+        }else if(timeFormat === "year"){
+          // 按年：使用类目轴
+          xAxisConfig = {
+            type: "category"
+          };
+        }else{
+          xAxisConfig = { type: "value" };
+        }
+        
         setChartOption(
           chartId,
           c.name,
           stabilizeOption(Object.assign(opt, {
             tooltip:{trigger:"item"},
-            xAxis:{type:"value"},
+            xAxis: xAxisConfig,
             yAxis:{type:"value"},
-            series:[{type:"scatter", data: pts.map(p => [p[0], p[1]]), symbolSize: (v) => Math.max(4, Math.min(16, (v && v.length>2 ? v[2] : 0) / 10 + 4))}]
+            series:[{type:"scatter", data: seriesData}]
           }), "scatter")
         );
         return;
       }
       if(kind === "tree"){
         const opt = baseOption();
+        // 计算树图位置
+        const treeInst = chartViews.get(chartId);
+        let chartHeight = 360;
+        let hasTitle = false;
+        if(treeInst){
+          const chartDom = treeInst.getDom();
+          chartHeight = chartDom ? chartDom.clientHeight : 360;
+          const showTitle = !!(state && state.display_options && state.display_options.show_title);
+          hasTitle = !!(showTitle && c.name && String(c.name).trim());
+        }
         setChartOption(
           chartId,
           c.name,
-          stabilizeOption(Object.assign(opt, {tooltip:{trigger:"item"}, series: toTreeSeries(payload.data)}), "tree")
+          stabilizeOption(Object.assign(opt, {tooltip:{trigger:"item"}, series: toTreeSeries(payload.data, hasTitle, chartHeight)}), "tree")
         );
         return;
       }
       if(kind === "graph"){
         const opt = baseOption();
+        // 计算graph位置
+        const graphInst = chartViews.get(chartId);
+        let chartHeight = 360;
+        let hasTitle = false;
+        if(graphInst){
+          const chartDom = graphInst.getDom();
+          chartHeight = chartDom ? chartDom.clientHeight : 360;
+          const showTitle = !!(state && state.display_options && state.display_options.show_title);
+          hasTitle = !!(showTitle && c.name && String(c.name).trim());
+        }
+        // 计算graph的中心位置
+        let graphCenter = ['50%', '50%'];
+        if(hasTitle){
+          const titleBottom = 24;
+          const centerY = (titleBottom + chartHeight) / 2;
+          graphCenter = ['50%', Math.round(centerY) + 'px'];
+        }else{
+          graphCenter = ['50%', Math.round(chartHeight / 2) + 'px'];
+        }
         setChartOption(
           chartId,
           c.name,
           stabilizeOption(Object.assign(opt, {
             tooltip:{},
             legend:[{data:(payload.categories||[]).map(x=>x.name)}],
-            series:[{type:"graph", layout:"force", data:(payload.nodes||[]), links:(payload.links||[]), categories:(payload.categories||[]), roam:true, label:{show:true}, force:{repulsion: 120, edgeLength: 70}}]
+            series:[{type:"graph", layout:"force", center: graphCenter, data:(payload.nodes||[]), links:(payload.links||[]), categories:(payload.categories||[]), roam:true, label:{show:true}, force:{repulsion: 120, edgeLength: 70}}]
           }), "graph")
         );
         return;
@@ -4195,11 +6403,16 @@ def build_html() -> str:
       });
     }
 
-    async function bootstrap(){
-      setLoading(true);
+    async function bootstrap(skipLoading = false){
+      // 如果不是首次加载，跳过加载遮罩以避免页面切换时的闪烁
+      if(!skipLoading){
+        setLoading(true);
+      }
       setStatus("初始化中…");
       const resp = await bridgeCall(bridge, "bootstrap", {}, token);
-      setLoading(false);
+      if(!skipLoading){
+        setLoading(false);
+      }
       if(!resp.ok){
         setStatus("初始化失败");
         return;
@@ -4212,8 +6425,8 @@ def build_html() -> str:
       fillSelect($("fPieCat"), state.fields || []);
       fillSelect($("fPieAgg"), state.aggs || []);
       fillSelect($("fSX"), state.fields || []);
-      fillSelect($("fSY"), state.fields || []);
-      fillSelect($("fSS"), state.fields || [], true);
+      // Y轴字段使用HTML中定义的静态选项（图片数量、鸟种数、加新数量）
+      // fillSelect($("fSY"), state.fields || []);
       syncAddFields();
       if(state.db_ready === false){
         const reason = String(state.db_error || "");
@@ -4294,11 +6507,30 @@ def build_html() -> str:
       try{ syncAllToggleVisuals(); }catch(e){}
 
       const arr = state.charts || [];
+      // 保存当前窗口的位置信息
+      const currentLayouts = new Map();
+      document.querySelectorAll("#desk .win").forEach(el => {
+        const cid = String(el.getAttribute("data-id") || "");
+        if(cid){
+          currentLayouts.set(cid, {
+            x: parseFloat(el.style.left || "0"),
+            y: parseFloat(el.style.top || "0"),
+            w: parseFloat(el.style.width || "520"),
+            h: parseFloat(el.style.height || "360"),
+            z: parseInt(el.style.zIndex || "1"),
+            locked: String(el.getAttribute("data-lock") || "") === "1"
+          });
+        }
+      });
       chartOrder.clear();
       orderTop = 0;
       chartsById.clear();
       chartPayloadCache.clear();
       arr.forEach((c, idx) => {
+        // 使用当前位置覆盖后端返回的位置
+        if(currentLayouts.has(c.chart_id)){
+          c.layout = Object.assign({}, c.layout || {}, currentLayouts.get(c.chart_id));
+        }
         chartsById.set(c.chart_id, c);
         const ord = idx + 1;
         chartOrder.set(c.chart_id, ord);
@@ -4383,6 +6615,7 @@ def build_html() -> str:
         options = {
           bar_x_kind: barKind,
           bar_y_kind: String(($("fBarYKind") && $("fBarYKind").value) || "count"),
+          bar_time_type: String(($("fBarTimeType") && $("fBarTimeType").value) || "shot_time"),
           bar_time_start: String(barTimeStart || ""),
           bar_time_end: String(barTimeEnd || ""),
           bar_time_end_now: !!barTimeEndNow,
@@ -4390,14 +6623,66 @@ def build_html() -> str:
           bar_time_step: Math.max(1, Math.min(3650, Number(($("fBarTimeStep") && $("fBarTimeStep").value) || 1) || 1)),
           bar_time_unit: String(($("fBarTimeUnit") && $("fBarTimeUnit").value) || "day"),
           bar_location_level: String(($("fBarLocLevel") && $("fBarLocLevel").value) || "country"),
+          bar_ignore_empty_dates: !!($("fBarHideEmptyTime") && $("fBarHideEmptyTime").checked),
           bar_filters: barGetFilters()
+        };
+      }else if(scope === "number"){
+        options = {
+          number_type: String(($("fNumberType") && $("fNumberType").value) || "count"),
+          number_time_type: String(($("fNumberTimeType") && $("fNumberTimeType").value) || "shot_time"),
+          number_time_start: String(numberTimeStart || ""),
+          number_time_end: String(numberTimeEnd || ""),
+          number_time_end_now: !!numberTimeEndNow,
+          number_time_preset: String(numberTimePreset || ""),
+          number_filters: numberGetFilters()
         };
       }else if(scope === "xy"){
         options = {x_field:$("fXField").value||"", y_agg:$("fYAgg").value||"count", group_field:$("fGroup").value||""};
       }else if(scope === "pie"){
-        options = {category_field:$("fPieCat").value||"", value_agg:$("fPieAgg").value||"count"};
+        try{ pieEnsureInit(); }catch(e){}
+        options = {
+          category_field: String(($("fPieCat") && $("fPieCat").value) || "species"),
+          value_agg: String(($("fPieAgg") && $("fPieAgg").value) || "count"),
+          pie_time_type: String(($("fPieTimeType") && $("fPieTimeType").value) || "all"),
+          pie_time_start: String(pieTimeStart || ""),
+          pie_time_end: String(pieTimeEnd || ""),
+          pie_time_end_now: !!pieTimeEndNow,
+          pie_time_preset: String(pieTimePreset || ""),
+          pie_filters: pieGetFilters()
+        };
+      }else if(scope === "tree"){
+        try{ treeEnsureInit(); }catch(e){}
+        const timeType = String(($("fTreeTimeType") && $("fTreeTimeType").value) || "all");
+        const levels = [];
+        if($("fTreeLevelOrder") && $("fTreeLevelOrder").checked) levels.push("order");
+        if($("fTreeLevelFamily") && $("fTreeLevelFamily").checked) levels.push("family");
+        if($("fTreeLevelGenus") && $("fTreeLevelGenus").checked) levels.push("genus");
+        if($("fTreeLevelSpecies") && $("fTreeLevelSpecies").checked) levels.push("species");
+        options = {
+          tree_levels: levels,
+          tree_show_count: !!($("fTreeShowCount") && $("fTreeShowCount").checked),
+          tree_layout: String(($("fTreeLayout") && $("fTreeLayout").value) || "LR"),
+          tree_time_type: timeType,
+          tree_time_start: timeType === "custom" ? String(treeTimeStart || "") : "",
+          tree_time_end: timeType === "custom" ? String(treeTimeEnd || "") : "",
+          tree_filters: treeGetFilters()
+        };
       }else if(scope === "scatter"){
-        options = {x_field:$("fSX").value||"", y_field:$("fSY").value||"", size_field:$("fSS").value||""};
+        try{ scatterEnsureInit(); }catch(e){}
+        const xField = String(($("fSX") && $("fSX").value) || "score");
+        const isXTime = (xField === "shot_time" || xField === "created_at");
+        const autoSize = !!($("fScatterAutoSize") && $("fScatterAutoSize").checked);
+        options = {
+          x_field: xField,
+          y_field: String(($("fSY") && $("fSY").value) || "count"),
+          scatter_auto_size: autoSize,
+          scatter_time_group: isXTime ? String(($("fScatterTimeGroup") && $("fScatterTimeGroup").value) || "day") : "day",
+          scatter_time_start: isXTime ? String(scatterTimeStart || "") : "",
+          scatter_time_end: isXTime ? String(scatterTimeEnd || "") : "",
+          scatter_time_end_now: isXTime ? !!scatterTimeEndNow : false,
+          scatter_time_preset: isXTime ? String(scatterTimePreset || "") : "",
+          scatter_filters: scatterGetFilters()
+        };
       }
       submitBusy = true;
       try{
@@ -4418,11 +6703,31 @@ def build_html() -> str:
             }
           }catch(e){}
           if(cid){
+            // 编辑图表时，先保存当前布局，然后使用当前布局创建新窗口
+            const el = document.querySelector('.win[data-id="'+cid+'"]');
+            let currentLayout = null;
+            if(el){
+              currentLayout = {
+                x: parseFloat(el.style.left || "0"),
+                y: parseFloat(el.style.top || "0"),
+                w: parseFloat(el.style.width || "520"),
+                h: parseFloat(el.style.height || "360"),
+                z: parseInt(el.style.zIndex || "1"),
+                locked: String(el.getAttribute("data-lock") || "") === "1"
+              };
+            }
             destroyWin(c.chart_id);
+            // 使用当前布局覆盖后端返回的布局
+            if(currentLayout){
+              c.layout = Object.assign({}, c.layout || {}, currentLayout);
+            }
           }
           createWin(c);
           try{ if(pauseRefreshOnMouseLeave()) bumpChartActive(c.chart_id, GRACE_REFRESH_MS); }catch(e){}
-          try{ autoArrangeWins(); }catch(e){}
+          // 编辑图表时不调用 autoArrangeWins，保持当前位置
+          if(!cid){
+            try{ autoArrangeWins(); }catch(e){}
+          }
           await renderChart(c.chart_id);
           refreshManageList();
           closeModal("modalAdd");
@@ -4581,6 +6886,19 @@ def build_html() -> str:
           try{ inst.resize(); }catch(e){}
         }
         try{ schedulePageWatermark(); }catch(e){}
+        try{ expandDeskIfNeeded(); }catch(e){}
+      });
+      
+      // 初始化拖拽空白处移动功能
+      try{ initPanning(); }catch(e){}
+      
+      // 页面关闭前保存图表位置
+      window.addEventListener("beforeunload", (e) => {
+        try{
+          if(typeof saveAllChartLayouts === 'function'){
+            saveAllChartLayouts();
+          }
+        }catch(ex){}
       });
     }
 

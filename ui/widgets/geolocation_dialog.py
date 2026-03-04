@@ -41,6 +41,10 @@ from utils.setting.settings_manager import SettingsManager
 from utils.sql.data_base import BirdLibraryDB
 from utils.exif.exif_utils import ExifHandleWorker, EXIF_TAG
 
+class GeoWriteSignals(QObject):
+    """地理信息写入完成信号"""
+    finished = pyqtSignal(list)  # 参数：file_paths
+
 class GeoWriteRunnable(QRunnable):
     def __init__(self, file_paths, lat, lng, location_name, table_name: str = "bird_results"):
         super().__init__()
@@ -51,6 +55,19 @@ class GeoWriteRunnable(QRunnable):
         self.table_name = str(table_name or "bird_results")
         self.db = BirdLibraryDB()
         self.exif_worker = ExifHandleWorker.get_instance()
+        self.signals = GeoWriteSignals()
+        # 计算区域代码
+        self.region_code = self._detect_region_code(lat, lng)
+    
+    def _detect_region_code(self, lat: float, lon: float) -> str:
+        """根据GPS坐标检测区域代码"""
+        try:
+            from core.recognizer.geo_filter import get_geo_index
+            geo_index = get_geo_index()
+            region_code = geo_index.detect_region_from_gps(lat, lon)
+            return region_code or ""
+        except Exception:
+            return ""
     
     def _format_coordinate_for_exif(self, value):
         # value is float degrees
@@ -80,15 +97,25 @@ class GeoWriteRunnable(QRunnable):
         if self.location_name:
             tags[EXIF_TAG.Location.value] = self.location_name
         
+        # 添加区域代码到EXIF
+        if self.region_code:
+            tags[EXIF_TAG.RegionCode.value] = self.region_code
+        
+        written_paths = []
         for path in self.file_paths:
             if not path or not os.path.exists(path):
                 continue
                 
-            # Update DB
-            self.db.update_geolocation(path, self.lat, self.lng, self.location_name or "", table_name=self.table_name)
+            # Update DB（包含区域代码）
+            self.db.update_geolocation(path, self.lat, self.lng, self.location_name or "", region_code=self.region_code, table_name=self.table_name)
             
             # Queue EXIF write
             self.exif_worker.write_tags(path, tags)
+            written_paths.append(path)
+        
+        # 发送完成信号
+        if written_paths:
+            self.signals.finished.emit(written_paths)
 
 class MapBridge(QObject):
     def __init__(self, parent=None):
@@ -105,6 +132,9 @@ class MapBridge(QObject):
 
 
 class GeoLocationDialog(BasePopupDialog):
+    # 写入完成信号
+    geo_updated = pyqtSignal(list)  # 参数：file_paths
+    
     def __init__(self, parent=None, selected_count: int = 1, file_paths=None, table_name: str = "bird_results"):
         super().__init__(parent=parent, title="设置地理位置", size=(860, 720))
         self.selected_count = max(1, int(selected_count or 1))
@@ -181,8 +211,9 @@ class GeoLocationDialog(BasePopupDialog):
             }}
         """
 
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        from ui.common.icon_utils import get_arrow_down_svg_base64
+        arrow_url = get_arrow_down_svg_base64(text_color)
         combo_style = f"""
             QComboBox {{
                 padding: 6px 10px;
@@ -901,8 +932,8 @@ class GeoLocationDialog(BasePopupDialog):
                 lon_dir = "东经" if lon >= 0 else "西经"
                 self.combo_lat_dir.setCurrentText(lat_dir)
                 self.combo_lon_dir.setCurrentText(lon_dir)
-                self.edit_lat.setText(f"{abs(lat):.6f}")
-                self.edit_lon.setText(f"{abs(lon):.6f}")
+                self.edit_lat.setText(GeoInfoManager.instance().format_coordinate(abs(lat)))
+                self.edit_lon.setText(GeoInfoManager.instance().format_coordinate(abs(lon)))
                 self._run_map_js(f"window.bpmFlyTo && window.bpmFlyTo({lat:.8f}, {lon:.8f}, 13);")
                 self._perform_reverse_geocode(float(lat), float(lon), cooldown_on_finish=self._is_tianditu_service())
                 self._toast("已定位到搜索结果")
@@ -1089,10 +1120,16 @@ class GeoLocationDialog(BasePopupDialog):
         
         # 在后台写入 DB 和 EXIF
         runnable = GeoWriteRunnable(self.file_paths, lat, lng, location_name, table_name=self.table_name)
+        runnable.signals.finished.connect(self._on_write_finished)
         QThreadPool.globalInstance().start(runnable)
         
         self._toast("正在后台写入地理位置信息...")
         self.accept()
+    
+    def _on_write_finished(self, file_paths):
+        """写入完成回调"""
+        if file_paths:
+            self.geo_updated.emit(file_paths)
 
     def keyPressEvent(self, event):
         """

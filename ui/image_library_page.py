@@ -2993,10 +2993,56 @@ class ImageLibraryPage(BaseImageBrowserPage):
         if bool(getattr(self, "_watermark_dialog_opening", False)):
             return
         self._watermark_dialog_opening = True
+        gpu_paused = False
+        main_win = None
+        old_gpu_suppress_until = None
+        old_gpu_query_running = None
+        old_sys_timer_active = None
+        old_sys_timer_interval = None
         try:
             paths = [str(p) for p in (file_paths or []) if p]
             if not paths:
                 return
+            try:
+                main_win = self.window()
+            except Exception:
+                main_win = None
+            try:
+                from utils.system.gpu_monitor import enter_gpu_query_pause
+
+                gpu_paused = bool(enter_gpu_query_pause())
+            except Exception:
+                gpu_paused = False
+            try:
+                if main_win is not None:
+                    try:
+                        if hasattr(main_win, "sys_timer") and main_win.sys_timer is not None:
+                            old_sys_timer_active = bool(main_win.sys_timer.isActive())
+                            old_sys_timer_interval = int(main_win.sys_timer.interval())
+                            main_win.sys_timer.stop()
+                    except Exception:
+                        old_sys_timer_active = None
+                        old_sys_timer_interval = None
+                    try:
+                        old_gpu_suppress_until = float(getattr(main_win, "_gpu_suppress_until", 0.0) or 0.0)
+                    except Exception:
+                        old_gpu_suppress_until = None
+                    try:
+                        old_gpu_query_running = bool(getattr(main_win, "_gpu_query_running", False))
+                    except Exception:
+                        old_gpu_query_running = None
+                    try:
+                        import time
+
+                        main_win._gpu_suppress_until = float(time.monotonic()) + 3600.0
+                    except Exception:
+                        pass
+                    try:
+                        main_win._gpu_query_running = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             from ui.dialogs.watermark_dialog import WatermarkDialog
 
             dlg = WatermarkDialog(parent=self, file_paths=paths)
@@ -3021,6 +3067,36 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开水印窗口失败: {e}")
         finally:
+            try:
+                if gpu_paused:
+                    from utils.system.gpu_monitor import exit_gpu_query_pause
+
+                    exit_gpu_query_pause()
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_gpu_suppress_until is not None:
+                    main_win._gpu_suppress_until = float(old_gpu_suppress_until)
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_gpu_query_running is not None:
+                    main_win._gpu_query_running = bool(old_gpu_query_running)
+            except Exception:
+                pass
+            try:
+                if main_win is not None and old_sys_timer_active:
+                    try:
+                        itv = int(old_sys_timer_interval) if old_sys_timer_interval is not None else 1000
+                    except Exception:
+                        itv = 1000
+                    try:
+                        if hasattr(main_win, "sys_timer") and main_win.sys_timer is not None:
+                            main_win.sys_timer.start(int(itv))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self._watermark_dialog_opening = False
 
     def _safe_rmdir_empty(self, path: str, root_limit=None):
@@ -3764,6 +3840,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 return
 
             dialog = GeoLocationDialog(self, selected_count=selected_count, file_paths=selected_paths)
+            dialog.geo_updated.connect(self._on_geo_updated)
             dialog.exec()
             try:
                 from ui.utils.window_effect import apply_dark_title_bar
@@ -3775,6 +3852,18 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 pass
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开地理位置窗口失败: {e}")
+    
+    def _on_geo_updated(self, file_paths):
+        """地理位置更新完成回调，刷新信息面板"""
+        try:
+            # 获取当前选中的图片
+            current_path = getattr(self.preview_panel, "current_image_path", None) if hasattr(self, 'preview_panel') else None
+            if current_path and current_path in file_paths:
+                # 刷新信息面板
+                if hasattr(self, 'info_panel') and self.info_panel:
+                    self.info_panel.update_info(current_path)
+        except Exception:
+            pass
 
     def show_track_match_dialog(self, checked: bool = False):
         try:
@@ -4292,6 +4381,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
         
         if not self._is_slider_dragging:
             try:
+                # 先清除所有请求记录和过期标记
+                self._requested_paths = set()
+                self._thumbnail_request_id += 1  # 增加请求ID，确保loader使用新的ID
+                
+                # 关键：同步更新 thumbnail_loader 的 active_request_id
+                try:
+                    self.thumbnail_loader.set_active_request_id(self._thumbnail_request_id)
+                except Exception:
+                    pass
+                
                 start, end, _ = self.grid_view.get_visible_index_range(extra_rows=2)
                 # 标记所有可见缩略图为过期，强制重新请求图片
                 for i in range(max(0, start), min(len(self.grid_view.thumbnails), end + 1)):
@@ -4300,16 +4399,19 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         thumb._stale_thumbnail = True
                     except Exception:
                         pass
-                    # 清除请求记录，确保 loader 重新处理
-                    if getattr(thumb, "image_info", None):
-                        path = thumb.image_info.get("path")
-                        if path:
-                            self._requested_paths.discard(self._normalize_path_key(path))
+                    # 清除缩略图数据，强制重新加载
+                    try:
+                        thumb.thumbnail_pixmap = None
+                        thumb._thumbnail_image = None
+                    except Exception:
+                        pass
                 
                 # 强制触发滚动事件，Loader 会检查 visible range 并重新加载过期/未加载的图片
                 self.on_scroll_value_changed(self.grid_view.scroll_area.verticalScrollBar().value())
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] _perform_resize loading failed: {e}")
+                import traceback
+                traceback.print_exc()
         
         # 缩略图大小改变后，可能需要加载更多才能填满屏幕
         if self.is_lazy_loading and not self._is_slider_dragging:
@@ -4393,6 +4495,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 if hasattr(self.preview_panel, "set_overlays"):
                     bbox = None
                     focus_point = None
+                    eye_coordinates = None
                     orig_size = None
                     fdj = None
                     if isinstance(img_info, dict):
@@ -4404,6 +4507,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                             focus_point = img_info.get("focus_point")
                         except Exception:
                             focus_point = None
+                        try:
+                            eye_coordinates = img_info.get("eye_coordinates")
+                        except Exception:
+                            eye_coordinates = None
                         try:
                             w0 = img_info.get("width")
                             h0 = img_info.get("height")
@@ -4420,16 +4527,38 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         except Exception:
                             fdj = None
 
-                    if (bbox is None or focus_point is None) and fdj is None:
+                    if (bbox is None or focus_point is None or eye_coordinates is None) and fdj is None:
                         rec = None
+                        uuid_val = ""
                         try:
-                            if img_info and img_info.get("uuid"):
-                                rec = self.db.get_result_by_uuid(str(img_info.get("uuid")), table_name="bird_results")
+                            uuid_val = str((img_info or {}).get("uuid") or "").strip()
                         except Exception:
-                            rec = None
+                            uuid_val = ""
+                        if uuid_val:
+                            try:
+                                rec = self.db.get_result_by_uuid(uuid_val, table_name="bird_results")
+                            except Exception:
+                                rec = None
                         if rec is None:
                             try:
-                                rec = self.db.get_result_by_path(str(image_path), table_name="bird_results")
+                                from utils.file.file_util import get_fast_id
+                                fid = ""
+                                try:
+                                    fid = str((img_info or {}).get("fast_id") or "").strip()
+                                except Exception:
+                                    fid = ""
+                                if not fid:
+                                    fid = str(get_fast_id(str(image_path or "")) or "").strip()
+                                if fid:
+                                    rec = self.db.get_result_by_fast_id(fid, table_name="bird_results")
+                                    if isinstance(rec, dict):
+                                        try:
+                                            if img_info is not None and not uuid_val:
+                                                rec_uuid = str(rec.get("uuid") or "").strip()
+                                                if rec_uuid:
+                                                    img_info["uuid"] = rec_uuid
+                                        except Exception:
+                                            pass
                             except Exception:
                                 rec = None
                         if isinstance(rec, dict):
@@ -4444,6 +4573,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
                             except Exception:
                                 pass
                             try:
+                                if eye_coordinates is None:
+                                    eye_coordinates = rec.get("eye_coordinates")
+                            except Exception:
+                                pass
+                            try:
                                 raw_fdj = rec.get("focus_detect_json")
                                 if isinstance(raw_fdj, str) and raw_fdj.strip():
                                     raw_fdj = json.loads(raw_fdj)
@@ -4452,22 +4586,30 @@ class ImageLibraryPage(BaseImageBrowserPage):
                             except Exception:
                                 fdj = None
 
-                    if bbox is None and isinstance(fdj, dict):
+                    if isinstance(fdj, dict):
                         if bbox is None:
                             try:
                                 bbox = fdj.get("bbox_orig") or fdj.get("bbox")
                             except Exception:
                                 pass
-                        if orig_size is None:
+                        if focus_point is None:
                             try:
-                                ow = fdj.get("orig_w")
-                                oh = fdj.get("orig_h")
-                                if ow and oh:
-                                    orig_size = (int(ow), int(oh))
+                                focus_point = fdj.get("focus_point")
                             except Exception:
-                                orig_size = orig_size
-
-                    self.preview_panel.set_overlays(bbox=None, focus_point=None, orig_size=None)
+                                focus_point = focus_point
+                        if eye_coordinates is None:
+                            try:
+                                eye_coordinates = fdj.get("eye_coordinates") or fdj.get("eye")
+                            except Exception:
+                                eye_coordinates = eye_coordinates
+                        try:
+                            ow = fdj.get("orig_w")
+                            oh = fdj.get("orig_h")
+                            if ow and oh:
+                                orig_size = (int(ow), int(oh))
+                        except Exception:
+                            orig_size = orig_size
+                    self.preview_panel.set_overlays(bbox=bbox, focus_point=focus_point, eye_coordinates=eye_coordinates, orig_size=orig_size)
             except Exception:
                 pass
 
@@ -6859,10 +7001,6 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self.is_lazy_loading = False
             self._startup_mask_ready = True
             return
-        try:
-            self._schedule_focus_point_backfill(files_list)
-        except Exception:
-            pass
         QTimer.singleShot(0, self.load_more_thumbnails)
         try:
             QTimer.singleShot(120, lambda: self._schedule_visible_load(immediate=True))
@@ -6916,26 +7054,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 it["focus_point"] = rec.get("focus_point")
 
     def _schedule_focus_point_backfill(self, files_list):
-        try:
-            from utils.worker.focus_point_backfill import FocusPointBackfillService
-        except Exception:
-            return
-        paths = []
-        for it in (files_list or [])[:800]:
-            if not isinstance(it, dict):
-                continue
-            if it.get("focus_point"):
-                continue
-            p = it.get("path")
-            if p:
-                paths.append(str(p))
-        if not paths:
-            return
-        FocusPointBackfillService.instance().submit(
-            paths,
-            table_name="bird_results",
-            callback=lambda updates: QTimer.singleShot(0, lambda u=updates: self._apply_focus_point_updates(u)),
-        )
+        return
 
     def _apply_focus_point_updates(self, updates: dict):
         if not isinstance(updates, dict) or not updates:

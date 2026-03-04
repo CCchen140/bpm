@@ -47,6 +47,7 @@ class PreviewPanel(QWidget):
         self.current_label = None
         self._overlay_bbox = None
         self._overlay_focus_point = None
+        self._overlay_eye_coordinates = None
         self._overlay_orig_size = None
         self._zoom_percent = 100
         self._pan_offset = (0, 0)
@@ -351,7 +352,7 @@ class PreviewPanel(QWidget):
         hover_bg = cm.get("theme.primary")
         fav_hover = cm.get("theme.background.dark")
         tooltip_text = cm.get("tooltip.text")
-        tooltip_bg = cm.get("theme.text.light")
+        tooltip_bg = cm.get("tooltip.background")
         tooltip_border = cm.get("tooltip.border")
         text_color = cm.get("popup.text.primary", "#333333")
         primary_color = cm.get("theme.primary", "#2196F3")
@@ -487,6 +488,11 @@ class PreviewPanel(QWidget):
                 background: transparent;
             }}
         """)
+        try:
+            if self.current_original_pixmap is not None:
+                QTimer.singleShot(0, self.update_image_size)
+        except Exception:
+            pass
 
     def set_task_progress(self, *, visible: bool, current: int = 0, total: int = 0, text: str = ""):
         """
@@ -704,6 +710,7 @@ class PreviewPanel(QWidget):
             self.current_original_pixmap = None
             self._overlay_bbox = None
             self._overlay_focus_point = None
+            self._overlay_eye_coordinates = None
             self._overlay_orig_size = None
             self.bottom_widget.hide()
             try:
@@ -714,9 +721,10 @@ class PreviewPanel(QWidget):
             except Exception:
                 pass
 
-    def set_overlays(self, bbox=None, focus_point=None, orig_size=None):
+    def set_overlays(self, bbox=None, focus_point=None, eye_coordinates=None, orig_size=None):
         self._overlay_bbox = bbox
         self._overlay_focus_point = focus_point
+        self._overlay_eye_coordinates = eye_coordinates
         self._overlay_orig_size = orig_size
         try:
             self.update_image_size()
@@ -729,6 +737,7 @@ class PreviewPanel(QWidget):
         self.current_original_pixmap = None
         self._overlay_bbox = None
         self._overlay_focus_point = None
+        self._overlay_eye_coordinates = None
         self._overlay_orig_size = None
         self.bottom_widget.hide()
         try:
@@ -815,6 +824,7 @@ class PreviewPanel(QWidget):
             try:
                 bbox = self._overlay_bbox
                 fp = self._overlay_focus_point
+                eye_coordinates = self._overlay_eye_coordinates
                 orig_size = self._overlay_orig_size
 
                 def _parse_bbox(v):
@@ -880,8 +890,34 @@ class PreviewPanel(QWidget):
                             return None
                     return None
 
+                def _parse_eye(v):
+                    if v is None:
+                        return None
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if not s:
+                            return None
+                        try:
+                            v = json.loads(s)
+                        except Exception:
+                            return None
+                    if isinstance(v, dict):
+                        try:
+                            if "x" in v and "y" in v:
+                                return float(v.get("x")), float(v.get("y"))
+                        except Exception:
+                            return None
+                    if isinstance(v, (list, tuple)) and len(v) >= 2:
+                        try:
+                            return float(v[0]), float(v[1])
+                        except Exception:
+                            return None
+                    return None
+
                 bbox = _parse_bbox(bbox)
                 fp = _parse_fp(fp)
+                eye_coordinates = _parse_eye(eye_coordinates)
+
                 orig_w = 0.0
                 orig_h = 0.0
                 try:
@@ -891,6 +927,135 @@ class PreviewPanel(QWidget):
                 except Exception:
                     orig_w = 0.0
                     orig_h = 0.0
+                try:
+                    # 坐标基准尺寸可能来自“未按 EXIF 旋转的原图尺寸”，而预览 pixmap 往往是按方向显示的
+                    # 这里用长宽比接近度做一次启发式纠正，避免对焦点/鸟眼框整体偏移
+                    rotated_90 = False
+                    if orig_w > 1.0 and orig_h > 1.0 and pixmap.width() > 1 and pixmap.height() > 1:
+                        r_disp = float(pixmap.width()) / float(pixmap.height())
+                        r_orig = float(orig_w) / float(orig_h)
+                        r_swap = float(orig_h) / float(orig_w) if float(orig_w) != 0.0 else r_orig
+                        if abs(r_swap - r_disp) < abs(r_orig - r_disp):
+                            orig_w, orig_h = float(orig_h), float(orig_w)
+                            rotated_90 = True
+                except Exception:
+                    rotated_90 = False
+                    pass
+
+                def _in_bounds_pt(x: float, y: float, w: float, h: float) -> bool:
+                    try:
+                        return bool(0.0 <= float(x) <= float(w) and 0.0 <= float(y) <= float(h))
+                    except Exception:
+                        return False
+
+                def _rot90_cw_pt(x: float, y: float, w: float, h: float) -> tuple[float, float]:
+                    return float(y), float(w - x)
+
+                def _rot90_ccw_pt(x: float, y: float, w: float, h: float) -> tuple[float, float]:
+                    return float(h - y), float(x)
+
+                def _rot_bbox(b, w: float, h: float, rot_fn) -> tuple[float, float, float, float] | None:
+                    if b is None:
+                        return None
+                    try:
+                        x1, y1, x2, y2 = b
+                        pts = [(float(x1), float(y1)), (float(x2), float(y1)), (float(x2), float(y2)), (float(x1), float(y2))]
+                    except Exception:
+                        return None
+                    out_pts = []
+                    for x, y in pts:
+                        try:
+                            out_pts.append(rot_fn(float(x), float(y), float(w), float(h)))
+                        except Exception:
+                            return None
+                    try:
+                        xs = [p[0] for p in out_pts]
+                        ys = [p[1] for p in out_pts]
+                        return float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
+                    except Exception:
+                        return None
+
+                def _score_overlay(b, p, e, w: float, h: float) -> float:
+                    score = 0.0
+                    if b is not None:
+                        try:
+                            x1, y1, x2, y2 = b
+                            if _in_bounds_pt(float(x1), float(y1), w, h) and _in_bounds_pt(float(x2), float(y2), w, h):
+                                score += 3.0
+                        except Exception:
+                            pass
+                    if e is not None:
+                        try:
+                            ex, ey = e
+                            if _in_bounds_pt(float(ex), float(ey), w, h):
+                                score += 2.0
+                                if b is not None:
+                                    x1, y1, x2, y2 = b
+                                    if float(x1) <= float(ex) <= float(x2) and float(y1) <= float(ey) <= float(y2):
+                                        score += 6.0
+                        except Exception:
+                            pass
+                    if p is not None:
+                        try:
+                            fx, fy = p
+                            if _in_bounds_pt(float(fx), float(fy), w, h):
+                                score += 1.0
+                                if b is not None:
+                                    x1, y1, x2, y2 = b
+                                    if float(x1) <= float(fx) <= float(x2) and float(y1) <= float(fy) <= float(y2):
+                                        score += 2.0
+                        except Exception:
+                            pass
+                    return float(score)
+
+                if rotated_90 and orig_w > 1.0 and orig_h > 1.0:
+                    try:
+                        src_w = float(orig_h)
+                        src_h = float(orig_w)
+                        dst_w = float(orig_w)
+                        dst_h = float(orig_h)
+
+                        cand = []
+                        cand.append(("none", bbox, fp, eye_coordinates))
+                        if fp is not None:
+                            fx, fy = fp
+                            cand_fp_cw = _rot90_cw_pt(float(fx), float(fy), src_w, src_h)
+                            cand_fp_ccw = _rot90_ccw_pt(float(fx), float(fy), src_w, src_h)
+                        else:
+                            cand_fp_cw = cand_fp_ccw = None
+                        if eye_coordinates is not None:
+                            ex, ey = eye_coordinates
+                            cand_eye_cw = _rot90_cw_pt(float(ex), float(ey), src_w, src_h)
+                            cand_eye_ccw = _rot90_ccw_pt(float(ex), float(ey), src_w, src_h)
+                        else:
+                            cand_eye_cw = cand_eye_ccw = None
+                        cand.append(
+                            (
+                                "cw",
+                                _rot_bbox(bbox, src_w, src_h, _rot90_cw_pt),
+                                cand_fp_cw if cand_fp_cw is not None else None,
+                                cand_eye_cw if cand_eye_cw is not None else None,
+                            )
+                        )
+                        cand.append(
+                            (
+                                "ccw",
+                                _rot_bbox(bbox, src_w, src_h, _rot90_ccw_pt),
+                                cand_fp_ccw if cand_fp_ccw is not None else None,
+                                cand_eye_ccw if cand_eye_ccw is not None else None,
+                            )
+                        )
+                        best = None
+                        best_score = -1e9
+                        for _, b1, p1, e1 in cand:
+                            sc = _score_overlay(b1, p1, e1, dst_w, dst_h)
+                            if sc > best_score:
+                                best_score = sc
+                                best = (b1, p1, e1)
+                        if best is not None:
+                            bbox, fp, eye_coordinates = best
+                    except Exception:
+                        pass
 
                 bbox_norm = False
                 if bbox is not None:
@@ -900,12 +1065,19 @@ class PreviewPanel(QWidget):
                     except Exception:
                         bbox_norm = False
                 fp_norm = False
+                eye_norm = False
                 if fp is not None:
                     try:
                         fx, fy = fp
                         fp_norm = bool(0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0)
                     except Exception:
                         fp_norm = False
+                if eye_coordinates is not None:
+                    try:
+                        ex, ey = eye_coordinates
+                        eye_norm = bool(0.0 <= ex <= 1.0 and 0.0 <= ey <= 1.0)
+                    except Exception:
+                        eye_norm = False
 
                 base_w_bbox = base_h_bbox = 0.0
                 if bbox_norm:
@@ -923,9 +1095,18 @@ class PreviewPanel(QWidget):
                     base_w_fp = float(orig_w or 0.0)
                     base_h_fp = float(orig_h or 0.0)
 
+                base_w_eye = base_h_eye = 0.0
+                if eye_norm:
+                    base_w_eye = 1.0
+                    base_h_eye = 1.0
+                else:
+                    base_w_eye = float(orig_w or 0.0)
+                    base_h_eye = float(orig_h or 0.0)
+
                 need_fill_bbox = (not bbox_norm) and (base_w_bbox <= 1.0 or base_h_bbox <= 1.0)
                 need_fill_fp = (not fp_norm) and (base_w_fp <= 1.0 or base_h_fp <= 1.0)
-                if need_fill_bbox or need_fill_fp:
+                need_fill_eye = (not eye_norm) and (base_w_eye <= 1.0 or base_h_eye <= 1.0)
+                if need_fill_bbox or need_fill_fp or need_fill_eye:
                     try:
                         ow = float(pixmap.width())
                         oh = float(pixmap.height())
@@ -936,19 +1117,28 @@ class PreviewPanel(QWidget):
                             if need_fill_fp:
                                 base_w_fp = ow
                                 base_h_fp = oh
+                            if need_fill_eye:
+                                base_w_eye = ow
+                                base_h_eye = oh
                     except Exception:
                         pass
 
-                can_draw_bbox = (bbox is not None) and (base_w_bbox > 0.0) and (base_h_bbox > 0.0)
+                # 禁用主体框显示（预览面板不显示鸟框）
+                can_draw_bbox = False
                 can_draw_fp = (fp is not None) and (base_w_fp > 0.0) and (base_h_fp > 0.0)
-                if (can_draw_bbox or can_draw_fp) and scaled_pixmap.width() > 1 and scaled_pixmap.height() > 1:
+                can_draw_eye = (eye_coordinates is not None) and (base_w_eye > 0.0) and (base_h_eye > 0.0)
+
+                if (can_draw_bbox or can_draw_fp or can_draw_eye) and scaled_pixmap.width() > 1 and scaled_pixmap.height() > 1:
                     sx_bbox = float(scaled_pixmap.width()) / float(base_w_bbox) if base_w_bbox > 0.0 else 0.0
                     sy_bbox = float(scaled_pixmap.height()) / float(base_h_bbox) if base_h_bbox > 0.0 else 0.0
                     sx_fp = float(scaled_pixmap.width()) / float(base_w_fp) if base_w_fp > 0.0 else 0.0
                     sy_fp = float(scaled_pixmap.height()) / float(base_h_fp) if base_h_fp > 0.0 else 0.0
+                    sx_eye = float(scaled_pixmap.width()) / float(base_w_eye) if base_w_eye > 0.0 else 0.0
+                    sy_eye = float(scaled_pixmap.height()) / float(base_h_eye) if base_h_eye > 0.0 else 0.0
                     cm = ColorManager.instance()
                     rect_color = cm.qcolor("border.subject_rect", default="#f50f0f")
                     fp_color = cm.qcolor("border.focus_point", default="#f50f0f")
+                    eye_color = QColor("#2196F3")
                     painter = QPainter(scaled_pixmap)
                     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                     try:
@@ -984,6 +1174,21 @@ class PreviewPanel(QWidget):
                             painter.drawEllipse(px - r, py - r, r * 2, r * 2)
                             painter.drawLine(px - r * 2, py, px + r * 2, py)
                             painter.drawLine(px, py - r * 2, px, py + r * 2)
+                        except Exception:
+                            pass
+                    if eye_coordinates is not None:
+                        try:
+                            ex, ey = eye_coordinates
+                            px = int(round(float(ex) * sx_eye))
+                            py = int(round(float(ey) * sy_eye))
+
+                            r = max(4, int(round(pen_w * 2.4)))
+                            pen = painter.pen()
+                            pen.setColor(eye_color)
+                            pen.setWidth(int(pen_w))
+                            painter.setPen(pen)
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawRect(QRect(px - r, py - r, r * 2, r * 2))
                         except Exception:
                             pass
                     painter.end()

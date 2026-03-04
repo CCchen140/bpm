@@ -78,6 +78,7 @@ class EXIF_TAG(Enum):
     GPSLatitude = "GPS:GPSLatitude"
     GPSLongitude = "GPS:GPSLongitude"
     GPSDateStamp = "GPS:GPSDateStamp"
+    RegionCode = "XMP-bmp:RegionCode"  # 区域代码，如 CN, CN-44, US-CA
 
 def _escape_perl_single_quoted(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("'", "\\'")
@@ -143,7 +144,17 @@ def _subprocess_no_console_kwargs() -> dict:
             creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
         except Exception:
             creationflags |= 0x08000000
-        return {"creationflags": creationflags}
+        try:
+            creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+        except Exception:
+            creationflags |= 0x00000008
+        try:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
+            return {"creationflags": int(creationflags), "startupinfo": si}
+        except Exception:
+            return {"creationflags": int(creationflags)}
     except Exception:
         return {}
 
@@ -710,8 +721,23 @@ class ExifHandleWorker:
             inflight = 0
             inflight_unique_files = 0
 
-        pending = max(0, queued + buffered + inflight)
-        return {"pending": pending, "queued": queued, "buffered": buffered, "inflight": inflight, "inflight_unique_files": inflight_unique_files}
+        read_queued = 0
+        try:
+            read_queued = int(self.read_queue.qsize() or 0)
+        except Exception:
+            read_queued = 0
+
+        pending_write = max(0, queued + buffered + inflight)
+        pending_all = max(0, pending_write + read_queued)
+        return {
+            "pending": pending_write,
+            "pending_all": pending_all,
+            "queued": queued,
+            "buffered": buffered,
+            "inflight": inflight,
+            "inflight_unique_files": inflight_unique_files,
+            "read_queued": read_queued,
+        }
 
     def get_task_progress(self):
         """获取任务进度"""
@@ -731,7 +757,7 @@ class ExifHandleWorker:
         cmd = [tool_path]
         if config_file:
             cmd += ["-config", config_file]
-        cmd += ["-charset", "utf8"]
+        cmd += ["-charset", "utf8", "-charset", "filename=utf8"]
         cmd += args
 
         process = subprocess.Popen(
@@ -768,12 +794,9 @@ class ExifHandleWorker:
 
         tool_path = get_exiftool_path()
         cmd = [tool_path]
-        try:
-            cfg = self._get_persistent_xmp_bmp_config_file()
-        except Exception:
-            cfg = None
-        if cfg:
-            cmd.extend(["-config", str(cfg)])
+        # 对焦点读取不使用config文件，避免影响标准EXIF标签读取
+        # 只有在需要写入XMP-bmp标签时才使用config
+        cfg = None
         cmd.extend(
             [
                 "-stay_open",
@@ -878,11 +901,13 @@ class ExifHandleWorker:
 
     def _stayopen_exec(self, args, timeout=10):
         with self._stayopen_lock:
+            t0 = time.perf_counter()
             self._start_stayopen_process()
             proc = self._stayopen_process
             if proc is None or proc.stdin is None:
                 raise RuntimeError("ExifTool stay_open 启动失败")
 
+            # 清空之前的输出
             while True:
                 try:
                     self._stayopen_stdout_queue.get_nowait()
@@ -903,7 +928,10 @@ class ExifHandleWorker:
                 if remain <= 0:
                     self._stop_stayopen_process()
                     raise TimeoutError("ExifTool stay_open 超时")
-                line = self._stayopen_stdout_queue.get(timeout=remain)
+                try:
+                    line = self._stayopen_stdout_queue.get(timeout=remain)
+                except queue.Empty:
+                    raise TimeoutError("ExifTool stay_open 队列空")
                 if str(line).strip() == "{ready}":
                     break
                 out_lines.append(line)
@@ -1171,12 +1199,14 @@ class ExifHandleWorker:
                 out.setdefault(p, None)
             return out
 
-    def _write_tags_popen(self, file_path, tags, timeout=30):
+    def _write_tags_popen(self, file_path, tags, timeout=30, already_locked: bool = False):
         # 使用 -overwrite_original_in_place：尽量直接写回原文件，避免“临时文件替换原文件”的写入方式
         # 同时使用 -P 保留原始文件时间戳，减少对外部工具（同步/备份/去重）的干扰
         args = ["-overwrite_original_in_place", "-P", "-m"]
         bmp_tag_names = set()
-        file_locks = self._acquire_file_locks([file_path])
+        file_locks = []
+        if not bool(already_locked):
+            file_locks = self._acquire_file_locks([file_path])
         self._cleanup_exiftool_tmp([file_path])
         for tag, value in (tags or {}).items():
             if not tag:
@@ -1231,7 +1261,8 @@ class ExifHandleWorker:
                             pass
                 break
         finally:
-            self._release_file_locks(file_locks)
+            if not bool(already_locked):
+                self._release_file_locks(file_locks)
 
     def _write_tags_batch(self, tasks, timeout=120):
         if not tasks:
@@ -1279,7 +1310,7 @@ class ExifHandleWorker:
                     for p, tag_map in tasks:
                         if not p or not tag_map:
                             continue
-                        self._write_tags_popen(p, tag_map, timeout=max(60, int(timeout)))
+                        self._write_tags_popen(p, tag_map, timeout=max(60, int(timeout)), already_locked=True)
                     return
                 if code != 0:
                     msg = (stderr or stdout or "").strip()
@@ -1345,6 +1376,11 @@ class ExifHandleWorker:
                         except Exception as e:
                             try:
                                 LogManager.instance().error(f"Exif 批量写入错误: {e}")
+                            except Exception:
+                                pass
+                            try:
+                                with self._task_count_lock:
+                                    self._completed_write_tasks += len(batch)
                             except Exception:
                                 pass
                         finally:
@@ -1533,6 +1569,7 @@ class ExifHandleWorker:
                 else:
                     tag_args.append(f"-{ts}")
 
+        data = []
         try:
             args = ["-j", "-SourceFile"]
             args.extend(tag_args)
@@ -1560,6 +1597,12 @@ class ExifHandleWorker:
                 if not src:
                     continue
                 orig = str(path_map.get(src) or "")
+                # 如果直接匹配失败，尝试使用normcase匹配
+                if not orig:
+                    for k, v in path_map.items():
+                        if os.path.normcase(k) == os.path.normcase(src):
+                            orig = v
+                            break
                 if not orig:
                     continue
                 out[orig] = meta
@@ -1697,7 +1740,7 @@ class ExifHandleWorker:
         import tempfile
         arg_file = None
         config_file = None
-        processed_count = 0
+        processed_count = len(chunk)
         file_locks = []
 
         try:
@@ -1739,7 +1782,6 @@ class ExifHandleWorker:
                             bmp_tag_names.add(bmp_name)
                         f.write(f"-{tag}={value}\n")
                     f.write("-execute\n")
-                    processed_count += 1
                 arg_file = f.name
 
             config_file = self._get_persistent_xmp_bmp_config_file() if bmp_tag_names else None
@@ -1798,10 +1840,10 @@ class ExifHandleWorker:
                 except Exception:
                     pass
                 try:
-                    for p, tags in chunk:
+                    for p, tags in processed_chunk:
                         if not p or not tags:
                             continue
-                        self._write_tags_popen(p, tags, timeout=60)
+                        self._write_tags_popen(p, tags, timeout=60, already_locked=True)
                     break
                 except Exception:
                     raise
@@ -1811,7 +1853,6 @@ class ExifHandleWorker:
                 LogManager.instance().warning(f"UpdateWorker-{worker_id} 批量更新异常: {e}")
             except Exception:
                 pass
-            processed_count = 0 # 异常时认为未成功处理
         finally:
             if arg_file and os.path.exists(arg_file):
                 try:

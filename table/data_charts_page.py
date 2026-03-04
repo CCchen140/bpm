@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ui.utils.color_manager import ColorManager
@@ -108,11 +109,18 @@ class DataChartsPage(QWidget):
         self._bridge = ChartsWebBridge(self._manager, parent=self)
 
         self.web = QWebEngineView(self)
+        # 设置WebEngineView的背景色为深色，与页面主题一致，防止页面加载时出现闪烁
+        self.web.setStyleSheet("background-color: #0c0e1a;")
         if QWebEnginePage is not None:
             try:
                 self.web.setPage(_ChartsWebPage(self.web, host=self))
             except Exception:
                 pass
+        # 在设置页面之后再设置背景颜色
+        try:
+            self.web.page().setBackgroundColor(QColor("#0c0e1a"))
+        except Exception:
+            pass
         self.channel = QWebChannel(self.web.page())
         self.channel.registerObject("bridge", self._bridge)
         self.web.page().setWebChannel(self.channel)
@@ -258,6 +266,40 @@ class DataChartsPage(QWidget):
         text = cm.get("theme.text.dark", "#222222")
         self.setStyleSheet(f"background-color: {bg};")
         label.setStyleSheet(f"font-size: 13px; color: {text};")
+
+    def hideEvent(self, event):
+        """页面隐藏时保存图表位置"""
+        try:
+            self._save_chart_layouts()
+        except Exception:
+            pass
+        super().hideEvent(event)
+
+    def _save_chart_layouts(self):
+        """保存图表位置"""
+        try:
+            if not hasattr(self, "web") or self.web is None:
+                return
+            page = self.web.page()
+            if page is None:
+                return
+            # 执行JavaScript保存图表位置
+            page.runJavaScript(
+                "(function(){"
+                "try{"
+                "if(typeof saveAllChartLayouts === 'function'){"
+                "saveAllChartLayouts();"
+                "return 'saved';"
+                "}"
+                "return 'not_found';"
+                "}catch(e){"
+                "return 'error: ' + String(e.message || e);"
+                "}"
+                "})();",
+                lambda result: None  # 忽略结果
+            )
+        except Exception:
+            pass
 
 
 class _ChartsWebPage(QWebEnginePage):

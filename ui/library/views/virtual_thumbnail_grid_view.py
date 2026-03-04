@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QWidget, QListView, QVBoxLayout, QFrame, QApplication, QStyle
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QRect, QAbstractListModel, QModelIndex, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QRect, QAbstractListModel, QModelIndex, QEvent, QTimer
 from PyQt6.QtGui import QPainter, QColor, QFont, QCursor, QFontMetrics, QPen, QMouseEvent
 from PyQt6.QtWidgets import QStyledItemDelegate
 from PyQt6.QtCore import QItemSelectionModel
@@ -130,6 +130,33 @@ class _VirtualThumbnailModel(QAbstractListModel):
         mi = self.index(row, 0)
         self.dataChanged.emit(mi, mi, [])
 
+    def notify_rows_changed_bulk(self, rows):
+        if not rows:
+            return
+        try:
+            rows = sorted(set(int(r) for r in rows))
+        except Exception:
+            return
+        if not rows:
+            return
+        start = int(rows[0])
+        end = int(rows[0])
+        for r in rows[1:]:
+            r = int(r)
+            if r == end + 1:
+                end = r
+                continue
+            mi1 = self.index(int(start), 0)
+            mi2 = self.index(int(end), 0)
+            if mi1.isValid() and mi2.isValid():
+                self.dataChanged.emit(mi1, mi2, [])
+            start = r
+            end = r
+        mi1 = self.index(int(start), 0)
+        mi2 = self.index(int(end), 0)
+        if mi1.isValid() and mi2.isValid():
+            self.dataChanged.emit(mi1, mi2, [])
+
     def get_item(self, row: int):
         if row < 0 or row >= len(self._items):
             return None
@@ -160,9 +187,17 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
 
         info = index.data(_VirtualThumbnailModel.INFO_ROLE) or {}
         image = index.data(_VirtualThumbnailModel.IMAGE_ROLE)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        selected = bool(index.data(_VirtualThumbnailModel.SELECTED_ROLE))
 
         view = self.parent()
+        simplified = bool(getattr(view, "_fast_scroll_simplified", False))
+        box_selecting = bool(getattr(view, "_box_selecting", False))
+        if simplified or box_selecting:
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            except Exception:
+                pass
         try:
             margin = int(getattr(view, "_item_margin", 3))
         except Exception:
@@ -233,26 +268,19 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
         except Exception:
             pass
 
-        view = self.parent()
-        simplified = bool(getattr(view, "_fast_scroll_simplified", False))
-        if simplified and selected:
-            try:
-                sel_bg = QColor(primary)
-                sel_bg.setAlphaF(0.16)
-                painter.fillRect(rect.adjusted(1, 1, -1, -1), sel_bg)
-            except Exception:
-                pass
-
         try:
             bbox0 = info.get("bbox")
             fp0 = info.get("focus_point")
+            eye0 = info.get("eye_coordinates")
         except Exception:
             bbox0 = None
             fp0 = None
+            eye0 = None
         try:
             if not bool(getattr(view, "show_focus_overlays", True)):
                 bbox0 = None
                 fp0 = None
+                eye0 = None
         except Exception:
             pass
 
@@ -301,8 +329,10 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
 
         bbox = _parse_bbox(bbox0)
         fp = _parse_xy(fp0)
+        eye = _parse_xy(eye0)
         show_bbox = True
         show_fp = True
+        show_eye = True
         try:
             sm = getattr(view, "settings_manager", None)
             if sm is not None:
@@ -311,17 +341,20 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
         except Exception:
             show_bbox = True
             show_fp = True
+        show_eye = bool(show_bbox)
         if not show_bbox:
             bbox = None
         if not show_fp:
             fp = None
+        if not show_eye:
+            eye = None
         try:
             orig_w = float(info.get("width") or 0)
             orig_h = float(info.get("height") or 0)
         except Exception:
             orig_w = 0.0
             orig_h = 0.0
-        if (orig_w <= 1 or orig_h <= 1) and (bbox is not None or fp is not None):
+        if (orig_w <= 1 or orig_h <= 1) and (bbox is not None or fp is not None or eye is not None):
             try:
                 fdj = info.get("focus_detect_json")
             except Exception:
@@ -337,6 +370,11 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
                     except Exception:
                         fd = None
             if isinstance(fd, dict):
+                if eye is None:
+                    try:
+                        eye = _parse_xy(fd.get("eye_coordinates") or fd.get("eye"))
+                    except Exception:
+                        eye = None
                 try:
                     ow = float(fd.get("orig_w") or 0)
                     oh = float(fd.get("orig_h") or 0)
@@ -347,7 +385,7 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
                     orig_w = ow
                     orig_h = oh
         norm_coords = False
-        if (bbox is not None or fp is not None) and target_rect.width() > 1 and target_rect.height() > 1:
+        if (bbox is not None or fp is not None or eye is not None) and target_rect.width() > 1 and target_rect.height() > 1:
             if orig_w <= 1 or orig_h <= 1:
                 try:
                     if bbox is not None:
@@ -366,11 +404,17 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
                         norm_coords = bool(0.0 <= float(fx) <= 1.0 and 0.0 <= float(fy) <= 1.0)
                     except Exception:
                         norm_coords = False
+                if not norm_coords and eye is not None:
+                    try:
+                        ex, ey = eye
+                        norm_coords = bool(0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0)
+                    except Exception:
+                        norm_coords = False
             if norm_coords:
                 orig_w = 1.0
                 orig_h = 1.0
 
-        if (bbox is not None or fp is not None) and (norm_coords or (orig_w > 1 and orig_h > 1)) and target_rect.width() > 1 and target_rect.height() > 1:
+        if (bbox is not None or fp is not None or eye is not None) and (norm_coords or (orig_w > 1 and orig_h > 1)) and target_rect.width() > 1 and target_rect.height() > 1:
             try:
                 pen_w = max(1, int(max(thumb_w, thumb_h) // 90))
             except Exception:
@@ -427,6 +471,30 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
                             ImageThumbnail._shared_focus_point_thumb_icon.paint(painter, icon_rect)
                     except Exception:
                         pass
+                except Exception:
+                    pass
+            if eye is not None:
+                try:
+                    ex, ey = eye
+                    try:
+                        if 0.0 <= float(ex) <= 1.0 and 0.0 <= float(ey) <= 1.0:
+                            ex = float(ex) * float(orig_w)
+                            ey = float(ey) * float(orig_h)
+                    except Exception:
+                        pass
+                    ex = max(0.0, min(orig_w, ex))
+                    ey = max(0.0, min(orig_h, ey))
+                    cx = float(target_rect.x()) + (ex / orig_w) * float(target_rect.width())
+                    cy = float(target_rect.y()) + (ey / orig_h) * float(target_rect.height())
+                    try:
+                        r = max(4, int(round(float(pen_w) * 2.8)))
+                    except Exception:
+                        r = 6
+                    c = QColor("#2196F3")
+                    c.setAlpha(240)
+                    painter.setPen(QPen(c, int(pen_w)))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(QRect(int(cx - r), int(cy - r), int(2 * r), int(2 * r)))
                 except Exception:
                     pass
 
@@ -724,6 +792,16 @@ class VirtualThumbnailGridView(QWidget):
         self._box_selecting = False
         self._box_start_pos = None
         self._box_end_pos = None
+        self._box_start_content_pos = None
+        self._box_end_content_pos = None
+        self._box_prev_selected_rows = None
+        self._box_select_dirty = False
+        self._box_select_update_scheduled = False
+        self._box_select_pending_rect = None
+        self._box_select_timer = QTimer(self)
+        self._box_select_timer.setSingleShot(True)
+        self._box_select_timer.timeout.connect(self._flush_box_selection_update)
+        self._box_select_immediate_cell_threshold = 180
 
         self._model = _VirtualThumbnailModel(self)
         self._delegate = _VirtualThumbnailDelegate(self)
@@ -794,7 +872,14 @@ class VirtualThumbnailGridView(QWidget):
         self.list_view.customContextMenuRequested.connect(self._on_context_menu_requested)
         self.list_view.clicked.connect(self._on_clicked)
         self.list_view.doubleClicked.connect(self._on_double_clicked)
-        self.list_view.verticalScrollBar().valueChanged.connect(self.scrollValueChanged.emit)
+        try:
+            self.list_view.verticalScrollBar().valueChanged.connect(self._on_list_view_vertical_scroll_changed)
+        except Exception:
+            pass
+        try:
+            self.list_view.horizontalScrollBar().valueChanged.connect(self._on_list_view_horizontal_scroll_changed)
+        except Exception:
+            pass
 
         self.list_view.viewport().installEventFilter(self)
         self.list_view.installEventFilter(self)
@@ -1000,8 +1085,9 @@ class VirtualThumbnailGridView(QWidget):
                     self._update_spray_range_overlay(event.position().toPoint())
                 if self._box_selecting and self._box_start_pos is not None:
                     self._box_end_pos = event.position().toPoint()
+                    self._box_end_content_pos = self._viewport_pos_to_content_pos(self._box_end_pos)
                     self._update_box_overlay()
-                    self._apply_box_selection()
+                    self._schedule_box_selection_update()
                     return True
                 if self._box_select_candidate and (event.buttons() & Qt.MouseButton.LeftButton) and self._box_start_pos is not None:
                     if (event.position().toPoint() - self._box_start_pos).manhattanLength() >= QApplication.startDragDistance():
@@ -1019,8 +1105,9 @@ class VirtualThumbnailGridView(QWidget):
 
                         self._start_box_select(self._box_start_pos)
                         self._box_end_pos = event.position().toPoint()
+                        self._box_end_content_pos = self._viewport_pos_to_content_pos(self._box_end_pos)
                         self._update_box_overlay()
-                        self._apply_box_selection()
+                        self._schedule_box_selection_update()
                         return True
             if event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -1041,6 +1128,8 @@ class VirtualThumbnailGridView(QWidget):
                     self._box_select_candidate = True
                     self._box_start_pos = pos
                     self._box_end_pos = pos
+                    self._box_start_content_pos = self._viewport_pos_to_content_pos(pos)
+                    self._box_end_content_pos = self._viewport_pos_to_content_pos(pos)
             if event.type() == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
                     if self._box_selecting:
@@ -1182,6 +1271,12 @@ class VirtualThumbnailGridView(QWidget):
         self._box_select_candidate = False
         self._box_start_pos = viewport_pos
         self._box_end_pos = viewport_pos
+        self._box_start_content_pos = self._viewport_pos_to_content_pos(viewport_pos)
+        self._box_end_content_pos = self._viewport_pos_to_content_pos(viewport_pos)
+        self._box_prev_selected_rows = set()
+        self._box_select_dirty = False
+        self._box_select_update_scheduled = False
+        self._box_select_pending_rect = QRect(self._box_start_content_pos, self._box_end_content_pos).normalized()
         if self.list_view.selectionModel() is not None:
             self.list_view.selectionModel().clearSelection()
         self.selection_overlay.raise_()
@@ -1189,51 +1284,296 @@ class VirtualThumbnailGridView(QWidget):
         self._update_box_overlay()
 
     def _finish_box_select(self):
+        try:
+            self._schedule_box_selection_update(force=True)
+        except Exception:
+            pass
         self._box_selecting = False
         self._box_select_candidate = False
         self.selection_overlay.hide()
+        try:
+            self._sync_selection_model_from_selected_items()
+        except Exception:
+            pass
         self._box_start_pos = None
         self._box_end_pos = None
+        self._box_start_content_pos = None
+        self._box_end_content_pos = None
+        self._box_prev_selected_rows = None
+        try:
+            self.selectionChanged.emit(self.get_selected_count())
+        except Exception:
+            pass
 
     def _update_box_overlay(self):
-        if self._box_start_pos is None or self._box_end_pos is None:
+        if self._box_start_content_pos is None or self._box_end_content_pos is None:
             return
-        rect = QRect(self._box_start_pos, self._box_end_pos).normalized()
+        offset = self._get_scroll_offset()
+        start_vp = QPoint(int(self._box_start_content_pos.x() - offset.x()), int(self._box_start_content_pos.y() - offset.y()))
+        end_vp = QPoint(int(self._box_end_content_pos.x() - offset.x()), int(self._box_end_content_pos.y() - offset.y()))
+        rect = QRect(start_vp, end_vp).normalized()
+        try:
+            vp_rect = QRect(0, 0, int(self.list_view.viewport().width()), int(self.list_view.viewport().height()))
+            rect = rect.intersected(vp_rect)
+        except Exception:
+            pass
         self.selection_overlay.setGeometry(rect)
         self.selection_overlay.raise_()
 
     def _apply_box_selection(self):
-        if self._box_start_pos is None or self._box_end_pos is None:
+        if self._box_start_content_pos is None or self._box_end_content_pos is None:
             return
-        if self.list_view.selectionModel() is None:
+        rect = QRect(self._box_start_content_pos, self._box_end_content_pos).normalized()
+        self._apply_box_selection_for_rect(rect)
+
+    def _apply_box_selection_for_rect(self, rect: QRect):
+        if rect is None or rect.isNull():
             return
-        rect = QRect(self._box_start_pos, self._box_end_pos).normalized()
-        start, end, _ = self.get_visible_index_range(extra_rows=2)
-        if end < start:
-            return
-        self.list_view.selectionModel().blockSignals(True)
+        new_selected_rows = self._get_indices_in_content_rect(rect)
+        prev_selected_rows = self._box_prev_selected_rows or set()
+        to_select = new_selected_rows - prev_selected_rows
+        to_deselect = prev_selected_rows - new_selected_rows
+        changed_rows = set()
+        for i in to_select:
+            idx = int(i)
+            item = self._model.get_item(idx)
+            if item is not None and not bool(getattr(item, "selected", False)):
+                item.selected = True
+                changed_rows.add(idx)
+        for i in to_deselect:
+            idx = int(i)
+            item = self._model.get_item(idx)
+            if item is not None and bool(getattr(item, "selected", False)):
+                item.selected = False
+                changed_rows.add(idx)
         try:
-            self.list_view.selectionModel().clearSelection()
-            for i in range(max(0, start), min(len(self.thumbnails), end + 1)):
-                mi = self._model.index(i, 0)
-                vr = self.list_view.visualRect(mi)
-                if not vr.isValid():
-                    continue
-                if rect.intersects(vr):
-                    self.list_view.selectionModel().select(mi, QItemSelectionModel.SelectionFlag.Select)
-        finally:
-            self.list_view.selectionModel().blockSignals(False)
-        selected_rows = set()
-        try:
-            for mi in self.list_view.selectionModel().selectedIndexes():
-                selected_rows.add(mi.row())
+            self._model.notify_rows_changed_bulk(changed_rows)
         except Exception:
-            selected_rows = set()
-        for i in range(max(0, start), min(len(self.thumbnails), end + 1)):
-            item = self._model.get_item(i)
-            if item is not None:
-                item.selected = i in selected_rows
-        self.selectionChanged.emit(self.get_selected_count())
+            pass
+
+        self._box_prev_selected_rows = new_selected_rows
+        try:
+            self.selectionChanged.emit(int(len(new_selected_rows)))
+        except Exception:
+            pass
+
+    def _schedule_box_selection_update(self, force: bool = False):
+        if not self._box_selecting or self._box_start_content_pos is None or self._box_end_content_pos is None:
+            return
+        try:
+            self._box_select_pending_rect = QRect(self._box_start_content_pos, self._box_end_content_pos).normalized()
+        except Exception:
+            self._box_select_pending_rect = None
+        self._box_select_dirty = True
+        if force:
+            self._flush_box_selection_update()
+            return
+        try:
+            est = int(self._estimate_box_cell_count(self._box_select_pending_rect))
+        except Exception:
+            est = 0
+        if est > 0 and est <= int(self._box_select_immediate_cell_threshold):
+            self._flush_box_selection_update()
+            return
+        if self._box_select_update_scheduled:
+            return
+        self._box_select_update_scheduled = True
+        try:
+            self._box_select_timer.start(10)
+        except Exception:
+            try:
+                QTimer.singleShot(10, self._flush_box_selection_update)
+            except Exception:
+                self._flush_box_selection_update()
+
+    def _flush_box_selection_update(self):
+        self._box_select_update_scheduled = False
+        if not self._box_selecting:
+            return
+        if not self._box_select_dirty:
+            return
+        self._box_select_dirty = False
+        rect = self._box_select_pending_rect
+        if rect is None or rect.isNull():
+            return
+        try:
+            self._apply_box_selection_for_rect(rect)
+        except Exception:
+            return
+        if self._box_select_dirty and self._box_selecting:
+            self._schedule_box_selection_update()
+
+    def _estimate_box_cell_count(self, rect: QRect) -> int:
+        if rect is None or rect.isNull() or not self.thumbnails:
+            return 0
+        try:
+            cols = int(self._get_nav_cols())
+        except Exception:
+            cols = 1
+        cols = max(1, cols)
+        try:
+            gs = self.list_view.gridSize()
+            grid_w = int(gs.width())
+            grid_h = int(gs.height())
+        except Exception:
+            grid_w = 1
+            grid_h = 1
+        grid_w = max(1, grid_w)
+        grid_h = max(1, grid_h)
+        try:
+            left = max(0, int(rect.left()))
+            right = max(0, int(rect.right()))
+            top = max(0, int(rect.top()))
+            bottom = max(0, int(rect.bottom()))
+        except Exception:
+            return 0
+        col_start = max(0, min(cols - 1, left // grid_w))
+        col_end = max(0, min(cols - 1, right // grid_w))
+        row_start = max(0, top // grid_h)
+        row_end = max(0, bottom // grid_h)
+        row_span = max(0, int(row_end - row_start + 1))
+        col_span = max(0, int(col_end - col_start + 1))
+        return int(row_span * col_span)
+
+    def _get_scroll_offset(self) -> QPoint:
+        try:
+            x = int(self.list_view.horizontalScrollBar().value())
+        except Exception:
+            x = 0
+        try:
+            y = int(self.list_view.verticalScrollBar().value())
+        except Exception:
+            y = 0
+        return QPoint(int(x), int(y))
+
+    def _viewport_pos_to_content_pos(self, viewport_pos: QPoint) -> QPoint:
+        if viewport_pos is None:
+            return None
+        offset = self._get_scroll_offset()
+        return QPoint(int(viewport_pos.x() + offset.x()), int(viewport_pos.y() + offset.y()))
+
+    def _get_indices_in_content_rect(self, rect: QRect) -> set:
+        if rect is None or rect.isNull() or not self.thumbnails:
+            return set()
+        try:
+            cols = int(self._get_nav_cols())
+        except Exception:
+            cols = 1
+        cols = max(1, cols)
+        try:
+            gs = self.list_view.gridSize()
+            grid_w = int(gs.width())
+            grid_h = int(gs.height())
+        except Exception:
+            grid_w = 1
+            grid_h = 1
+        grid_w = max(1, grid_w)
+        grid_h = max(1, grid_h)
+
+        try:
+            left = int(rect.left())
+            right = int(rect.right())
+            top = int(rect.top())
+            bottom = int(rect.bottom())
+        except Exception:
+            return set()
+        left = max(0, left)
+        right = max(0, right)
+        top = max(0, top)
+        bottom = max(0, bottom)
+
+        col_start = max(0, min(cols - 1, left // grid_w))
+        col_end = max(0, min(cols - 1, right // grid_w))
+        row_start = max(0, top // grid_h)
+        row_end = max(0, bottom // grid_h)
+
+        max_index = len(self.thumbnails) - 1
+        selected = set()
+        for row in range(int(row_start), int(row_end) + 1):
+            base = int(row) * int(cols)
+            if base > max_index:
+                break
+            for col in range(int(col_start), int(col_end) + 1):
+                i = base + int(col)
+                if i > max_index:
+                    break
+                item_rect = QRect(int(col) * int(grid_w), int(row) * int(grid_h), int(grid_w), int(grid_h))
+                if rect.intersects(item_rect):
+                    selected.add(int(i))
+        return selected
+
+    def _on_list_view_vertical_scroll_changed(self, value: int):
+        try:
+            self.scrollValueChanged.emit(int(value))
+        except Exception:
+            pass
+        if self._box_selecting and self._box_start_content_pos is not None and self._box_end_content_pos is not None:
+            try:
+                self._update_box_overlay()
+                self._schedule_box_selection_update()
+            except Exception:
+                pass
+
+    def _on_list_view_horizontal_scroll_changed(self, value: int):
+        if self._box_selecting and self._box_start_content_pos is not None and self._box_end_content_pos is not None:
+            try:
+                self._update_box_overlay()
+                self._schedule_box_selection_update()
+            except Exception:
+                pass
+
+    def _sync_selection_model_from_selected_items(self):
+        sm = None
+        try:
+            sm = self.list_view.selectionModel()
+        except Exception:
+            sm = None
+        if sm is None:
+            return
+
+        selected_rows = None
+        if self._box_prev_selected_rows is not None:
+            try:
+                selected_rows = sorted(int(i) for i in self._box_prev_selected_rows)
+            except Exception:
+                selected_rows = []
+        else:
+            selected_rows = []
+            for i, it in enumerate(self.thumbnails or []):
+                try:
+                    if bool(getattr(it, "selected", False)):
+                        selected_rows.append(int(i))
+                except Exception:
+                    pass
+            selected_rows.sort()
+
+        sm.blockSignals(True)
+        try:
+            sm.clearSelection()
+            if not selected_rows:
+                return
+            from PyQt6.QtCore import QItemSelection
+            selection = QItemSelection()
+            start = int(selected_rows[0])
+            end = int(selected_rows[0])
+            for r in selected_rows[1:]:
+                r = int(r)
+                if r == end + 1:
+                    end = r
+                    continue
+                tl = self._model.index(int(start), 0)
+                br = self._model.index(int(end), 0)
+                if tl.isValid() and br.isValid():
+                    selection.select(tl, br)
+                start = r
+                end = r
+            tl = self._model.index(int(start), 0)
+            br = self._model.index(int(end), 0)
+            if tl.isValid() and br.isValid():
+                selection.select(tl, br)
+            sm.select(selection, QItemSelectionModel.SelectionFlag.Select)
+        finally:
+            sm.blockSignals(False)
         try:
             self.list_view.viewport().update()
         except Exception:
@@ -1490,19 +1830,58 @@ class VirtualThumbnailGridView(QWidget):
         self.list_view.selectAll()
 
     def get_selected_thumbnails(self):
-        if self.list_view.selectionModel() is None:
-            return []
+        if self._box_selecting and self._box_prev_selected_rows is not None:
+            items = []
+            for i in self._box_prev_selected_rows:
+                it = self._model.get_item(int(i))
+                if it is not None:
+                    items.append(it)
+            return items
+        sm = None
+        try:
+            sm = self.list_view.selectionModel()
+        except Exception:
+            sm = None
+        if sm is not None:
+            items = []
+            for mi in sm.selectedIndexes():
+                it = self._model.get_item(mi.row())
+                if it is not None:
+                    items.append(it)
+            return items
         items = []
-        for mi in self.list_view.selectionModel().selectedIndexes():
-            it = self._model.get_item(mi.row())
-            if it is not None:
-                items.append(it)
+        for it in self.thumbnails or []:
+            try:
+                if bool(getattr(it, "selected", False)):
+                    items.append(it)
+            except Exception:
+                pass
         return items
 
     def get_selected_count(self):
-        if self.list_view.selectionModel() is None:
-            return 0
-        return len(self.list_view.selectionModel().selectedIndexes())
+        if self._box_selecting and self._box_prev_selected_rows is not None:
+            try:
+                return int(len(self._box_prev_selected_rows))
+            except Exception:
+                return 0
+        sm = None
+        try:
+            sm = self.list_view.selectionModel()
+        except Exception:
+            sm = None
+        if sm is not None:
+            try:
+                return int(len(sm.selectedIndexes()))
+            except Exception:
+                return 0
+        c = 0
+        for it in self.thumbnails or []:
+            try:
+                if bool(getattr(it, "selected", False)):
+                    c += 1
+            except Exception:
+                pass
+        return int(c)
 
     def _set_spray_range_cells(self, size):
         try:

@@ -34,6 +34,9 @@ DisableProgramGroupPage=yes
 ;PrivilegesRequired=lowest
 OutputBaseFilename=mysetup
 SolidCompression=yes
+Compression=lzma2/ultra64
+InternalCompressLevel=ultra64
+CompressionThreads=auto
 WizardStyle=modern
 
 [Languages]

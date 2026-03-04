@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from ui.utils.icon_loader import qta
 
 
 def build_app_icon(primary_color: str = "#2196F3") -> QIcon:
@@ -57,6 +58,12 @@ def build_svg_icon(primary_color: str = "#2196F3") -> QIcon | None:
 
 
 def get_app_icon(primary_color: str = "#2196F3") -> QIcon:
+    try:
+        ico_qta = qta.icon("ph.bird-fill", color=str(primary_color or "#2196F3"))
+        if ico_qta is not None and not ico_qta.isNull():
+            return ico_qta
+    except Exception:
+        pass
     ico = build_svg_icon(primary_color)
     if ico is not None and not ico.isNull():
         return ico

@@ -11,6 +11,7 @@ class ChartType:
 
 
 CHART_TYPES: List[ChartType] = [
+    ChartType("number", "数据图"),  # 显示单个数字的图表类型
     ChartType("bar", "柱状图"),
     ChartType("line", "折线图"),
     ChartType("pie", "饼图"),

@@ -1,9 +1,15 @@
 import base64
+import json
 import os
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 from io import BytesIO
 from dataclasses import dataclass
 from typing import Any, Optional
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -36,9 +42,41 @@ class BirdSpeciesRecognizer:
         self._max_side_px = int(max_side_px)
         self._max_bytes = int(max_bytes)
 
-    def recognize(self, image_path: str, location_hint: Optional[str] = None, time_hint: Optional[str] = None) -> BirdSpeciesResult:
+    def recognize(
+        self,
+        image_path: str,
+        location_hint: Optional[str] = None,
+        time_hint: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        region_code: Optional[str] = None,
+        apply_region_filter: bool = True
+    ) -> BirdSpeciesResult:
+        """
+        识别鸟种
+        
+        Args:
+            image_path: 图片路径
+            location_hint: 地点提示（用于云端识别）
+            time_hint: 时间提示（用于云端识别）
+            lat: 纬度（用于本地识别的地域过滤）
+            lon: 经度（用于本地识别的地域过滤）
+            region_code: 区域代码（用于本地识别的地域过滤）
+            apply_region_filter: 是否应用地域过滤
+        
+        Returns:
+            BirdSpeciesResult 对象
+        """
         svc = self._resolve_service()
         try:
+            if svc == "local":
+                return self._recognize_local_ipc(
+                    image_path,
+                    lat=lat,
+                    lon=lon,
+                    region_code=region_code,
+                    apply_region_filter=apply_region_filter
+                )
             if svc == "dongniao":
                 return self._recognize_dongniao(image_path)
             return self._recognize_doubao(image_path, location_hint=location_hint, time_hint=time_hint)
@@ -55,10 +93,41 @@ class BirdSpeciesRecognizer:
         try:
             from utils.setting.settings_manager import SettingsManager
 
-            svc = str(SettingsManager().get("recognizer/service", "doubao") or "doubao").strip().lower()
+            svc = str(SettingsManager().get("recognizer/service", "local") or "local").strip().lower()
         except Exception:
-            svc = "doubao"
-        return svc if svc in ("doubao", "dongniao") else "doubao"
+            svc = "local"
+        return svc if svc in ("local", "doubao", "dongniao") else "local"
+
+    def _recognize_local_ipc(
+        self,
+        image_path: str,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        region_code: Optional[str] = None,
+        apply_region_filter: bool = True
+    ) -> BirdSpeciesResult:
+        """本地IPC识别，支持地域过滤"""
+        client = _get_local_bird_ipc_client()
+        ok = client.ensure_service()
+        if not ok:
+            raise BirdRecognitionError("本地识别服务启动失败")
+        resp = client.predict(
+            image_path=image_path,
+            top_k=3,
+            min_confidence=0.0,
+            lat=lat,
+            lon=lon,
+            region_code=region_code,
+            apply_region_filter=apply_region_filter
+        )
+        if not bool((resp or {}).get("success")):
+            raise BirdRecognitionError(str((resp or {}).get("error") or "本地识别失败"))
+        preds = (resp or {}).get("predictions")
+        if not isinstance(preds, list) or not preds:
+            return BirdSpeciesResult(text="无法识别")
+        p0 = preds[0] if isinstance(preds[0], dict) else {}
+        name = str(p0.get("chinese_name") or "").strip()
+        return BirdSpeciesResult(text=name or "无法识别")
 
     def _recognize_doubao(self, image_path: str, location_hint: Optional[str] = None, time_hint: Optional[str] = None) -> BirdSpeciesResult:
         api_key = self._resolve_api_key()
@@ -473,3 +542,715 @@ def recognize_bird_species(image_path: str, api_key: Optional[str] = None) -> st
         return BirdSpeciesRecognizer(api_key=api_key).recognize(image_path).text
     except Exception:
         return "无法识别"
+
+
+def run_local_bird_ipc_service():
+    svc = _LocalBirdIPCService()
+    svc.start()
+
+
+_local_bird_ipc_client: "_LocalBirdIPCClient | None" = None
+_local_bird_ipc_client_lock = threading.Lock()
+
+
+def _get_local_bird_ipc_client() -> "_LocalBirdIPCClient":
+    global _local_bird_ipc_client
+    with _local_bird_ipc_client_lock:
+        if _local_bird_ipc_client is None:
+            _local_bird_ipc_client = _LocalBirdIPCClient()
+        return _local_bird_ipc_client
+
+
+class _LocalBirdModel:
+    def __init__(self, opensource_dir: Path, device: str):
+        self._opensource_dir = Path(opensource_dir)
+        self._device = str(device or "cpu").strip().lower() or "cpu"
+        self._bird_info: list[list[str]] = []
+        self._model = None
+        self._geo_index = None
+        self._load_bird_info()
+        self._load_model()
+        self._init_geo_index()
+
+    @property
+    def bird_info(self) -> list[list[str]]:
+        return self._bird_info
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def _load_bird_info(self):
+        p = self._opensource_dir / "bird_info.json"
+        if not p.exists():
+            raise BirdRecognitionError(f"缺少鸟种库文件: {p}")
+        try:
+            self._bird_info = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(self._bird_info, list):
+                self._bird_info = []
+        except Exception as e:
+            raise BirdRecognitionError(f"读取鸟种库失败: {e}") from e
+
+    def _load_model(self):
+        model_path = self._opensource_dir / "model20240824.pth"
+        if not model_path.exists():
+            raise BirdRecognitionError(f"缺少模型文件: {model_path}")
+        try:
+            import torch
+            import torchvision.models as models
+            import torch.nn as nn
+        except Exception as e:
+            raise BirdRecognitionError(f"缺少依赖: {e}") from e
+
+        try:
+            net = models.resnet34(weights=None)
+            try:
+                in_features = int(getattr(net.fc, "in_features", 512) or 512)
+            except Exception:
+                in_features = 512
+            net.fc = nn.Linear(in_features, 11000)
+        except Exception as e:
+            raise BirdRecognitionError(f"初始化模型失败: {e}") from e
+
+        try:
+            sd = torch.load(str(model_path), map_location="cpu")
+            if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd.get("state_dict"), dict):
+                sd = sd["state_dict"]
+            if not isinstance(sd, dict):
+                raise BirdRecognitionError("模型文件格式异常")
+            net.load_state_dict(sd, strict=True)
+        except Exception as e:
+            raise BirdRecognitionError(f"加载模型权重失败: {e}") from e
+
+        net.eval()
+        try:
+            if self._device == "cuda":
+                net.to("cuda")
+            else:
+                net.to("cpu")
+        except Exception:
+            self._device = "cpu"
+            net.to("cpu")
+        self._model = net
+
+    def _init_geo_index(self):
+        """初始化地理物种索引"""
+        try:
+            from core.recognizer.geo_filter import get_geo_index
+            self._geo_index = get_geo_index()
+        except Exception as e:
+            try:
+                LogManager.instance().debug(f"[LocalBirdModel] 地理索引初始化失败: {e}")
+            except Exception:
+                pass
+            self._geo_index = None
+
+    def _preprocess(self, image_path: str):
+        try:
+            import torch
+        except Exception as e:
+            raise BirdRecognitionError(f"缺少依赖: {e}") from e
+
+        try:
+            with open(image_path, "rb") as f:
+                raw = f.read()
+        except Exception as e:
+            raise BirdRecognitionError(f"读取图片失败: {e}") from e
+
+        with suppress_stderr_fd():
+            img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise BirdRecognitionError("读取图片失败: 不支持的图片格式或文件已损坏")
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+        if h <= 0 or w <= 0:
+            raise BirdRecognitionError("读取图片失败: 图片尺寸异常")
+
+        short = min(h, w)
+        target_short = 256
+        if short != target_short:
+            scale = float(target_short) / float(short)
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        h2, w2 = img.shape[:2]
+        crop = 224
+        y1 = max(0, int((h2 - crop) / 2))
+        x1 = max(0, int((w2 - crop) / 2))
+        y2 = min(h2, y1 + crop)
+        x2 = min(w2, x1 + crop)
+        img = img[y1:y2, x1:x2]
+        if img.shape[0] != crop or img.shape[1] != crop:
+            img = cv2.resize(img, (crop, crop), interpolation=cv2.INTER_AREA)
+
+        arr = img.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        arr = (arr - mean) / std
+        t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).contiguous()
+        return t
+
+    def predict(
+        self,
+        image_path: str,
+        top_k: int = 5,
+        region_code: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        apply_region_filter: bool = True
+    ) -> list[dict[str, Any]]:
+        """
+        执行鸟种识别预测
+        
+        Args:
+            image_path: 图片路径
+            top_k: 返回的候选数量
+            region_code: 区域代码（如 "CN", "CN-44"）
+            lat: 纬度
+            lon: 经度
+            apply_region_filter: 是否应用地域过滤
+        
+        Returns:
+            预测结果列表
+        """
+        try:
+            import torch
+        except Exception as e:
+            raise BirdRecognitionError(f"缺少依赖: {e}") from e
+
+        if self._model is None:
+            raise BirdRecognitionError("模型未加载")
+
+        top_k = int(top_k) if int(top_k) > 0 else 5
+        x = self._preprocess(image_path)
+        try:
+            if self._device == "cuda":
+                x = x.to("cuda", non_blocking=True)
+        except Exception:
+            self._device = "cpu"
+
+        with torch.inference_mode():
+            logits = self._model(x)
+            probs = torch.softmax(logits, dim=1)
+
+        # 获取候选物种集合（用于地理过滤）
+        species_set = None
+        matched_region = None
+        if apply_region_filter and self._geo_index:
+            if lat is not None and lon is not None:
+                species_set, matched_region = self._geo_index.query_by_location(lat, lon)
+            if not species_set and region_code:
+                species_set = self._geo_index.query_by_region(region_code)
+                matched_region = region_code
+
+        # 如果有地理过滤，扩大top_k以确保过滤后有足够结果
+        search_k = top_k
+        if species_set:
+            search_k = min(top_k * 5, 100)
+
+        try:
+            k = min(search_k, int(probs.shape[1]))
+        except Exception:
+            k = search_k
+        vals, idxs = torch.topk(probs, k=k, dim=1)
+        vals = vals[0].detach().cpu().numpy().tolist()
+        idxs = idxs[0].detach().cpu().numpy().tolist()
+
+        results: list[dict[str, Any]] = []
+        max_info = len(self._bird_info) if isinstance(self._bird_info, list) else 0
+        for score, idx in zip(vals, idxs):
+            try:
+                ii = int(idx)
+            except Exception:
+                continue
+            # 地域过滤：跳过不在候选集合中的物种
+            if species_set and ii not in species_set:
+                continue
+            if ii < 0 or ii >= max_info:
+                continue
+            info = self._bird_info[ii] if isinstance(self._bird_info[ii], list) else []
+            chinese = str(info[0] if len(info) > 0 else "").strip()
+            english = str(info[1] if len(info) > 1 else "").strip()
+            sci = str(info[2] if len(info) > 2 else "").strip()
+            results.append(
+                {
+                    "id": ii,
+                    "chinese_name": chinese,
+                    "english_name": english,
+                    "scientific_name": sci,
+                    "confidence": float(score),
+                }
+            )
+            if len(results) >= top_k:
+                break
+        return results
+
+    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        q = str(query or "").strip().lower()
+        if not q:
+            return []
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 10
+        lim = max(1, min(1000, lim))
+        results: list[dict[str, Any]] = []
+        for idx, bird in enumerate(self._bird_info):
+            if not isinstance(bird, list) or not bird:
+                continue
+            hit = False
+            for field in bird:
+                try:
+                    if q in str(field or "").lower():
+                        hit = True
+                        break
+                except Exception:
+                    continue
+            if not hit:
+                continue
+            results.append(
+                {
+                    "id": int(idx),
+                    "chinese_name": str(bird[0] if len(bird) > 0 else "").strip(),
+                    "english_name": str(bird[1] if len(bird) > 1 else "").strip(),
+                    "scientific_name": str(bird[2] if len(bird) > 2 else "").strip(),
+                }
+            )
+            if len(results) >= lim:
+                break
+        return results
+
+
+def _resolve_opensource_dir() -> Path:
+    try:
+        from utils.paths import PathManager
+
+        root = PathManager.instance().get_project_root()
+        p = root / "opensource"
+        if p.exists():
+            return p
+    except Exception:
+        pass
+    here = Path(__file__).resolve()
+    for parent in [here.parent, here.parent.parent, here.parent.parent.parent]:
+        p = parent / "opensource"
+        if p.exists():
+            return p
+    return Path("opensource").resolve()
+
+
+def _resolve_local_bird_ipc_dir() -> str:
+    try:
+        base = tempfile.gettempdir()
+    except Exception:
+        base = "."
+    p = os.path.join(base, "bpm_bird_ipc_local")
+    try:
+        os.makedirs(p, exist_ok=True)
+    except Exception:
+        pass
+    return p
+
+
+class _LocalBirdIPCService:
+    def __init__(self, ipc_dir: str | None = None):
+        self._ipc_dir = str(ipc_dir or _resolve_local_bird_ipc_dir())
+        self._request_file = os.path.join(self._ipc_dir, "request.json")
+        self._response_file = os.path.join(self._ipc_dir, "response.json")
+        self._lock_file = os.path.join(self._ipc_dir, "service.lock")
+        self._running = False
+        self._model: _LocalBirdModel | None = None
+
+    def _is_locked(self) -> bool:
+        return os.path.exists(self._lock_file)
+
+    def _acquire_lock(self) -> bool:
+        try:
+            if self._is_locked():
+                return False
+            with open(self._lock_file, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            return True
+        except Exception:
+            return False
+
+    def _release_lock(self):
+        try:
+            if os.path.exists(self._lock_file):
+                os.remove(self._lock_file)
+        except Exception:
+            pass
+
+    def _load_model(self):
+        opensource_dir = _resolve_opensource_dir()
+        device = "cpu"
+        try:
+            from utils.system.gpu_utils import is_torch_cuda_usable
+
+            if bool(is_torch_cuda_usable()):
+                device = "cuda"
+        except Exception:
+            device = "cpu"
+        self._model = _LocalBirdModel(opensource_dir=opensource_dir, device=device)
+
+    def _read_request(self) -> dict[str, Any] | None:
+        try:
+            if not os.path.exists(self._request_file):
+                return None
+            with open(self._request_file, "r", encoding="utf-8") as f:
+                req = json.load(f)
+            try:
+                os.remove(self._request_file)
+            except Exception:
+                pass
+            return req if isinstance(req, dict) else None
+        except Exception:
+            try:
+                os.remove(self._request_file)
+            except Exception:
+                pass
+            return None
+
+    def _write_response(self, resp: dict[str, Any]):
+        try:
+            resp["pid"] = int(os.getpid())
+            resp["ts"] = float(time.time())
+        except Exception:
+            pass
+        try:
+            with open(self._response_file, "w", encoding="utf-8") as f:
+                json.dump(resp, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _handle_health(self) -> dict[str, Any]:
+        return {"success": True, "status": "healthy", "model_loaded": self._model is not None}
+
+    def _handle_info(self) -> dict[str, Any]:
+        if self._model is None:
+            return {"success": False, "error": "模型未加载"}
+        return {
+            "success": True,
+            "model": {
+                "device": str(self._model.device),
+                "bird_info_count": int(len(self._model.bird_info)),
+                "output_classes": 11000,
+            },
+        }
+
+    def _handle_search(self, req: dict[str, Any]) -> dict[str, Any]:
+        if self._model is None:
+            return {"success": False, "error": "模型未加载"}
+        query = str(req.get("query") or "").strip()
+        limit = req.get("limit", 10)
+        if not query:
+            return {"success": False, "error": "Query is required"}
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 10
+        results = self._model.search(query=query, limit=lim)
+        return {"success": True, "query": query, "results": results, "total": int(len(results))}
+
+    def _handle_predict(self, req: dict[str, Any]) -> dict[str, Any]:
+        if self._model is None:
+            return {"success": False, "error": "模型未加载"}
+        image_path = str(req.get("image_path") or "").strip()
+        try:
+            image_path = os.path.abspath(image_path)
+        except Exception:
+            image_path = str(image_path or "").strip()
+        if not image_path or not os.path.exists(image_path):
+            return {"success": False, "error": "Invalid image path"}
+        top_k = req.get("top_k", 5)
+        min_confidence = req.get("min_confidence", 0.0)
+        # 地域过滤参数
+        region_code = req.get("region_code")
+        lat = req.get("lat")
+        lon = req.get("lon")
+        apply_region_filter = bool(req.get("apply_region_filter", True))
+        try:
+            k = int(top_k)
+        except Exception:
+            k = 5
+        try:
+            mc = float(min_confidence)
+        except Exception:
+            mc = 0.0
+        try:
+            lat = float(lat) if lat is not None else None
+        except Exception:
+            lat = None
+        try:
+            lon = float(lon) if lon is not None else None
+        except Exception:
+            lon = None
+        start = time.time()
+        preds = self._model.predict(
+            image_path=image_path,
+            top_k=k,
+            region_code=region_code,
+            lat=lat,
+            lon=lon,
+            apply_region_filter=apply_region_filter
+        )
+        elapsed = time.time() - start
+        preds = [p for p in preds if isinstance(p, dict) and float(p.get("confidence") or 0.0) >= mc]
+        return {"success": True, "predictions": preds, "inference_time_ms": float(round(elapsed * 1000.0, 2))}
+
+    def _process(self, req: dict[str, Any]) -> dict[str, Any]:
+        try:
+            action = str(req.get("action") or "").strip().lower()
+        except Exception:
+            action = ""
+        if action == "health":
+            return self._handle_health()
+        if action == "info":
+            return self._handle_info()
+        if action == "search":
+            return self._handle_search(req)
+        if action == "predict":
+            return self._handle_predict(req)
+        if action == "shutdown":
+            self._running = False
+            return {"success": True, "status": "shutting_down"}
+        return {"success": False, "error": f"Unknown action: {action}"}
+
+    def start(self):
+        if self._is_locked():
+            return
+        if not self._acquire_lock():
+            return
+        try:
+            self._load_model()
+        except Exception as e:
+            try:
+                self._write_response({"success": False, "error": str(e)})
+            except Exception:
+                pass
+            self._release_lock()
+            return
+        self._running = True
+        try:
+            while self._running and self._is_locked():
+                req = self._read_request()
+                if req is not None:
+                    resp = self._process(req)
+                    self._write_response(resp)
+                time.sleep(0.01)
+        finally:
+            self._release_lock()
+            for fp in [self._request_file, self._response_file]:
+                try:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                except Exception:
+                    pass
+
+
+class _LocalBirdIPCClient:
+    def __init__(self, ipc_dir: str | None = None, timeout_s: float = 90.0):
+        self._ipc_dir = str(ipc_dir or _resolve_local_bird_ipc_dir())
+        self._request_file = os.path.join(self._ipc_dir, "request.json")
+        self._response_file = os.path.join(self._ipc_dir, "response.json")
+        self._lock_file = os.path.join(self._ipc_dir, "service.lock")
+        try:
+            self._timeout_s = float(timeout_s)
+        except Exception:
+            self._timeout_s = 90.0
+        self._proc: subprocess.Popen | None = None
+        self._call_lock = threading.Lock()
+
+    def is_running(self) -> bool:
+        if not os.path.exists(self._lock_file):
+            return False
+        pid = None
+        try:
+            with open(self._lock_file, "r", encoding="utf-8") as f:
+                txt = str(f.read() or "").strip()
+            if txt.isdigit():
+                pid = int(txt)
+        except Exception:
+            pid = None
+
+        if not isinstance(pid, int) or pid <= 0:
+            try:
+                os.remove(self._lock_file)
+            except Exception:
+                pass
+            return False
+
+        alive = False
+        try:
+            import psutil
+
+            alive = bool(psutil.pid_exists(int(pid)))
+        except Exception:
+            try:
+                os.kill(int(pid), 0)
+                alive = True
+            except Exception:
+                alive = False
+
+        if alive:
+            return True
+        try:
+            os.remove(self._lock_file)
+        except Exception:
+            pass
+        return False
+
+    def ensure_service(self) -> bool:
+        if self.is_running():
+            return True
+        return self._start_service()
+
+    def _start_service(self) -> bool:
+        if self.is_running():
+            return True
+        try:
+            from utils.paths import PathManager
+
+            project_root = PathManager.instance().get_project_root()
+        except Exception:
+            project_root = Path(__file__).resolve().parents[2]
+        try:
+            if bool(getattr(sys, "frozen", False)):
+                cmd = [sys.executable, "--bird-ipc-service"]
+            else:
+                cmd = [sys.executable, str(project_root / "main.py"), "--bird-ipc-service"]
+        except Exception:
+            cmd = [sys.executable, "--bird-ipc-service"]
+
+        env = os.environ.copy()
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                cwd=str(project_root),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._proc = None
+            return False
+
+        start = time.time()
+        while time.time() - start < 60.0:
+            if self.is_running():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _send_request(self, req: dict[str, Any]) -> bool:
+        try:
+            if os.path.exists(self._response_file):
+                try:
+                    os.remove(self._response_file)
+                except Exception:
+                    pass
+            with open(self._request_file, "w", encoding="utf-8") as f:
+                json.dump(req, f, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    def _wait_response(self) -> dict[str, Any] | None:
+        start = time.time()
+        while time.time() - start < self._timeout_s:
+            try:
+                if os.path.exists(self._response_file):
+                    with open(self._response_file, "r", encoding="utf-8") as f:
+                        resp = json.load(f)
+                    try:
+                        os.remove(self._response_file)
+                    except Exception:
+                        pass
+                    return resp if isinstance(resp, dict) else {"success": False, "error": "响应格式异常"}
+            except Exception:
+                time.sleep(0.01)
+                continue
+            time.sleep(0.01)
+        return {"success": False, "error": f"Timeout waiting for response ({self._timeout_s}s)"}
+
+    def call(self, req: dict[str, Any]) -> dict[str, Any]:
+        with self._call_lock:
+            if not self.ensure_service():
+                return {"success": False, "error": "Service not running"}
+            if not self._send_request(req):
+                return {"success": False, "error": "Failed to send request"}
+            resp = self._wait_response()
+            return resp if isinstance(resp, dict) else {"success": False, "error": "No response"}
+
+    def health(self) -> dict[str, Any]:
+        return self.call({"action": "health"})
+
+    def info(self) -> dict[str, Any]:
+        return self.call({"action": "info"})
+
+    def search(self, query: str, limit: int = 10) -> dict[str, Any]:
+        return self.call({"action": "search", "query": str(query or ""), "limit": int(limit)})
+
+    def predict(
+        self,
+        image_path: str,
+        top_k: int = 5,
+        min_confidence: float = 0.0,
+        region_code: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        apply_region_filter: bool = True
+    ) -> dict[str, Any]:
+        """
+        执行鸟种识别预测
+        
+        Args:
+            image_path: 图片路径
+            top_k: 返回的候选数量
+            min_confidence: 最小置信度阈值
+            region_code: 区域代码（如 "CN", "CN-44"）
+            lat: 纬度
+            lon: 经度
+            apply_region_filter: 是否应用地域过滤
+        
+        Returns:
+            识别结果字典
+        """
+        try:
+            image_path = os.path.abspath(str(image_path or ""))
+        except Exception:
+            image_path = str(image_path or "")
+        req = {
+            "action": "predict",
+            "image_path": str(image_path or ""),
+            "top_k": int(top_k),
+            "min_confidence": float(min_confidence),
+            "apply_region_filter": bool(apply_region_filter),
+        }
+        if region_code:
+            req["region_code"] = str(region_code)
+        if lat is not None:
+            req["lat"] = float(lat)
+        if lon is not None:
+            req["lon"] = float(lon)
+        return self.call(req)
+
+    def shutdown(self):
+        try:
+            self.call({"action": "shutdown"})
+        except Exception:
+            pass
+        try:
+            if self._proc is not None:
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    pass
+        finally:
+            self._proc = None

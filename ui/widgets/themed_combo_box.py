@@ -2,6 +2,7 @@ import os
 from PyQt6.QtWidgets import QComboBox
 from PyQt6.QtCore import QUrl
 from ui.utils.color_manager import ColorManager
+from ui.common.icon_utils import get_arrow_down_svg_base64
 
 
 class ThemedComboBox(QComboBox):
@@ -23,8 +24,10 @@ class ThemedComboBox(QComboBox):
         tooltip_bg = cm.get("theme.text.light")
         tooltip_text = cm.get("tooltip.text")
         tooltip_border = cm.get("tooltip.border")
-        arrow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "icon", "line", "箭头下_arrow-down.svg"))
-        arrow_url = QUrl.fromLocalFile(arrow_path).toString()
+        
+        # 使用Base64编码的SVG箭头，避免中文路径问题
+        arrow_url = get_arrow_down_svg_base64(text_dark)
+        
         self.setStyleSheet(f"""
             QComboBox {{
                 padding: {self._padding};
