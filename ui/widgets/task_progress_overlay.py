@@ -15,6 +15,7 @@ class TaskProgressOverlay(QFrame):
 
         self._margin = 0
         self._full_text = ""
+        self._device_text = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 10)
@@ -32,9 +33,15 @@ class TaskProgressOverlay(QFrame):
         bar_row.addWidget(self.progress_bar, 1)
 
         self.label = QLabel("")
-        self.label.setWordWrap(False)
+        self.label.setWordWrap(True)
         self.label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(self.label)
+        
+        # 设备信息标签（显示 GPU/CPU 状态）
+        self.device_label = QLabel("")
+        self.device_label.setWordWrap(True)
+        self.device_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(self.device_label)
 
         self.hide()
         self._apply_styles()
@@ -78,6 +85,14 @@ class TaskProgressOverlay(QFrame):
                 border: none;
             }}
         """)
+        self.device_label.setStyleSheet(f"""
+            QLabel {{
+                color: {text_color};
+                font-size: 11px;
+                background: transparent;
+                border: none;
+            }}
+        """)
 
     def reposition(self):
         parent = self.parentWidget()
@@ -90,7 +105,17 @@ class TaskProgressOverlay(QFrame):
 
         max_w = 560
         width = min(max_w, max(1, int(rect.width()) - 24))
-        h = 56
+        try:
+            # 基础高度
+            if "\n" in str(self._full_text or ""):
+                h = 78
+            else:
+                h = 56
+            # 如果有设备信息，增加高度
+            if str(self._device_text or "").strip():
+                h += 20
+        except Exception:
+            h = 56
         x = int((int(rect.width()) - int(width)) / 2)
         try:
             y = int((int(rect.height()) - int(h)) / 2 + int(self._margin or 0))
@@ -112,6 +137,9 @@ class TaskProgressOverlay(QFrame):
 
     def _update_elided_text(self):
         try:
+            if "\n" in str(self._full_text or ""):
+                self.label.setText(str(self._full_text or ""))
+                return
             fm = QFontMetrics(self.label.font())
             w = max(1, int(self.label.width() or 1))
             txt = fm.elidedText(str(self._full_text or ""), Qt.TextElideMode.ElideRight, int(w))
@@ -132,13 +160,25 @@ class TaskProgressOverlay(QFrame):
         except Exception:
             return
 
-    def set_progress(self, *, visible: bool, current: int = 0, total: int = 0, text: str = ""):
+    def set_progress(self, *, visible: bool, current: int = 0, total: int = 0, text: str = "", device_text: str = ""):
         try:
             self._full_text = str(text or "")
         except Exception:
             self._full_text = ""
         try:
+            self._device_text = str(device_text or "")
+        except Exception:
+            self._device_text = ""
+        try:
             self._update_elided_text()
+        except Exception:
+            pass
+        try:
+            if self._device_text:
+                self.device_label.setText(self._device_text)
+                self.device_label.show()
+            else:
+                self.device_label.hide()
         except Exception:
             pass
 

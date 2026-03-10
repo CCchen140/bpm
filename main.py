@@ -3,14 +3,166 @@ import multiprocessing as mp
 from threading import Thread
 import time
 import os
+import traceback
+from datetime import datetime
 
 # 可选导入：pyecharts（用于思维导图功能，新 UI 不需要）
 # from pyecharts import options as opts
 # from pyecharts.charts import Tree
 
+def _write_crash_log(message: str):
+    """写入崩溃日志到文件"""
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "栖图", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "startup_crash.log")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n")
+            f.write(message)
+            f.write("\n")
+    except Exception:
+        pass
+
+def check_single_instance():
+    """检查是否已有实例在运行，防止程序被多次启动"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        
+        # 创建一个命名互斥量
+        mutex_name = "Global\\BirdPictureManager_QiTu_SingleInstance"
+        kernel32 = ctypes.windll.kernel32
+        
+        # 尝试创建互斥量
+        mutex = kernel32.CreateMutexW(None, False, mutex_name)
+        last_error = kernel32.GetLastError()
+        
+        if last_error == 183:  # ERROR_ALREADY_EXISTS
+            # 互斥量已存在，说明已有实例在运行
+            print("Another instance is already running. Exiting.")
+            _write_crash_log("已存在另一个实例，退出启动")
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"Single instance check failed: {e}")
+        _write_crash_log(f"单实例检查失败: {e}\n{traceback.format_exc()}")
+        # 如果检查失败，允许启动（避免阻止正常启动）
+        return True
+
+def check_process_count():
+    """检查当前进程数量，防止无限启动"""
+    try:
+        import psutil
+        
+        current_pid = os.getpid()
+        current_name = "栖图.exe" if sys.platform == "win32" else "栖图"
+        
+        count = 0
+        pids = []
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if proc.info['name'] == current_name and proc.info['pid'] != current_pid:
+                    count += 1
+                    pids.append(proc.info['pid'])
+            except Exception:
+                pass
+        
+        # 如果已有 2 个或更多实例在运行，阻止启动（更严格）
+        if count >= 2:
+            print(f"Too many instances running ({count}). Exiting.")
+            _write_crash_log(f"进程数量过多 ({count})，退出启动\n已有进程 PID: {pids}")
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"Process count check failed: {e}")
+        _write_crash_log(f"进程数量检查失败: {e}\n{traceback.format_exc()}")
+        # 如果检查失败，允许启动
+        return True
+
+def setup_exception_hook():
+    """设置全局异常钩子，记录崩溃信息"""
+    def exception_hook(exc_type, exc_value, exc_tb):
+        try:
+            error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+            print(f"CRASH: {error_msg}")
+            _write_crash_log(f"程序崩溃:\n{error_msg}")
+        except Exception:
+            pass
+        # 调用原始异常处理
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    
+    sys.excepthook = exception_hook
+
+
+def _configure_windows_dll_search_paths():
+    try:
+        if sys.platform != "win32":
+            return
+    except Exception:
+        return
+
+    try:
+        if bool(getattr(sys, "frozen", False)):
+            base_dir = os.path.dirname(str(getattr(sys, "executable", "") or ""))
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = ""
+
+    if not base_dir:
+        return
+
+    dll_dirs = []
+    try:
+        dll_dirs.append(base_dir)
+        dll_dirs.append(os.path.join(base_dir, "torch", "lib"))
+        dll_dirs.append(os.path.join(base_dir, "lib"))
+    except Exception:
+        pass
+
+    try:
+        nvidia_root = os.path.join(base_dir, "nvidia")
+    except Exception:
+        nvidia_root = ""
+    if nvidia_root and os.path.isdir(nvidia_root):
+        try:
+            for root, _, _ in os.walk(nvidia_root):
+                try:
+                    if str(os.path.basename(root) or "").lower() == "bin":
+                        dll_dirs.append(root)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    for p in dll_dirs:
+        try:
+            if p and os.path.isdir(p):
+                os.add_dll_directory(p)
+        except Exception:
+            pass
+
 if __name__ == "__main__":
+    # 记录启动日志
+    _write_crash_log(f"程序启动\nPID: {os.getpid()}\n命令行: {' '.join(sys.argv)}")
+    
     mp.freeze_support()
     print("Multiprocessing support frozen")
+    
+    # 设置异常钩子
+    setup_exception_hook()
+    _configure_windows_dll_search_paths()
+    
+    # 检查是否已有实例在运行
+    if not check_single_instance():
+        sys.exit(1)
+    
+    # 检查进程数量
+    if not check_process_count():
+        sys.exit(1)
     try:
         if "--bird-ipc-service" in sys.argv:
             try:

@@ -1552,12 +1552,6 @@ class FocusDetectDialog(BasePopupDialog):
 
     def _on_ok_clicked(self):
         self.selected_folders = self._collect_selected_folders()
-        try:
-            exif_mode = str(self.exif_write_mode_combo.currentData() or "file").strip().lower()
-        except Exception:
-            exif_mode = "file"
-        if exif_mode not in ("file", "xmp", "none"):
-            exif_mode = "file"
         self.options = {
             "enable_burst": self._option_checked("enable_burst"),
             "enable_similarity": self._option_checked("enable_similarity"),
@@ -1569,7 +1563,6 @@ class FocusDetectDialog(BasePopupDialog):
             "enable_af_point_detect": self._option_checked("enable_af_point_detect"),
             "append_detect": self._option_checked("append_detect"),
             "no_db_write": self._option_checked("no_db_write"),
-            "exif_write_mode": exif_mode,
             "model": str(self.model_combo.currentText() or "x").lower(),
             "initial_conf": float(self.initial_conf_spin.value()),
             "target_size": int(self.target_size_spin.value()),

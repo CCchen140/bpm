@@ -2832,6 +2832,7 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         render_requester=None,
         orig_image_size: QSize | None = None,
         current_image_index: int = 0,
+        current_image_path: str = "",
     ):
         super().__init__()
         self.state = state
@@ -2853,6 +2854,7 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         self._render_requester = render_requester
         # 当前图片索引，用于判断是否是在模板图片上调整位置
         self._current_image_index = current_image_index
+        self._current_image_path = str(current_image_path or "")
 
         self.setZValue(10)
         self.setPen(QColor(255, 255, 255, 160))
@@ -3067,10 +3069,47 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 # 注意：这里使用当前图片的预览尺寸计算
                 custom_x_norm = float(cx) / float(self.image_w)
                 custom_y_norm = float(cy) / float(self.image_h)
-                self.state.custom_positions[str(self._current_image_index)] = {
+                scale_x = float(self.orig_image_w) / float(self.image_w)
+                scale_y = float(self.orig_image_h) / float(self.image_h)
+                preview_margin_left = x0
+                preview_margin_right = float(self.image_w) - x0 - w
+                preview_margin_top = y0
+                preview_margin_bottom = float(self.image_h) - y0 - h
+                margin_left_orig = preview_margin_left * scale_x
+                margin_right_orig = preview_margin_right * scale_x
+                margin_top_orig = preview_margin_top * scale_y
+                margin_bottom_orig = preview_margin_bottom * scale_y
+                if margin_left_orig <= margin_right_orig:
+                    nearest_h = "left"
+                    margin_h_px = float(margin_left_orig)
+                else:
+                    nearest_h = "right"
+                    margin_h_px = float(margin_right_orig)
+                if margin_top_orig <= margin_bottom_orig:
+                    nearest_v = "top"
+                    margin_v_px = float(margin_top_orig)
+                else:
+                    nearest_v = "bottom"
+                    margin_v_px = float(margin_bottom_orig)
+                rec = {
                     "x_norm": custom_x_norm,
                     "y_norm": custom_y_norm,
+                    "nearest_h_edge": nearest_h,
+                    "nearest_v_edge": nearest_v,
+                    "margin_h_px": margin_h_px,
+                    "margin_v_px": margin_v_px,
+                    "orig_w": int(self.orig_image_w),
+                    "orig_h": int(self.orig_image_h),
+                    "cx_px": float(cx) * scale_x,
+                    "cy_px": float(cy) * scale_y,
                 }
+                self.state.custom_positions[str(self._current_image_index)] = rec
+                try:
+                    p = str(getattr(self, "_current_image_path", "") or "")
+                except Exception:
+                    p = ""
+                if p:
+                    self.state.custom_positions[f"@path:{p}"] = rec
                 LogManager.instance().debug(f"[WatermarkItem] 记录自定义位置: 图片{self._current_image_index}, x_norm={custom_x_norm:.4f}, y_norm={custom_y_norm:.4f}")
         except Exception:
             pass
@@ -3213,7 +3252,12 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
         custom_positions = getattr(st, "custom_positions", {}) or {}
         # 检查当前图片是否有自定义位置
         current_index_str = str(self._current_image_index)
-        has_custom_position = current_index_str in custom_positions
+        try:
+            p = str(getattr(self, "_current_image_path", "") or "")
+        except Exception:
+            p = ""
+        path_key = f"@path:{p}" if p else ""
+        has_custom_position = (current_index_str in custom_positions) or (path_key and path_key in custom_positions)
 
         # 检查是否有有效的边距信息
         has_margin_info = (margin_h_px > 0 or margin_v_px > 0) and (nearest_h or nearest_v)
@@ -3232,20 +3276,50 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             # 如果是模板图片，直接使用保存的归一化坐标
             # 不要根据边距重新计算，以保持用户设置的精确位置
             LogManager.instance().debug(f"[WatermarkItem] 模板图片，使用保存的坐标 x_norm={st.x_norm}, y_norm={st.y_norm}")
-            # 不修改 st.x_norm 和 st.y_norm，保持原值
-        elif has_custom_position:
-            # 如果当前图片有自定义位置，使用自定义位置
-            custom_pos = custom_positions[current_index_str]
-            custom_x_norm = float(custom_pos.get("x_norm", st.x_norm))
-            custom_y_norm = float(custom_pos.get("y_norm", st.y_norm))
-            # 直接设置位置，不修改状态对象
-            cx = custom_x_norm * float(self.image_w)
-            cy = custom_y_norm * float(self.image_h)
+            # 使用保存的归一化坐标计算位置
+            cx = float(st.x_norm) * float(self.image_w)
+            cy = float(st.y_norm) * float(self.image_h)
             x0 = cx - preview_w / 2.0
             y0 = cy - preview_h / 2.0
             self.setPos(x0, y0)
-            LogManager.instance().debug(f"[WatermarkItem] 使用自定义位置 x0={x0:.1f}, y0={y0:.1f}")
-            # 验证实际位置
+            LogManager.instance().debug(f"[WatermarkItem] 模板图片位置: x0={x0:.1f}, y0={y0:.1f}")
+        elif has_custom_position:
+            # 如果当前图片有自定义位置，使用自定义位置
+            custom_pos = custom_positions.get(current_index_str) or (custom_positions.get(path_key) if path_key else {}) or {}
+            ch = str(custom_pos.get("nearest_h_edge", "") or "")
+            cv = str(custom_pos.get("nearest_v_edge", "") or "")
+            mh = float(custom_pos.get("margin_h_px", 0.0) or 0.0)
+            mv = float(custom_pos.get("margin_v_px", 0.0) or 0.0)
+            ow = int(custom_pos.get("orig_w", 0) or 0)
+            oh = int(custom_pos.get("orig_h", 0) or 0)
+            if (mh > 0 or mv > 0) and (ch or cv) and ow > 0 and oh > 0 and int(self.orig_image_w) > 0 and int(self.orig_image_h) > 0:
+                sx = float(self.image_w) / float(self.orig_image_w)
+                sy = float(self.image_h) / float(self.orig_image_h)
+                pmh = mh * sx
+                pmv = mv * sy
+                if ch == "left":
+                    x0 = pmh
+                elif ch == "right":
+                    x0 = float(self.image_w) - preview_w - pmh
+                else:
+                    x0 = float(st.x_norm) * float(self.image_w) - preview_w / 2.0
+                if cv == "top":
+                    y0 = pmv
+                elif cv == "bottom":
+                    y0 = float(self.image_h) - preview_h - pmv
+                else:
+                    y0 = float(st.y_norm) * float(self.image_h) - preview_h / 2.0
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] 使用自定义边距位置 x0={x0:.1f}, y0={y0:.1f}")
+            else:
+                custom_x_norm = float(custom_pos.get("x_norm", st.x_norm))
+                custom_y_norm = float(custom_pos.get("y_norm", st.y_norm))
+                cx = custom_x_norm * float(self.image_w)
+                cy = custom_y_norm * float(self.image_h)
+                x0 = cx - preview_w / 2.0
+                y0 = cy - preview_h / 2.0
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] 使用自定义位置 x0={x0:.1f}, y0={y0:.1f}")
             actual_pos = self.pos()
             LogManager.instance().debug(f"[WatermarkItem] 验证实际位置: actual_x={actual_pos.x():.1f}, actual_y={actual_pos.y():.1f}")
         elif ref_w > 0 and ref_h > 0 and has_margin_info and template_image_w > 0 and template_image_h > 0:
@@ -3566,18 +3640,18 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                     except Exception:
                         pass
                 if self._content_pix.pixmap().isNull():
-                    self.setRect(0, 0, base_w, base_h if not bool(st.keep_aspect) else base_w)
+                    # 使用 preview_w 和 preview_h 作为基础尺寸
+                    self.setRect(0, 0, float(preview_w), float(preview_h))
                     try:
-                        w, h = self._current_rect_wh()
-                        self.setTransformOriginPoint(float(w) / 2.0, float(h) / 2.0)
+                        self.setTransformOriginPoint(float(preview_w) / 2.0, float(preview_h) / 2.0)
+                        self._content_pix.setPos(0.0, 0.0)
                     except Exception:
                         pass
             else:
                 self._content_pix.setPixmap(QPixmap())
-                self.setRect(0, 0, base_w, base_h if not bool(st.keep_aspect) else base_w)
+                self.setRect(0, 0, float(preview_w), float(preview_h))
                 try:
-                    w, h = self._current_rect_wh()
-                    self.setTransformOriginPoint(float(w) / 2.0, float(h) / 2.0)
+                    self.setTransformOriginPoint(float(preview_w) / 2.0, float(preview_h) / 2.0)
                 except Exception:
                     pass
             if self._content_text is not None:
@@ -3595,10 +3669,32 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             # 否则保持之前设置的位置（自定义位置或边距计算位置）
             is_template_image = (self._current_image_index == st.template_image_index)
             custom_positions = getattr(st, "custom_positions", {}) or {}
-            has_custom_position = str(self._current_image_index) in custom_positions
-            
-            if is_template_image or not has_custom_position:
-                # 使用预览尺寸计算显示位置
+            try:
+                p = str(getattr(self, "_current_image_path", "") or "")
+            except Exception:
+                p = ""
+            path_key = f"@path:{p}" if p else ""
+            has_custom_position = (str(self._current_image_index) in custom_positions) or (path_key and path_key in custom_positions)
+
+            has_margin_position = (
+                (not is_template_image)
+                and (not has_custom_position)
+                and (ref_w > 0 and ref_h > 0 and has_margin_info and template_image_w > 0 and template_image_h > 0)
+            )
+
+            if is_template_image:
+                cx = float(st.x_norm) * float(self.image_w)
+                cy = float(st.y_norm) * float(self.image_h)
+                w, h = self._current_rect_wh()
+                x0 = float(cx - w / 2.0)
+                y0 = float(cy - h / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] sync_geometry 设置位置(模板): x0={x0:.1f}, y0={y0:.1f}")
+            elif has_custom_position:
+                LogManager.instance().debug("[WatermarkItem] sync_geometry 跳过位置设置（已有自定义位置）")
+            elif has_margin_position:
+                LogManager.instance().debug("[WatermarkItem] sync_geometry 跳过位置设置（已按边距计算位置）")
+            else:
                 cx = float(st.x_norm) * float(self.image_w)
                 cy = float(st.y_norm) * float(self.image_h)
                 w, h = self._current_rect_wh()
@@ -3606,8 +3702,6 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 y0 = float(cy - h / 2.0)
                 self.setPos(float(x0), float(y0))
                 LogManager.instance().debug(f"[WatermarkItem] sync_geometry 设置位置: x0={x0:.1f}, y0={y0:.1f}")
-            else:
-                LogManager.instance().debug(f"[WatermarkItem] sync_geometry 跳过位置设置（已有自定义位置）")
             
             self._update_handles()
             try:
@@ -3704,7 +3798,12 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             st = self.state
             is_template_image = (self._current_image_index == st.template_image_index)
             custom_positions = getattr(st, "custom_positions", {}) or {}
-            has_custom_position = str(self._current_image_index) in custom_positions
+            try:
+                p = str(getattr(self, "_current_image_path", "") or "")
+            except Exception:
+                p = ""
+            path_key = f"@path:{p}" if p else ""
+            has_custom_position = (str(self._current_image_index) in custom_positions) or (path_key and path_key in custom_positions)
             
             if is_template_image or not has_custom_position:
                 # 使用预览尺寸计算显示位置
@@ -3715,7 +3814,39 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 self.setPos(float(x0), float(y0))
                 LogManager.instance().debug(f"[WatermarkItem] _apply_text_patch 设置位置: x0={x0:.1f}, y0={y0:.1f}")
             else:
-                LogManager.instance().debug(f"[WatermarkItem] _apply_text_patch 跳过位置设置（已有自定义位置）")
+                rec = custom_positions.get(str(self._current_image_index)) or (custom_positions.get(path_key) if path_key else None) or {}
+                ch = str(rec.get("nearest_h_edge", "") or "")
+                cv = str(rec.get("nearest_v_edge", "") or "")
+                mh = float(rec.get("margin_h_px", 0.0) or 0.0)
+                mv = float(rec.get("margin_v_px", 0.0) or 0.0)
+                ow = int(rec.get("orig_w", 0) or 0)
+                oh = int(rec.get("orig_h", 0) or 0)
+                if (mh > 0 or mv > 0) and (ch or cv) and ow > 0 and oh > 0 and int(self.orig_image_w) > 0 and int(self.orig_image_h) > 0:
+                    sx = float(self.image_w) / float(self.orig_image_w)
+                    sy = float(self.image_h) / float(self.orig_image_h)
+                    pmh = mh * sx
+                    pmv = mv * sy
+                    if ch == "left":
+                        cx = float(pmh) + float(rect_w) / 2.0
+                    elif ch == "right":
+                        cx = float(self.image_w) - float(pmh) - float(rect_w) / 2.0
+                    else:
+                        cx = float(st.x_norm) * float(self.image_w)
+                    if cv == "top":
+                        cy = float(pmv) + float(rect_h) / 2.0
+                    elif cv == "bottom":
+                        cy = float(self.image_h) - float(pmv) - float(rect_h) / 2.0
+                    else:
+                        cy = float(st.y_norm) * float(self.image_h)
+                else:
+                    custom_x_norm = float(rec.get("x_norm", st.x_norm))
+                    custom_y_norm = float(rec.get("y_norm", st.y_norm))
+                    cx = custom_x_norm * float(self.image_w)
+                    cy = custom_y_norm * float(self.image_h)
+                x0 = float(cx - float(rect_w) / 2.0)
+                y0 = float(cy - float(rect_h) / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] _apply_text_patch 使用自定义位置重新居中: x0={x0:.1f}, y0={y0:.1f}")
         except Exception:
             pass
         self._update_handles()
@@ -3775,7 +3906,12 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
             st = self.state
             is_template_image = (self._current_image_index == st.template_image_index)
             custom_positions = getattr(st, "custom_positions", {}) or {}
-            has_custom_position = str(self._current_image_index) in custom_positions
+            try:
+                p = str(getattr(self, "_current_image_path", "") or "")
+            except Exception:
+                p = ""
+            path_key = f"@path:{p}" if p else ""
+            has_custom_position = (str(self._current_image_index) in custom_positions) or (path_key and path_key in custom_positions)
             
             if is_template_image or not has_custom_position:
                 cx = float(st.x_norm) * float(self.image_w)
@@ -3785,7 +3921,39 @@ class _WatermarkGraphicsItem(QGraphicsRectItem):
                 self.setPos(float(x0), float(y0))
                 LogManager.instance().debug(f"[WatermarkItem] _apply_image_qimg 设置位置: x0={x0:.1f}, y0={y0:.1f}")
             else:
-                LogManager.instance().debug(f"[WatermarkItem] _apply_image_qimg 跳过位置设置（已有自定义位置）")
+                rec = custom_positions.get(str(self._current_image_index)) or (custom_positions.get(path_key) if path_key else None) or {}
+                ch = str(rec.get("nearest_h_edge", "") or "")
+                cv = str(rec.get("nearest_v_edge", "") or "")
+                mh = float(rec.get("margin_h_px", 0.0) or 0.0)
+                mv = float(rec.get("margin_v_px", 0.0) or 0.0)
+                ow = int(rec.get("orig_w", 0) or 0)
+                oh = int(rec.get("orig_h", 0) or 0)
+                if (mh > 0 or mv > 0) and (ch or cv) and ow > 0 and oh > 0 and int(self.orig_image_w) > 0 and int(self.orig_image_h) > 0:
+                    sx = float(self.image_w) / float(self.orig_image_w)
+                    sy = float(self.image_h) / float(self.orig_image_h)
+                    pmh = mh * sx
+                    pmv = mv * sy
+                    if ch == "left":
+                        cx = float(pmh) + float(base_w) / 2.0
+                    elif ch == "right":
+                        cx = float(self.image_w) - float(pmh) - float(base_w) / 2.0
+                    else:
+                        cx = float(st.x_norm) * float(self.image_w)
+                    if cv == "top":
+                        cy = float(pmv) + float(base_h) / 2.0
+                    elif cv == "bottom":
+                        cy = float(self.image_h) - float(pmv) - float(base_h) / 2.0
+                    else:
+                        cy = float(st.y_norm) * float(self.image_h)
+                else:
+                    custom_x_norm = float(rec.get("x_norm", st.x_norm))
+                    custom_y_norm = float(rec.get("y_norm", st.y_norm))
+                    cx = custom_x_norm * float(self.image_w)
+                    cy = custom_y_norm * float(self.image_h)
+                x0 = float(cx - float(base_w) / 2.0)
+                y0 = float(cy - float(base_h) / 2.0)
+                self.setPos(float(x0), float(y0))
+                LogManager.instance().debug(f"[WatermarkItem] _apply_image_qimg 使用自定义位置重新居中: x0={x0:.1f}, y0={y0:.1f}")
         except Exception:
             pass
         self._update_handles()
@@ -4207,7 +4375,7 @@ class _WatermarkBatchTask(QRunnable):
             pass
         return resolved
 
-    def _compose_on_image(self, img_bgr: _get_np().ndarray, states: List[WatermarkState], angle_offset: float = 0.0, meta: dict | None = None) -> _get_np().ndarray:
+    def _compose_on_image(self, img_bgr: _get_np().ndarray, states: List[WatermarkState], angle_offset: float = 0.0, meta: dict | None = None, image_index: int = -1) -> _get_np().ndarray:
         if img_bgr is None or not isinstance(img_bgr, _get_np().ndarray):
             return img_bgr
         if meta is None or not isinstance(meta, dict):
@@ -4231,7 +4399,7 @@ class _WatermarkBatchTask(QRunnable):
             target_w = max(1.0, float(st.w_norm) * float(w))
             target_h = max(1.0, float(getattr(st, "h_norm", st.w_norm)) * float(h))
             angle = float(st.rotation_deg) + float(angle_offset or 0.0)
-            
+
             # 计算基于参考图片尺寸的缩放比例
             ref_w = int(getattr(st, "ref_image_w", 0) or 0)
             ref_h = int(getattr(st, "ref_image_h", 0) or 0)
@@ -4240,27 +4408,75 @@ class _WatermarkBatchTask(QRunnable):
             size_scale_ratio = 1.0
             if ref_long_edge > 0 and cur_long_edge > 0:
                 size_scale_ratio = float(cur_long_edge) / float(ref_long_edge)
-            
-            # 使用边距计算位置（如果有的话）
-            margin_right = float(getattr(st, "margin_right_px", 0.0) or 0.0)
-            margin_bottom = float(getattr(st, "margin_bottom_px", 0.0) or 0.0)
-            
-            if ref_w > 0 and ref_h > 0 and (margin_right > 0 or margin_bottom > 0):
-                # 使用边距计算位置：保持距离右边和底边的距离不变
-                scale_x = float(w) / float(ref_w)
-                scale_y = float(h) / float(ref_h)
-                scaled_margin_right = margin_right * scale_x
-                scaled_margin_bottom = margin_bottom * scale_y
-                x0 = float(w) - target_w - scaled_margin_right
-                y0 = float(h) - target_h - scaled_margin_bottom
-                x0 = max(0.0, min(x0, float(w) - target_w))
-                y0 = max(0.0, min(y0, float(h) - target_h))
-                cx = x0 + target_w / 2.0
-                cy = y0 + target_h / 2.0
+
+            # 检查是否有自定义位置（非模板图片）
+            custom_positions = getattr(st, "custom_positions", {}) or {}
+            has_custom_position = False
+            custom_x_norm = None
+            custom_y_norm = None
+            if image_index >= 0:
+                image_index_str = str(image_index)
+                if image_index_str in custom_positions:
+                    custom_pos = custom_positions[image_index_str]
+                    custom_x_norm = float(custom_pos.get("x_norm", st.x_norm))
+                    custom_y_norm = float(custom_pos.get("y_norm", st.y_norm))
+                    has_custom_position = True
+
+            if has_custom_position:
+                # 使用自定义位置（用户在该图片上拖动调整的位置）
+                cx = custom_x_norm * float(w)
+                cy = custom_y_norm * float(h)
             else:
-                # 使用归一化坐标计算位置
-                cx = float(st.x_norm) * float(w)
-                cy = float(st.y_norm) * float(h)
+                # 使用边距计算位置（如果有的话）
+                # 从 WatermarkState 获取边距信息和最近边
+                margin_h_px = float(getattr(st, "margin_h_px", 0.0) or 0.0)
+                margin_v_px = float(getattr(st, "margin_v_px", 0.0) or 0.0)
+                nearest_h_edge = str(getattr(st, "nearest_h_edge", "") or "")
+                nearest_v_edge = str(getattr(st, "nearest_v_edge", "") or "")
+                template_image_w = int(getattr(st, "template_image_w", 0) or 0)
+                template_image_h = int(getattr(st, "template_image_h", 0) or 0)
+
+                # 优先使用边距计算位置（如果设置了边距和最近边）
+                if template_image_w > 0 and template_image_h > 0 and (margin_h_px > 0 or margin_v_px > 0):
+                    # 根据模板图片尺寸计算当前图片的缩放比例
+                    scale_x = float(w) / float(template_image_w)
+                    scale_y = float(h) / float(template_image_h)
+
+                    # 根据最近边计算水平位置
+                    if nearest_h_edge == "left":
+                        # 距离左边距
+                        scaled_margin = margin_h_px * scale_x
+                        x0 = scaled_margin
+                    elif nearest_h_edge == "right":
+                        # 距离右边距
+                        scaled_margin = margin_h_px * scale_x
+                        x0 = float(w) - target_w - scaled_margin
+                    else:
+                        # 默认使用归一化坐标
+                        x0 = float(st.x_norm) * float(w) - target_w / 2.0
+
+                    # 根据最近边计算垂直位置
+                    if nearest_v_edge == "top":
+                        # 距离顶边距
+                        scaled_margin = margin_v_px * scale_y
+                        y0 = scaled_margin
+                    elif nearest_v_edge == "bottom":
+                        # 距离底边距
+                        scaled_margin = margin_v_px * scale_y
+                        y0 = float(h) - target_h - scaled_margin
+                    else:
+                        # 默认使用归一化坐标
+                        y0 = float(st.y_norm) * float(h) - target_h / 2.0
+
+                    # 确保不超出边界
+                    x0 = max(0.0, min(x0, float(w) - target_w))
+                    y0 = max(0.0, min(y0, float(h) - target_h))
+                    cx = x0 + target_w / 2.0
+                    cy = y0 + target_h / 2.0
+                else:
+                    # 使用归一化坐标计算位置
+                    cx = float(st.x_norm) * float(w)
+                    cy = float(st.y_norm) * float(h)
             
             if st.kind == "text":
                 txt = self._resolve_text_for_meta(st, meta)
@@ -4417,10 +4633,33 @@ class _WatermarkBatchTask(QRunnable):
                 ph, pw = patch.shape[:2]
                 if ph <= 0 or pw <= 0:
                     continue
+
+                # 计算水印位置，确保不超出图片边界
                 x0 = int(round(cx - float(pw) / 2.0))
                 y0 = int(round(cy - float(ph) / 2.0))
                 x1 = x0 + int(pw)
                 y1 = y0 + int(ph)
+
+                # 如果水印超出边界，调整位置使其完全在图片内
+                if x0 < 0:
+                    x0 = 0
+                    x1 = pw
+                if y0 < 0:
+                    y0 = 0
+                    y1 = ph
+                if x1 > w:
+                    x0 = w - pw
+                    x1 = w
+                if y1 > h:
+                    y0 = h - ph
+                    y1 = h
+
+                # 再次确保不超出边界（处理水印比图片大的情况）
+                x0 = max(0, min(x0, w - pw))
+                y0 = max(0, min(y0, h - ph))
+                x1 = min(w, x0 + pw)
+                y1 = min(h, y0 + ph)
+
                 ix0 = max(0, x0)
                 iy0 = max(0, y0)
                 ix1 = min(w, x1)
@@ -4522,10 +4761,34 @@ class _WatermarkBatchTask(QRunnable):
                         M = _get_cv2().getRotationMatrix2D((new_w / 2.0, new_h / 2.0), angle, 1.0)
                         wm_rgba = _get_cv2().warpAffine(wm_rgba, M, (new_w, new_h), flags=_get_cv2().INTER_CUBIC, borderMode=_get_cv2().BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
                 wh, ww = wm_rgba.shape[:2]
+
+                # 计算水印位置，确保不超出图片边界
+                # 当水印放置在边缘时，旋转后可能会超出边界，需要重新调整位置
                 x0 = int(round(cx - ww / 2.0))
                 y0 = int(round(cy - wh / 2.0))
                 x1 = x0 + ww
                 y1 = y0 + wh
+
+                # 如果水印超出边界，调整位置使其完全在图片内
+                if x0 < 0:
+                    x0 = 0
+                    x1 = ww
+                if y0 < 0:
+                    y0 = 0
+                    y1 = wh
+                if x1 > w:
+                    x0 = w - ww
+                    x1 = w
+                if y1 > h:
+                    y0 = h - wh
+                    y1 = h
+
+                # 再次确保不超出边界（处理水印比图片大的情况）
+                x0 = max(0, min(x0, w - ww))
+                y0 = max(0, min(y0, h - wh))
+                x1 = min(w, x0 + ww)
+                y1 = min(h, y0 + wh)
+
                 ix0 = max(0, x0)
                 iy0 = max(0, y0)
                 ix1 = min(w, x1)
@@ -4804,7 +5067,7 @@ class _WatermarkBatchTask(QRunnable):
                 meta = meta_map.get(p) if isinstance(meta_map, dict) else None
                 meta = _fill_meta_from_exifread(p, meta)
                 meta = _fill_meta_from_db(p, meta)
-                out = self._compose_on_image(img, self.states, angle_offset=angle_offset, meta=meta)
+                out = self._compose_on_image(img, self.states, angle_offset=angle_offset, meta=meta, image_index=i)
                 is_modified = True
                 try:
                     # 这里用像素级对比判断是否真的对图片产生了改动
@@ -5368,6 +5631,498 @@ class _WatermarkSaveCopyTask(_WatermarkBatchTask):
             self.signals.finished.emit(ok, msg or ("另存完成" if ok else "另存失败"), self.dst_path, info)
         except Exception:
             pass
+
+
+class _WatermarkBatchSaveCopySignals(QObject):
+    """批量另存任务的信号类"""
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(bool, str, list)
+
+
+class _WatermarkBatchSaveCopyTask(_WatermarkBatchTask):
+    """
+    批量另存任务类，用于处理多张图片的水印另存操作
+
+    说明：
+    - 继承自 _WatermarkBatchTask，使用父类的 _compose_on_image 方法
+    - 遍历所有选中的图片，对每张图片应用水印并另存
+    - 支持进度报告和完成通知
+    - 支持非模板图片的自定义位置（custom_positions）
+    """
+
+    def __init__(
+        self,
+        file_paths: List[str],
+        states: List[WatermarkState],
+        ref_is_landscape: bool | None = None,
+        auto_rotate: bool = False,
+        preview_max_edge: int = 1600,
+    ):
+        # 调用父类构造，但使用空文件列表（我们在 run 中自己处理）
+        super().__init__([], states, ref_is_landscape=ref_is_landscape, auto_rotate=auto_rotate, preview_max_edge=preview_max_edge)
+        self.file_paths = [str(p) for p in (file_paths or []) if p]
+        self.signals = _WatermarkBatchSaveCopySignals()
+
+    def run(self):
+        """执行批量另存操作"""
+        total = len(self.file_paths)
+        if total == 0:
+            self.signals.finished.emit(False, "没有需要处理的图片", [])
+            return
+
+        success_count = 0
+        failed_count = 0
+        saved_paths = []
+        failed_files = []
+        db_records = []
+        db = None
+        db_err = ""
+        exif_err = ""
+        try:
+            db = BirdLibraryDB()
+        except Exception:
+            db = None
+        try:
+            worker = _get_exif_utils().ExifHandleWorker.get_instance()
+        except Exception:
+            worker = None
+
+        for idx, src_path in enumerate(self.file_paths):
+            try:
+                # 发送进度信号
+                file_name = os.path.basename(src_path)
+                self.signals.progress.emit(idx + 1, total, file_name)
+
+                # 生成目标路径
+                base, ext = os.path.splitext(src_path)
+                if not ext:
+                    ext = ".jpg"
+                else:
+                    try:
+                        if str(ext).upper() in raw_exts:
+                            ext = ".jpg"
+                    except Exception:
+                        pass
+
+                dst_path = f"{base}_watermark{ext}"
+                if os.path.exists(dst_path):
+                    file_idx = 2
+                    while True:
+                        cand = f"{base}_watermark_{file_idx}{ext}"
+                        if not os.path.exists(cand):
+                            dst_path = cand
+                            break
+                        file_idx += 1
+
+                # 确保目标目录存在
+                try:
+                    dst_dir = os.path.dirname(dst_path)
+                    if dst_dir:
+                        os.makedirs(dst_dir, exist_ok=True)
+                except Exception:
+                    pass
+
+                # 读取图片
+                img = None
+                try:
+                    ext_src = os.path.splitext(str(src_path or ""))[1].upper()
+                except Exception:
+                    ext_src = ""
+
+                if ext_src and ext_src in raw_exts:
+                    try:
+                        img = load_image(src_path)
+                    except Exception:
+                        img = None
+
+                if img is None:
+                    try:
+                        img = _qimage_read_bgr(src_path)
+                    except Exception:
+                        img = None
+
+                if img is None:
+                    try:
+                        data = _get_np().fromfile(src_path, dtype=_get_np().uint8)
+                        img = _get_cv2().imdecode(data, _get_cv2().IMREAD_COLOR)
+                    except Exception:
+                        img = None
+
+                if img is None:
+                    try:
+                        img = load_image(src_path)
+                    except Exception:
+                        img = None
+
+                if img is None:
+                    failed_count += 1
+                    failed_files.append(file_name)
+                    continue
+
+                # 读取元数据
+                meta = {}
+                try:
+                    meta_map = _get_tags_multi_merged([src_path], WATERMARK_TAG_READ_LIST, timeout=20)
+                    if isinstance(meta_map, dict):
+                        meta = meta_map.get(src_path) or {}
+                except Exception:
+                    pass
+                try:
+                    meta = _fill_meta_from_db(src_path, meta)
+                except Exception:
+                    pass
+
+                # 应用水印，传递图片索引以支持自定义位置
+                # 注意：批量另存时禁用自动旋转，因为水印位置是基于参考图片计算的
+                out = self._compose_on_image(img, self.states, angle_offset=0.0, meta=meta, image_index=idx)
+
+                # 编码并保存图片
+                enc, ext = self._imencode_like_original(dst_path, out)
+                if not enc:
+                    try:
+                        enc, ext = self._imencode_like_original(src_path, out)
+                    except Exception:
+                        enc = None
+                if not enc:
+                    try:
+                        enc = _qimage_encode_bytes(out, "JPG", quality=100)
+                        if enc:
+                            ext = ".jpg"
+                    except Exception:
+                        enc = None
+
+                if not enc:
+                    failed_count += 1
+                    failed_files.append(file_name)
+                    continue
+
+                # 调整扩展名
+                try:
+                    dst_ext = os.path.splitext(dst_path)[1].lower()
+                    if ext and dst_ext and ext.lower() != dst_ext.lower():
+                        base_path = os.path.splitext(dst_path)[0]
+                        if base_path:
+                            dst_path = base_path + ext
+                except Exception:
+                    pass
+
+                # 写入文件
+                try:
+                    tmp_dir = os.path.dirname(dst_path)
+                    if not tmp_dir:
+                        tmp_dir = tempfile.gettempdir()
+                except Exception:
+                    tmp_dir = tempfile.gettempdir()
+
+                tmp_fd = None
+                tmp_path = ""
+                try:
+                    tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext), dir=tmp_dir)
+                except Exception:
+                    tmp_fd, tmp_path = tempfile.mkstemp(prefix="bmp_wm_", suffix=str(ext))
+
+                try:
+                    if tmp_fd is not None:
+                        os.close(tmp_fd)
+                except Exception:
+                    pass
+
+                try:
+                    with open(tmp_path, "wb") as wf:
+                        wf.write(enc)
+                    try:
+                        self._copy_exif(src_path, tmp_path)
+                    except Exception:
+                        pass
+                    os.replace(tmp_path, dst_path)
+                except Exception:
+                    try:
+                        with open(dst_path, "wb") as wf:
+                            wf.write(enc)
+                    except Exception:
+                        failed_count += 1
+                        failed_files.append(file_name)
+                        continue
+
+                # 检查是否成功
+                if os.path.exists(dst_path):
+                    success_count += 1
+                    saved_paths.append(dst_path)
+                    new_uuid = ""
+                    try:
+                        new_uuid = get_unique_id()
+                    except Exception:
+                        new_uuid = ""
+                    dst_fastid = None
+                    try:
+                        dst_fastid = get_fast_id(dst_path)
+                    except Exception:
+                        dst_fastid = None
+                    src_record = None
+                    if db is not None:
+                        try:
+                            uuid_key = str(_get_exif_utils().EXIF_TAG.Uuid.value)
+                            src_uuid = _first_non_empty(meta.get(uuid_key), _meta_first(meta, uuid_key), _meta_first(meta, "Uuid"))
+                        except Exception:
+                            src_uuid = ""
+                        try:
+                            fastid_key = str(_get_exif_utils().EXIF_TAG.Fastid.value)
+                            src_fastid = _first_non_empty(meta.get(fastid_key), _meta_first(meta, fastid_key), _meta_first(meta, "Fastid"))
+                        except Exception:
+                            src_fastid = ""
+                        if src_uuid:
+                            try:
+                                src_record = db.get_result_by_uuid(str(src_uuid).strip(), table_name="bird_results")
+                                if not src_record:
+                                    src_record = db.get_result_by_uuid(str(src_uuid).strip(), table_name="import_cache")
+                            except Exception:
+                                src_record = None
+                        if not src_record and src_fastid:
+                            try:
+                                src_record = db.get_result_by_fast_id(str(src_fastid).strip(), table_name="bird_results")
+                                if not src_record:
+                                    src_record = db.get_result_by_fast_id(str(src_fastid).strip(), table_name="import_cache")
+                            except Exception:
+                                src_record = None
+                        if not src_record:
+                            try:
+                                src_fastid2 = get_fast_id(src_path)
+                            except Exception:
+                                src_fastid2 = None
+                            if src_fastid2:
+                                try:
+                                    src_record = db.get_result_by_fast_id(str(src_fastid2).strip(), table_name="bird_results")
+                                    if not src_record:
+                                        src_record = db.get_result_by_fast_id(str(src_fastid2).strip(), table_name="import_cache")
+                                except Exception:
+                                    src_record = None
+                    try:
+                        imported_at_now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+                    except Exception:
+                        imported_at_now = ""
+                    try:
+                        label = _first_non_empty(str((src_record or {}).get("label") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.Label.value)))
+                    except Exception:
+                        label = ""
+                    try:
+                        order_cls = _first_non_empty(str((src_record or {}).get("order_cls") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.OrderCls.value)))
+                    except Exception:
+                        order_cls = ""
+                    try:
+                        family_cls = _first_non_empty(str((src_record or {}).get("family_cls") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.FamilyCls.value)))
+                    except Exception:
+                        family_cls = ""
+                    try:
+                        genus_cls = _first_non_empty(str((src_record or {}).get("genus_cls") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.GenusCls.value)))
+                    except Exception:
+                        genus_cls = ""
+                    try:
+                        species = _first_non_empty(str((src_record or {}).get("species_cls") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.SpeciesCls.value)))
+                    except Exception:
+                        species = ""
+                    try:
+                        location = _first_non_empty(str((src_record or {}).get("location") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.Location.value)), _meta_first(meta, "XMP-bmp:Location"), _meta_first(meta, "Xmp-bmp:Location"))
+                    except Exception:
+                        location = ""
+                    try:
+                        tags = _first_non_empty(str((src_record or {}).get("tags") or ""), _meta_first(meta, str(_get_exif_utils().EXIF_TAG.Tags.value)))
+                    except Exception:
+                        tags = ""
+                    try:
+                        bbox = (src_record or {}).get("bbox")
+                    except Exception:
+                        bbox = None
+                    try:
+                        position = (src_record or {}).get("position")
+                    except Exception:
+                        position = None
+                    try:
+                        pixel_count = int((src_record or {}).get("pixel_count") or 0)
+                    except Exception:
+                        pixel_count = 0
+                    try:
+                        area_ratio = float((src_record or {}).get("area_ratio") or 0.0)
+                    except Exception:
+                        area_ratio = 0.0
+                    try:
+                        focus_point = (src_record or {}).get("focus_point")
+                    except Exception:
+                        focus_point = None
+                    try:
+                        focus_detect_json = (src_record or {}).get("focus_detect_json")
+                    except Exception:
+                        focus_detect_json = None
+                    try:
+                        eye_coordinates = (src_record or {}).get("eye_coordinates")
+                    except Exception:
+                        eye_coordinates = None
+                    try:
+                        description = str((src_record or {}).get("description") or "")
+                    except Exception:
+                        description = ""
+                    try:
+                        rating = int((src_record or {}).get("rating") or 0)
+                    except Exception:
+                        rating = 0
+                    try:
+                        is_favorite = int((src_record or {}).get("is_favorite") or 0)
+                    except Exception:
+                        is_favorite = 0
+                    try:
+                        shot_time = str((src_record or {}).get("shot_time") or "")
+                    except Exception:
+                        shot_time = ""
+                    try:
+                        fnumber = float((src_record or {}).get("fnumber") or 0.0)
+                    except Exception:
+                        fnumber = 0.0
+                    try:
+                        shutter = str((src_record or {}).get("shutter") or "")
+                    except Exception:
+                        shutter = ""
+                    try:
+                        iso = float((src_record or {}).get("iso") or 0)
+                    except Exception:
+                        iso = 0
+                    try:
+                        focal_length = str((src_record or {}).get("focal_length") or "")
+                    except Exception:
+                        focal_length = ""
+                    try:
+                        camera_model = str((src_record or {}).get("camera_model") or "")
+                    except Exception:
+                        camera_model = ""
+                    try:
+                        lens_model = str((src_record or {}).get("lens_model") or "")
+                    except Exception:
+                        lens_model = ""
+                    try:
+                        focus_distance = str((src_record or {}).get("focus_distance") or "")
+                    except Exception:
+                        focus_distance = ""
+                    try:
+                        lat = float((src_record or {}).get("latitude") or 0.0)
+                    except Exception:
+                        lat = 0.0
+                    try:
+                        lng = float((src_record or {}).get("longitude") or 0.0)
+                    except Exception:
+                        lng = 0.0
+                    if db is not None and new_uuid:
+                        try:
+                            db_records.append(
+                                {
+                                    "uuid": new_uuid,
+                                    "fast_id": dst_fastid,
+                                    "path": dst_path,
+                                    "file": os.path.basename(dst_path),
+                                    "shot_time": shot_time,
+                                    "order_cls": order_cls,
+                                    "family_cls": family_cls,
+                                    "genus_cls": genus_cls,
+                                    "species_cls": species,
+                                    "label": label,
+                                    "score": 0.0,
+                                    "norm_score": 0,
+                                    "bbox": bbox,
+                                    "position": position,
+                                    "pixel_count": pixel_count,
+                                    "area_ratio": area_ratio,
+                                    "focus_point": focus_point,
+                                    "object": species,
+                                    "eye_coordinates": eye_coordinates,
+                                    "description": description,
+                                    "focus_detect_json": focus_detect_json,
+                                    "is_favorite": is_favorite,
+                                    "rating": rating,
+                                    "fnumber": fnumber,
+                                    "shutter": shutter,
+                                    "iso": iso,
+                                    "focal_length": focal_length,
+                                    "camera_model": camera_model,
+                                    "lens_model": lens_model,
+                                    "focus_distance": focus_distance,
+                                    "latitude": lat,
+                                    "longitude": lng,
+                                    "location": location,
+                                    "tags": tags,
+                                    "imported_at": imported_at_now,
+                                }
+                            )
+                        except Exception:
+                            pass
+                    if worker is not None and new_uuid:
+                        try:
+                            tag_map = {
+                                str(_get_exif_utils().EXIF_TAG.Uuid.value): str(new_uuid),
+                                str(_get_exif_utils().EXIF_TAG.Fastid.value): str(dst_fastid or ""),
+                                str(_get_exif_utils().EXIF_TAG.Object.value): str(species or ""),
+                                str(_get_exif_utils().EXIF_TAG.OrderCls.value): str(order_cls or ""),
+                                str(_get_exif_utils().EXIF_TAG.FamilyCls.value): str(family_cls or ""),
+                                str(_get_exif_utils().EXIF_TAG.GenusCls.value): str(genus_cls or ""),
+                                str(_get_exif_utils().EXIF_TAG.SpeciesCls.value): str(species or ""),
+                                str(_get_exif_utils().EXIF_TAG.Location.value): str(location or ""),
+                                str(_get_exif_utils().EXIF_TAG.Tags.value): str(tags or ""),
+                                str(_get_exif_utils().EXIF_TAG.Label.value): str(label or ""),
+                                str(_get_exif_utils().EXIF_TAG.Rating.value): str(int(rating or 0)),
+                                str(_get_exif_utils().EXIF_TAG.Favorite.value): str(int(is_favorite or 0)),
+                            }
+                            worker.write_tags(dst_path, tag_map)
+                        except Exception:
+                            try:
+                                import traceback
+
+                                exif_err = traceback.format_exc()
+                            except Exception:
+                                exif_err = "Exif写入失败"
+                else:
+                    failed_count += 1
+                    failed_files.append(file_name)
+
+            except Exception as e:
+                failed_count += 1
+                try:
+                    failed_files.append(os.path.basename(src_path))
+                except Exception:
+                    pass
+                try:
+                    LogManager.instance().warning(f"[WatermarkBatchSave] 处理失败: {src_path}, 错误: {str(e)}")
+                except Exception:
+                    pass
+
+        if db is not None and db_records:
+            try:
+                db.save_results_batch(db_records, table_name="bird_results")
+            except Exception:
+                try:
+                    import traceback
+
+                    db_err = traceback.format_exc()
+                except Exception:
+                    db_err = "入库失败"
+
+        # 生成完成消息
+        if success_count == total:
+            msg = f"成功另存 {success_count} 张图片"
+            ok = True
+        elif success_count > 0:
+            msg = f"另存完成: 成功 {success_count} 张, 失败 {failed_count} 张"
+            if failed_files:
+                msg += f" ({', '.join(failed_files[:3])}"
+                if len(failed_files) > 3:
+                    msg += " 等"
+                msg += ")"
+            ok = True
+        else:
+            msg = "另存失败，请检查文件权限或磁盘空间"
+            ok = False
+        if ok and (db_err or exif_err):
+            if not msg:
+                msg = "另存完成，但入库或Exif写入存在异常"
+            else:
+                msg = str(msg) + "（入库或Exif写入存在异常）"
+
+        self.signals.finished.emit(ok, msg, saved_paths)
 
 
 class _MetaLoadSignals(QObject):
@@ -7018,15 +7773,30 @@ class WatermarkDialog(BasePopupDialog):
         self.btn_prev.setEnabled(self._index > 0)
         self.btn_next.setEnabled(self._index < (n - 1))
 
+    def _sync_wm_items(self):
+        try:
+            if not isinstance(getattr(self, "_wm_items", None), dict):
+                return
+        except Exception:
+            return
+        for it in list(self._wm_items.values()):
+            try:
+                if it is not None:
+                    it._sync_state_from_item()
+            except Exception:
+                pass
+
     def _prev_image(self):
         if self._index <= 0:
             return
+        self._sync_wm_items()
         self._index -= 1
         self._render_preview()
 
     def _next_image(self):
         if self._index >= len(self.file_paths) - 1:
             return
+        self._sync_wm_items()
         self._index += 1
         self._render_preview()
 
@@ -8527,6 +9297,7 @@ class WatermarkDialog(BasePopupDialog):
                     it.setZValue(10 + i)
                     # 更新水印项的当前图片索引，确保 is_template_image 判断正确
                     it._current_image_index = self._index
+                    it._current_image_path = str(path or "")
                     it._update_from_state()
                 except Exception:
                     pass
@@ -8804,6 +9575,7 @@ class WatermarkDialog(BasePopupDialog):
                 render_requester=self,
                 orig_image_size=QSize(self._current_orig_w, self._current_orig_h),
                 current_image_index=self._index,
+                current_image_path=str(path or ""),
             )
             it.setVisible(bool(st2.visible))
             it.setZValue(10 + len(self._wm_items))
@@ -8968,12 +9740,15 @@ class WatermarkDialog(BasePopupDialog):
         self._schedule_preview_update(True)
 
     def _save_copy_clicked(self):
+        """
+        处理另存按钮点击事件，对所有选中的图片应用水印并另存
+
+        说明：
+        - 遍历所有 file_paths 中的图片，对每张图片应用当前水印设置
+        - 使用 _WatermarkBatchSaveCopyTask 在后台线程执行批量另存
+        - 显示进度条和完成通知
+        """
         if not self.file_paths:
-            return
-        if self._index < 0 or self._index >= len(self.file_paths):
-            return
-        src_path = str(self.file_paths[self._index] or "")
-        if not src_path:
             return
         self._refresh_layer_list()
         # 用户点击“另存”属于真实写入操作（会生成新文件）
@@ -8982,35 +9757,29 @@ class WatermarkDialog(BasePopupDialog):
         except Exception:
             pass
         auto_rotate = True
-        base, ext = os.path.splitext(src_path)
-        if not ext:
-            ext = ".jpg"
-        else:
-            try:
-                if str(ext).upper() in raw_exts:
-                    ext = ".jpg"
-            except Exception:
-                pass
-        dst_path = f"{base}_watermark{ext}"
-        if os.path.exists(dst_path):
-            idx = 2
-            while True:
-                cand = f"{base}_watermark_{idx}{ext}"
-                if not os.path.exists(cand):
-                    dst_path = cand
-                    break
-                idx += 1
-        task = _WatermarkSaveCopyTask(
-            src_path,
-            dst_path,
+
+        # 创建批量另存任务，处理所有选中的图片
+        task = _WatermarkBatchSaveCopyTask(
+            self.file_paths,
             self._states,
             ref_is_landscape=getattr(self, "_ref_is_landscape", None),
             auto_rotate=auto_rotate,
             preview_max_edge=int(getattr(self, "_preview_max_edge", 1600) or 1600),
         )
-        self._save_copy_task = task
+        self._batch_save_copy_task = task
         self.btn_save_copy.setEnabled(False)
-        task.signals.finished.connect(self._on_save_copy_finished)
+        self.progress.setValue(0)
+        self.lbl_progress.setText("")
+        try:
+            self.lbl_progress.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self.progress.setVisible(True)
+        except Exception:
+            pass
+        task.signals.progress.connect(self._on_batch_save_progress)
+        task.signals.finished.connect(self._on_batch_save_copy_finished)
         self._thread_pool.start(task)
 
     def _write_clicked(self):
@@ -9181,6 +9950,124 @@ class WatermarkDialog(BasePopupDialog):
                     pass
                 try:
                     parent.refresh_thumbnail(dst_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_batch_save_progress(self, cur: int, total: int, name: str):
+        """
+        批量另存进度更新
+
+        参数：
+        - cur: 当前处理的图片序号
+        - total: 总共需要处理的图片数量
+        - name: 当前处理的文件名
+        """
+        total = max(1, int(total))
+        cur = max(0, int(cur))
+        self.progress.setValue(int(round(cur / float(total) * 100.0)))
+        self.lbl_progress.setText(f"另存 {cur}/{total}  {name}")
+        try:
+            self.lbl_progress.setVisible(True)
+        except Exception:
+            pass
+
+    def _on_batch_save_copy_finished(self, ok: bool, message: str, saved_paths: list):
+        """
+        批量另存完成后的处理
+
+        参数：
+        - ok: 是否成功
+        - message: 完成消息
+        - saved_paths: 成功保存的文件路径列表
+        """
+        try:
+            self.btn_save_copy.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            self.progress.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self.lbl_progress.setVisible(False)
+        except Exception:
+            pass
+
+        if ok:
+            NotificationManager.instance().show_toast(str(message or "另存完成"), 3000, parent=self, position="top")
+        else:
+            NotificationManager.instance().show_warning("完成", str(message or "另存失败"))
+
+        if not ok or not saved_paths:
+            return
+
+        # 另存属于"新增文件"，这里记录为变更路径，便于父页面（如有需要）做后续精确刷新
+        try:
+            self._last_changed_paths = [str(p) for p in (saved_paths or []) if p]
+            self._last_unchanged_paths = []
+        except Exception:
+            pass
+
+        # 通知父页面刷新
+        try:
+            parent = self.parent()
+            if parent is None:
+                return
+
+            # 获取所有保存文件的目录
+            saved_dirs = set()
+            for dst_path in saved_paths:
+                try:
+                    saved_dirs.add(os.path.normpath(os.path.dirname(dst_path)))
+                except Exception:
+                    pass
+
+            cur_folder = getattr(parent, "current_folder_path", "")
+
+            # 如果在分类视图，刷新分类
+            if cur_folder and cur_folder.startswith("virtual://taxonomy"):
+                if hasattr(parent, "load_images_from_taxonomy"):
+                    parent.load_images_from_taxonomy(cur_folder)
+                    return
+
+            # 如果保存的目录与当前目录匹配，刷新文件夹
+            # 使用延迟刷新，确保文件系统已经同步
+            for saved_dir in saved_dirs:
+                if cur_folder and os.path.normpath(cur_folder) == saved_dir:
+                    if hasattr(parent, "load_images_from_folder"):
+                        # 延迟 1500ms 刷新，确保文件系统已经同步
+                        # 使用默认参数捕获 cur_folder 的当前值
+                        def _delayed_refresh(folder=cur_folder, p=parent, paths=saved_paths):
+                            try:
+                                # 强制刷新文件系统缓存
+                                for path in paths:
+                                    try:
+                                        if os.path.exists(path):
+                                            # 读取文件元数据强制刷新缓存
+                                            os.stat(path)
+                                    except Exception:
+                                        pass
+                                p.load_images_from_folder(folder)
+                            except Exception as e:
+                                try:
+                                    LogManager.instance().warning(f"[WatermarkBatchSave] 刷新文件夹失败: {e}")
+                                except Exception:
+                                    pass
+                        QTimer.singleShot(1500, _delayed_refresh)
+                        return
+
+            # 否则尝试应用过滤器和刷新缩略图
+            try:
+                parent.apply_quick_filters()
+            except Exception:
+                pass
+
+            # 刷新第一个保存的图片缩略图
+            if saved_paths:
+                try:
+                    parent.refresh_thumbnail(saved_paths[0])
                 except Exception:
                     pass
         except Exception:

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout,
                              QComboBox, QSlider, QGridLayout, QStatusBar, QSplitter, QMenu, QFileDialog, QInputDialog)
 
 from PyQt6.QtCore import Qt, QSize, QRect, QTimer, QPoint, QEvent, QObject, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QShortcut, QKeySequence, QImageReader
+from PyQt6.QtGui import QPixmap, QShortcut, QKeySequence, QImageReader, QPainter, QColor, QPen, QBrush, QRadialGradient, QIcon
 import threading
 import time
 from collections import deque
@@ -2420,9 +2420,18 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
     def on_thumbnail_double_clicked(self, index):
         """双击缩略图，切换到大图浏览模式"""
-        if 0 <= index < len(self.image_files):
-            # 创建并显示 ImageDetailPanel
-            self.show_detail_panel(index)
+        try:
+            if 0 <= index < len(self.image_files):
+                self.show_detail_panel(index)
+        except Exception as e:
+            try:
+                LogManager.instance().exception("双击进入大图失败", e)
+            except Exception:
+                pass
+            try:
+                NotificationManager.instance().show_warning("错误", f"进入大图失败: {e}")
+            except Exception:
+                pass
 
     def on_compare_clicked(self):
         """Handle compare button click"""
@@ -2879,7 +2888,25 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 rating_menu.addAction(r_action)
 
             # 色标菜单
-            label_menu = menu.addMenu(qta.icon('mdi.circle', color='#2196F3'), "设置色标")
+            label_menu = menu.addMenu("设置色标")
+            try:
+                pm = QPixmap(16, 16)
+                pm.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pm)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                rect = QRect(1, 1, 14, 14)
+                base_color = QColor("#2196F3")
+                grad = QRadialGradient(rect.x() + 14 * 0.3, rect.y() + 14 * 0.3, 14 * 0.8)
+                grad.setColorAt(0, base_color.lighter(130))
+                grad.setColorAt(0.5, base_color)
+                grad.setColorAt(1, base_color.darker(110))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(grad))
+                painter.drawEllipse(rect)
+                painter.end()
+                label_menu.setIcon(QIcon(pm))
+            except Exception:
+                pass
             
             # 定义颜色列表
             labels = [
@@ -2905,13 +2932,28 @@ class ImageLibraryPage(BaseImageBrowserPage):
             
             for en_name, cn_name, color_hex in labels:
                 action = label_menu.addAction(cn_name)
-                # 针对白色图标特殊处理，添加灰色边框效果
-                if en_name == "White":
-                     # 使用叠加图标模拟边框效果
-                     icon = qta.icon('mdi.circle-outline', 'mdi.circle', color=['#A0A0A0', color_hex])
-                     action.setIcon(icon)
-                else:
-                     action.setIcon(qta.icon('mdi.circle', color=color_hex))
+                try:
+                    pm = QPixmap(16, 16)
+                    pm.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(pm)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    rect = QRect(1, 1, 14, 14)
+                    base_color = QColor(str(color_hex or "#000000"))
+                    grad = QRadialGradient(rect.x() + 14 * 0.3, rect.y() + 14 * 0.3, 14 * 0.8)
+                    grad.setColorAt(0, base_color.lighter(130))
+                    grad.setColorAt(0.5, base_color)
+                    grad.setColorAt(1, base_color.darker(110))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(grad))
+                    painter.drawEllipse(rect)
+                    if en_name == "White":
+                        painter.setPen(QPen(QColor("#A0A0A0"), 1))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawEllipse(rect)
+                    painter.end()
+                    action.setIcon(QIcon(pm))
+                except Exception:
+                    pass
                 action.triggered.connect(lambda checked=False, l=en_name: self.set_label_selection(l))
 
             # 地理位置

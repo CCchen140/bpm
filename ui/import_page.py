@@ -2700,7 +2700,17 @@ class ImportPage(BaseImageBrowserPage):
             idx = -1
         if idx < 0 or idx >= len(self.image_files):
             return
-        self.show_detail_panel(idx)
+        try:
+            self.show_detail_panel(idx)
+        except Exception as e:
+            try:
+                LogManager.instance().exception("双击进入大图失败", e)
+            except Exception:
+                pass
+            try:
+                NotificationManager.instance().show_warning("错误", f"进入大图失败: {e}")
+            except Exception:
+                pass
 
     def on_compare_clicked(self):
         selected = self.get_selected_files()
@@ -10712,6 +10722,31 @@ class ImportPage(BaseImageBrowserPage):
             return f"{m}分{sec}秒"
         return f"{sec}秒"
 
+    def _get_focus_detect_device_text(self) -> str:
+        try:
+            opts = dict(getattr(self, "_focus_detect_last_options", None) or {})
+        except Exception:
+            opts = {}
+        try:
+            want_gpu = bool(opts.get("use_gpu", False))
+        except Exception:
+            want_gpu = False
+
+        if not want_gpu:
+            return "CPU"
+
+        try:
+            from utils.system.gpu_utils import is_torch_cuda_usable, get_torch_cuda_check_brief
+
+            if bool(is_torch_cuda_usable()):
+                return "GPU"
+            brief = str(get_torch_cuda_check_brief() or "").strip()
+            if brief:
+                return f"CPU（GPU不可用：{brief}）"
+        except Exception:
+            pass
+        return "CPU（GPU不可用）"
+
     def _refresh_focus_progress_ui(self):
         """
         刷新中间图库面板中的对焦检测进度显示。
@@ -10885,7 +10920,11 @@ class ImportPage(BaseImageBrowserPage):
                 text = f"当前操作：{op}"
 
         try:
-            overlay.set_progress(visible=True, current=done, total=total, text=text)
+            try:
+                device_txt = self._get_focus_detect_device_text()
+            except Exception:
+                device_txt = ""
+            overlay.set_progress(visible=True, current=done, total=total, text=text, device_text=device_txt)
         except Exception:
             pass
 
@@ -12305,11 +12344,17 @@ class ImportPage(BaseImageBrowserPage):
             if bool(getattr(self, "is_virtual_mode", False)):
                 overlay = getattr(self, "_focus_progress_overlay", None)
                 if overlay is not None and hasattr(overlay, "set_progress"):
+                    try:
+                        device_txt = self._get_focus_detect_device_text()
+                    except Exception:
+                        device_txt = ""
+                    base_text = "当前操作：准备中"
                     overlay.set_progress(
                         visible=True,
                         current=int(self._focus_progress_done),
                         total=int(self._focus_progress_total),
-                        text="当前操作：准备中",
+                        text=base_text,
+                        device_text=device_txt,
                     )
         except Exception:
             pass
@@ -14557,16 +14602,16 @@ class ImportPage(BaseImageBrowserPage):
                 pass
 
         try:
-            exif_mode = str((options or {}).get("exif_write_mode", "") or "").strip().lower()
+            exif_mode = str(self.settings_manager.get("exif/write_mode", "file") or "file").strip().lower()
         except Exception:
-            exif_mode = ""
-        if exif_mode in ("file", "xmp", "none"):
-            try:
-                self.settings_manager.set("exif/write_mode", exif_mode)
-                self.settings_manager.set("exif/disable_write", exif_mode == "none")
-                self.settings_manager.sync()
-            except Exception:
-                pass
+            exif_mode = "file"
+        if exif_mode not in ("file", "xmp", "none"):
+            exif_mode = "file"
+        try:
+            if bool(self.settings_manager.get("exif/disable_write", False)):
+                exif_mode = "none"
+        except Exception:
+            pass
         if exif_mode != "none" and exif_worker is not None and paths:
             exif_tasks = []
             for p in (paths or []):

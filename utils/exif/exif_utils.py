@@ -368,6 +368,7 @@ def run_exiftool(cmd, *, timeout: float | None = None):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             **_subprocess_no_console_kwargs(),
         )

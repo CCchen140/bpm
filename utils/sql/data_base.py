@@ -613,12 +613,55 @@ class BirdLibraryDB:
             pass
         return conn
 
+    def _check_database_integrity(self):
+        """检查数据库完整性，如果损坏则备份并重建"""
+        if not os.path.exists(self.db_path):
+            return True
+        
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA integrity_check")
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result and result[0] == 'ok':
+                return True
+            
+            LogManager.instance().warning(f"[DB] Database integrity check failed: {result}")
+            return False
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Database integrity check error: {e}")
+            return False
+
+    def _backup_and_rebuild_database(self):
+        """备份损坏的数据库并重建"""
+        try:
+            import shutil
+            from datetime import datetime
+            
+            backup_path = f"{self.db_path}.corrupted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            shutil.copy2(self.db_path, backup_path)
+            LogManager.instance().info(f"[DB] Corrupted database backed up to: {backup_path}")
+            
+            os.remove(self.db_path)
+            LogManager.instance().info(f"[DB] Corrupted database removed, will create new one")
+            return True
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to backup/rebuild database: {e}")
+            return False
+
     def _init_db(self):
         """初始化数据库：创建表结构"""
         try:
             LogManager.instance().info(f"[DB] Initializing database at {self.db_path}")
         except Exception:
             pass
+        
+        if os.path.exists(self.db_path):
+            if not self._check_database_integrity():
+                self._backup_and_rebuild_database()
+        
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()

@@ -108,6 +108,14 @@ class LoadingOverlay(QWidget):
             self.progress_bar.setMaximum(0) # 忙碌状态
             
         if message:
+            try:
+                from utils.system.gpu_utils import get_torch_cuda_check_brief
+
+                gpu_txt = str(get_torch_cuda_check_brief() or "").strip()
+            except Exception:
+                gpu_txt = ""
+            if gpu_txt and ("GPU检测：" not in str(message)):
+                message = f"{message} | GPU检测：{gpu_txt}"
             self.status_label.setText(message)
 
     def resizeEvent(self, event):

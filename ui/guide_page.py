@@ -540,6 +540,17 @@ class IntroPage(QWidget):
         if not self.progress_container.isVisible():
             self.progress_container.show()
             
+        try:
+            from utils.system.gpu_utils import get_torch_cuda_check_brief
+
+            gpu_txt = str(get_torch_cuda_check_brief() or "").strip()
+        except Exception:
+            gpu_txt = ""
+        try:
+            if gpu_txt and ("GPU检测：" not in str(message)):
+                message = f"{message} | GPU检测：{gpu_txt}"
+        except Exception:
+            pass
         self.progress_label.setText(message)
         if total > 0:
             self.progress_bar.setRange(0, total)

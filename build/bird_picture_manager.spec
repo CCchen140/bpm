@@ -79,22 +79,33 @@ try:
     suffix = str(os.environ.get("BPM_NAME_SUFFIX") or "").strip()
 except Exception:
     suffix = ""
-if suffix:
-    suffix = re.sub(r"[^0-9A-Za-z_\-]+", "_", suffix)
-    app_name = f"{app_name}_{suffix}"
 
+# 构建版本号（移除 V/v 前缀）
+v_token = ""
 try:
     v = str(app_version or "").strip()
+    if v:
+        v_token = re.sub(r"[^0-9A-Za-z_.\-]+", "_", v)
+        # 移除版本号前的 V/v
+        if v_token.lower().startswith('v'):
+            v_token = v_token[1:]
 except Exception:
-    v = ""
-v_token = ""
-if v:
-    v_token = re.sub(r"[^0-9A-Za-z_.\-]+", "_", v)
+    pass
 
-exe_name = str(app_name)
-dist_name = str(app_name)
+# 确定 cpu/gpu 后缀
+flavor_suffix = ""
+if suffix and suffix.lower() in ("cpu", "gpu"):
+    flavor_suffix = suffix.lower()
+
+# 构建 dist 目录名称：栖图_Vx.x.x_gpu 或 栖图_Vx.x.x_cpu
+dist_name = "栖图"
 if v_token:
-    dist_name = f"{dist_name}_{v_token}"
+    dist_name = f"{dist_name}_V{v_token}"
+if flavor_suffix:
+    dist_name = f"{dist_name}_{flavor_suffix}"
+
+# exe 名称保持为中文名
+exe_name = "栖图"
 
 icon_path = os.path.join(BUILD_DIR, "ph.bird-fill.ico")
 if not os.path.exists(icon_path):
@@ -164,6 +175,60 @@ try:
         binaries += collect_dynamic_libs("PyQt6.QtWebEngineCore")
         binaries += collect_dynamic_libs("PyQt6.QtWebEngineWidgets")
         binaries += collect_dynamic_libs("PyQt6.QtWebChannel")
+except Exception:
+    pass
+
+# 收集 torch 相关模块和数据
+try:
+    if collect_submodules is not None:
+        hiddenimports += collect_submodules("torch")
+        hiddenimports += collect_submodules("torch.nn")
+        hiddenimports += collect_submodules("torch.optim")
+        hiddenimports += collect_submodules("torch.utils")
+        hiddenimports += collect_submodules("torch.onnx")
+except Exception:
+    pass
+
+try:
+    if collect_data_files is not None:
+        datas += collect_data_files("torch", includes=["**/*.dll", "**/*.so", "**/*.pyd", "**/*.json"])
+except Exception:
+    pass
+
+try:
+    if collect_dynamic_libs is not None:
+        binaries += collect_dynamic_libs("torch")
+        binaries += collect_dynamic_libs("torch._C")
+except Exception:
+    pass
+
+try:
+    if collect_submodules is not None:
+        hiddenimports += collect_submodules("ultralytics")
+except Exception:
+    pass
+
+try:
+    if collect_data_files is not None:
+        datas += collect_data_files("ultralytics")
+except Exception:
+    pass
+
+try:
+    import nvidia as _nvidia
+
+    _nvidia_dir = os.path.dirname(getattr(_nvidia, "__file__", "") or "")
+    if _nvidia_dir and os.path.isdir(_nvidia_dir):
+        for _src in glob.glob(os.path.join(_nvidia_dir, "**", "*.dll"), recursive=True):
+            try:
+                rel = os.path.relpath(os.path.dirname(_src), _nvidia_dir)
+            except Exception:
+                rel = ""
+            low_rel = str(rel or "").replace("\\", "/").lower()
+            if "/bin" not in f"/{low_rel}/":
+                continue
+            dest = os.path.join("nvidia", rel).replace("\\", "/")
+            binaries.append((_src, dest))
 except Exception:
     pass
 
@@ -242,14 +307,7 @@ analysis = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[
-        "torch._dynamo",
-        "torch._inductor",
-        "torch.distributed",
-        "torch.testing",
-        "torch.utils.benchmark",
-        "torch.utils.tensorboard",
-    ],
+    excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     noarchive=False,

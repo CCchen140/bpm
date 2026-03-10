@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit
 from ui.utils.icon_loader import qta
 
 from core.classifier.bird_biological_classifier import BirdBiologicalClassifier
-from core.detectors.bird_focus_detector import BirdFocusDetector
 from core.recognizer.bird_species_recognizer import BirdSpeciesRecognizer
 from ui.utils.color_manager import ColorManager
 from ui.utils.notification_manager import NotificationManager
@@ -280,7 +279,16 @@ class EditSpeciesDialog(QDialog):
     def _run_recognition(self):
         try:
              # Detect & Crop
-             detector = BirdFocusDetector()
+             use_gpu = True
+             try:
+                 from utils.setting.settings_manager import SettingsManager
+
+                 use_gpu = bool(SettingsManager.instance().get("focus_detect/use_gpu", True))
+             except Exception:
+                 use_gpu = True
+             from core.detectors.bird_focus_detector import BirdFocusDetector
+
+             detector = BirdFocusDetector(use_gpu=bool(use_gpu))
              res = detector.detect_file(self._image_path)
              
              final_path = self._image_path

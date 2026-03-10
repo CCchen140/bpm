@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional, Sequence
 import os
+import sys
 import queue
 import shutil
 import threading
@@ -12,6 +13,23 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime
 
 from utils.log_manager import LogManager
+
+
+_STD_DEVNULL = None
+
+
+def _ensure_std_streams():
+    global _STD_DEVNULL
+    try:
+        if sys.stdout is None or sys.stderr is None:
+            if _STD_DEVNULL is None:
+                _STD_DEVNULL = open(os.devnull, "w")
+            if sys.stdout is None:
+                sys.stdout = _STD_DEVNULL
+            if sys.stderr is None:
+                sys.stderr = _STD_DEVNULL
+    except Exception:
+        pass
 
 
 def _get_project_root() -> str:
@@ -162,12 +180,19 @@ def _resolve_valid_yolo_seg_model_path(model: str) -> str:
 
 _FOCUS_DETECTOR_WORKER_INSTANCE = None
 _FOCUS_DETECT_EYE_ENABLED = False
+_FOCUS_DETECTOR_WORKER_FALLBACK = False
+_FOCUS_DETECTOR_WORKER_INIT_ERROR = ""
 
 
 def clear_focus_detector():
-    global _FOCUS_DETECTOR_WORKER_INSTANCE
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECTOR_WORKER_FALLBACK, _FOCUS_DETECTOR_WORKER_INIT_ERROR
     det = _FOCUS_DETECTOR_WORKER_INSTANCE
     _FOCUS_DETECTOR_WORKER_INSTANCE = None
+    try:
+        _FOCUS_DETECTOR_WORKER_FALLBACK = False
+        _FOCUS_DETECTOR_WORKER_INIT_ERROR = ""
+    except Exception:
+        pass
     try:
         focus_trace("clear_focus_detector: begin")
     except Exception:
@@ -185,19 +210,153 @@ def clear_focus_detector():
     except Exception:
         pass
     try:
-        import torch
+        from utils.system.gpu_utils import try_clear_torch_cuda_cache
 
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        try_clear_torch_cuda_cache()
     except Exception:
         pass
     try:
         focus_trace("clear_focus_detector: done")
     except Exception:
         pass
+
+
+def _focus_detect_cpu_fallback_one_path(image_path: str, af_focus_point=None) -> Dict[str, Any]:
+    t0 = time.perf_counter()
+    p = ""
+    try:
+        p = str(image_path or "")
+    except Exception:
+        p = ""
+    out: Dict[str, Any] = {"path": p}
+    try:
+        out["focus_point"] = af_focus_point
+    except Exception:
+        pass
+    try:
+        import utils.file.file as FileUtils
+    except Exception:
+        FileUtils = None
+    try:
+        import cv2
+        import numpy as np
+    except Exception as e:
+        out["_error"] = str(e)
+        try:
+            out["_elapsed_ms"] = float((time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
+        return out
+
+    img = None
+    try:
+        if FileUtils is not None and hasattr(FileUtils, "load_image"):
+            img = FileUtils.load_image(p)
+    except Exception:
+        img = None
+    if img is None:
+        out["_error"] = "load_image_failed"
+        try:
+            out["_elapsed_ms"] = float((time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
+        return out
+
+    try:
+        h, w = img.shape[:2]
+    except Exception:
+        h, w = 0, 0
+    try:
+        out["orig_w"] = int(w or 0)
+        out["orig_h"] = int(h or 0)
+    except Exception:
+        pass
+
+    try:
+        max_dim = 1024
+        if int(max(w, h)) > int(max_dim) and w > 0 and h > 0:
+            scale = float(max_dim) / float(max(w, h))
+            nw = max(1, int(w * scale + 0.5))
+            nh = max(1, int(h * scale + 0.5))
+            img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    except Exception:
+        pass
+
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    except Exception:
+        gray = None
+    if gray is None:
+        out["_error"] = "gray_convert_failed"
+        try:
+            out["_elapsed_ms"] = float((time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
+        return out
+
+    lap = None
+    try:
+        lap = cv2.Laplacian(gray, cv2.CV_64F)
+    except Exception:
+        lap = None
+
+    lap_var = 0.0
+    hf_p90 = 0.0
+    hf_p95 = 0.0
+    try:
+        if lap is not None:
+            lap_var = float(lap.var())
+            abs_lap = np.abs(lap)
+            flat = abs_lap.reshape(-1)
+            if flat.size > 0:
+                hf_p90 = float(np.percentile(flat, 90))
+                hf_p95 = float(np.percentile(flat, 95))
+    except Exception:
+        lap_var = 0.0
+        hf_p90 = 0.0
+        hf_p95 = 0.0
+
+    score = float(max(0.0, lap_var))
+    norm_score = float(max(0.0, min(200.0, hf_p95)))
+    try:
+        out.update(
+            {
+                "score": score,
+                "norm_score": norm_score,
+                "area": 0.0,
+                "pos": "Center",
+                "center": None,
+                "conf": 0.0,
+                "is_minimal": False,
+                "exp_frame": False,
+                "raw_bg_score": 0.0,
+                "bg_score": 0.0,
+                "bbox_orig": None,
+                "ratio": 0.0,
+                "ratio_local": 0.0,
+                "hf_ratio": 0.0,
+                "hf_margin": 0.0,
+                "texture_edge_density": 0.0,
+                "texture_edge_density_bg": 0.0,
+                "texture_edge_density_ratio": 0.0,
+                "texture_entropy": 0.0,
+                "texture_entropy_bg": 0.0,
+                "texture_entropy_ratio": 0.0,
+                "ratio_best": 0.0,
+                "has_bird": False,
+                "bg_hf_p90": float(hf_p90),
+                "bg_hf_p95": float(hf_p95),
+                "_engine": "cpu_fallback",
+            }
+        )
+    except Exception:
+        pass
+
+    try:
+        out["_elapsed_ms"] = float((time.perf_counter() - t0) * 1000.0)
+    except Exception:
+        pass
+    return out
 
 
 def _focus_detect_worker_init(
@@ -209,8 +368,9 @@ def _focus_detect_worker_init(
     initial_conf: float = 0.15,
     enable_eye_detect: bool = False,
 ):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED, _FOCUS_DETECTOR_WORKER_FALLBACK, _FOCUS_DETECTOR_WORKER_INIT_ERROR
     t0 = time.time()
+    _ensure_std_streams()
     try:
         focus_trace(
             f"worker_init start pid={os.getpid()} model={model_path} target_size={int(target_size or 0)} use_gpu={bool(use_gpu)}"
@@ -226,17 +386,45 @@ def _focus_detect_worker_init(
                 pass
     except Exception:
         pass
-    from core.detectors.bird_focus_detector import BirdFocusDetector
+    effective_gpu = bool(use_gpu)
+    try:
+        if effective_gpu and (not _is_focus_cuda_usable()):
+            effective_gpu = False
+    except Exception:
+        effective_gpu = False
+    try:
+        from core.detectors.bird_focus_detector import BirdFocusDetector
 
-    det = BirdFocusDetector(
-        str(model_path),
-        target_size=int(target_size or 640),
-        initial_conf=float(initial_conf or 0.15),
-        multi_check=bool(multi_check),
-        exp_frame_check=bool(exp_frame_check),
-        save_output=False,
-        print_focus_point=False,
-    )
+        det = BirdFocusDetector(
+            str(model_path),
+            target_size=int(target_size or 640),
+            initial_conf=float(initial_conf or 0.15),
+            multi_check=bool(multi_check),
+            exp_frame_check=bool(exp_frame_check),
+            use_gpu=bool(effective_gpu),
+            save_output=False,
+            print_focus_point=False,
+        )
+    except Exception as e:
+        try:
+            focus_trace(
+                f"worker_init failed pid={os.getpid()} model={model_path} target_size={int(target_size or 0)} use_gpu={bool(effective_gpu)} err={e}"
+            )
+        except Exception:
+            pass
+        try:
+            import traceback
+
+            focus_trace(traceback.format_exc())
+        except Exception:
+            pass
+        try:
+            _FOCUS_DETECTOR_WORKER_FALLBACK = True
+            _FOCUS_DETECTOR_WORKER_INIT_ERROR = str(e)
+            _FOCUS_DETECTOR_WORKER_INSTANCE = False
+        except Exception:
+            pass
+        return
     try:
         _FOCUS_DETECT_EYE_ENABLED = bool(enable_eye_detect)
     except Exception:
@@ -246,9 +434,6 @@ def _focus_detect_worker_init(
     except Exception:
         pass
     try:
-        effective_gpu = bool(use_gpu)
-        if effective_gpu and (not _is_focus_cuda_usable()):
-            effective_gpu = False
         det.device = "cuda" if bool(effective_gpu) else "cpu"
     except Exception:
         pass
@@ -291,10 +476,34 @@ def prewarm_focus_detector(
 
 
 def _focus_detect_one_path(image_path: str, af_focus_point=None):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
-    if _FOCUS_DETECTOR_WORKER_INSTANCE is None:
-        _focus_detect_worker_init(_resolve_valid_yolo_seg_model_path("x"), 640, _is_focus_cuda_usable(), True, True, 0.15, bool(_FOCUS_DETECT_EYE_ENABLED))
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED, _FOCUS_DETECTOR_WORKER_FALLBACK
+    if _FOCUS_DETECTOR_WORKER_INSTANCE is None and (not bool(_FOCUS_DETECTOR_WORKER_FALLBACK)):
+        use_gpu = True
+        try:
+            from utils.setting.settings_manager import SettingsManager
+
+            sm = SettingsManager.instance()
+            use_gpu = bool(sm.get("focus_detect/use_gpu", True))
+        except Exception:
+            use_gpu = True
+        effective_gpu = bool(use_gpu)
+        try:
+            if effective_gpu and (not _is_focus_cuda_usable()):
+                effective_gpu = False
+        except Exception:
+            effective_gpu = False
+        _focus_detect_worker_init(
+            _resolve_valid_yolo_seg_model_path("x"),
+            640,
+            bool(effective_gpu),
+            True,
+            True,
+            0.15,
+            bool(_FOCUS_DETECT_EYE_ENABLED),
+        )
     det = _FOCUS_DETECTOR_WORKER_INSTANCE
+    if det is None or det is False or bool(_FOCUS_DETECTOR_WORKER_FALLBACK):
+        return _focus_detect_cpu_fallback_one_path(image_path, af_focus_point)
     targets = [
         "score",
         "norm_score",
@@ -331,48 +540,6 @@ def _focus_detect_one_path(image_path: str, af_focus_point=None):
         except Exception:
             _file_size = 0
             _file_mtime = 0.0
-        _fh = None
-        _need_close = False
-        try:
-            import faulthandler
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            pid = os.getpid()
-            lm = LogManager.instance()
-            try:
-                th = getattr(lm, "_thread", None)
-                if th is None or (hasattr(th, "is_alive") and not th.is_alive()):
-                    lm.start()
-            except Exception:
-                pass
-            _fh = getattr(lm, "_file_handle", None)
-            if _fh is None:
-                try:
-                    out_dir = os.path.join(_project_root, "cache", "logs")
-                    os.makedirs(out_dir, exist_ok=True)
-                    _fh = open(os.path.join(out_dir, "focus_detect_cli_fallback.log"), "a", encoding="utf-8")
-                    _need_close = True
-                except Exception:
-                    try:
-                        import sys
-                        _fh = sys.stderr
-                    except Exception:
-                        _fh = None
-            try:
-                if _fh is not None:
-                    _fh.write(f"\n[FocusDetectCLI] hang_watchdog_start pid={pid} ts={ts}\npath={p0}\nsize={_file_size}\nmtime={_file_mtime}\n")
-                    try:
-                        _fh.flush()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                if _fh is not None:
-                    faulthandler.dump_traceback_later(45, file=_fh, repeat=False)
-            except Exception:
-                pass
-        except Exception:
-            _fh = None
         t0 = time.perf_counter()
         res = det.analyze_file(p0, targets=targets, af_focus_point=af_focus_point)
         t1 = time.perf_counter()
@@ -420,16 +587,6 @@ def _focus_detect_one_path(image_path: str, af_focus_point=None):
             pass
         try:
             res["_elapsed_ms"] = float((t1 - t0) * 1000.0)
-        except Exception:
-            pass
-        try:
-            import faulthandler
-            faulthandler.cancel_dump_traceback_later()
-        except Exception:
-            pass
-        try:
-            if _need_close and _fh is not None:
-                _fh.close()
         except Exception:
             pass
         return res
@@ -835,6 +992,7 @@ def detect_focus_batch_for_import(
     _max_worker_ms = 0.0
     _worker_ms_count = 0
     _error_count = 0
+    _nobird_reason_counts: dict[str, int] = {}
     _slow_samples: list[tuple[float, str]] = []
     def _track_slow_sample(ms: float, p: str):
         nonlocal _slow_samples
@@ -955,15 +1113,11 @@ def detect_focus_batch_for_import(
         )
         _t_pool1 = time.perf_counter()
         try:
-            total = len(paths)
+            mp_paths = list(paths)
+            total = len(mp_paths)
             done = 0
             start_ts = time.time()
             _t_iter0 = time.perf_counter()
-            _first_result_ms = None
-            last_progress_ts = float(time.time())
-            stall_grace_s = 6.0
-            pool_restart_count = 0
-            last_diag_ts = 0.0
             try:
                 timeout_sec = int(per_file_timeout_sec or 0)
             except Exception:
@@ -975,9 +1129,9 @@ def detect_focus_batch_for_import(
                 max_inflight = 1
             try:
                 from collections import deque
-                _queue = deque(paths)
+                _queue = deque(mp_paths)
             except Exception:
-                _queue = list(paths)
+                _queue = list(mp_paths)
             inflight = []
             start_by_path = {}
             while True:
@@ -1061,12 +1215,6 @@ def detect_focus_batch_for_import(
                             pass
                         progressed = True
 
-                        if _first_result_ms is None:
-                            try:
-                                _first_result_ms = float((time.perf_counter() - _t_iter0) * 1000.0)
-                            except Exception:
-                                _first_result_ms = 0.0
-
                         if not isinstance(r, dict):
                             r = {"path": str(p0)}
                         p = str(r.get("path") or p0 or "")
@@ -1075,6 +1223,12 @@ def detect_focus_batch_for_import(
                             r["path"] = p
                         if r.get("_error"):
                             _error_count += 1
+                        try:
+                            if r.get("has_bird") is False:
+                                key = str(r.get("_nobird_reason") or r.get("_seg_tag") or "NoBird")
+                                _nobird_reason_counts[key] = int(_nobird_reason_counts.get(key, 0) or 0) + 1
+                        except Exception:
+                            pass
                         try:
                             ems = float(r.get("_elapsed_ms") or 0.0)
                         except Exception:
@@ -1128,66 +1282,25 @@ def detect_focus_batch_for_import(
                 if done >= total:
                     break
                 if progressed:
-                    last_progress_ts = float(time.time())
                     continue
 
                 timed_out_path = None
+                timed_out_elapsed_s = 0.0
                 now_ts = float(time.time())
                 if inflight:
                     try:
-                        stall_s = float(now_ts - float(last_progress_ts))
-                    except Exception:
-                        stall_s = 0.0
-                    if stall_s >= 3.0:
-                        try:
-                            if (not last_diag_ts) or (float(now_ts - float(last_diag_ts)) >= 10.0):
-                                last_diag_ts = float(now_ts)
-                                samples = []
-                                try:
-                                    pairs = []
-                                    for p0, _ar0 in inflight:
-                                        st0 = float(start_by_path.get(str(p0), now_ts))
-                                        pairs.append((float(now_ts - st0), str(p0)))
-                                    pairs.sort(key=lambda x: float(x[0]), reverse=True)
-                                    for dur, p0 in pairs[:5]:
-                                        samples.append(f"{dur:.1f}s:{os.path.basename(p0)}")
-                                except Exception:
-                                    samples = []
-                                try:
-                                    qlen = int(len(_queue))
-                                except Exception:
-                                    try:
-                                        qlen = int(_queue.qsize())
-                                    except Exception:
-                                        qlen = 0
-                                focus_trace(
-                                    f"stage=focus.stall stall_s={stall_s:.1f} done={done}/{total} inflight={len(inflight)} queue={qlen} slowest={';'.join(samples)}"
-                                )
-                        except Exception:
-                            pass
-                try:
-                    if inflight and (now_ts - float(last_progress_ts)) > float(stall_grace_s):
                         for p0, _ar0 in inflight:
                             st0 = float(start_by_path.get(str(p0), now_ts))
-                            if (now_ts - st0) > float(timeout_sec):
+                            elapsed0 = float(now_ts - st0)
+                            if elapsed0 > float(timeout_sec):
                                 timed_out_path = str(p0)
+                                timed_out_elapsed_s = float(elapsed0)
                                 break
-                except Exception:
-                    timed_out_path = None
-
-                if not timed_out_path:
-                    try:
-                        qleft = int(len(_queue))
-                    except Exception:
-                        qleft = 1
-                    try:
-                        if inflight and (now_ts - float(last_progress_ts)) > 30.0 and qleft > 0:
-                            timed_out_path = str(min(start_by_path.items(), key=lambda kv: float(kv[1] or now_ts))[0])
                     except Exception:
                         timed_out_path = None
 
                 if timed_out_path:
-                    r = {"path": str(timed_out_path), "_error": f"timeout>{int(timeout_sec)}s"}
+                    r = {"path": str(timed_out_path), "_error": f"timeout>{int(timeout_sec)}s elapsed={float(timed_out_elapsed_s):.1f}s"}
                     results_by_path[str(timed_out_path)] = r
                     _record_result(str(timed_out_path), r)
                     _error_count += 1
@@ -1197,23 +1310,6 @@ def detect_focus_batch_for_import(
                             progress_callback("对焦检测", int(done), int(total), float(start_ts))
                         except Exception:
                             pass
-                    try:
-                        samples = []
-                        try:
-                            pairs = []
-                            for p0, _ar0 in inflight:
-                                st0 = float(start_by_path.get(str(p0), now_ts))
-                                pairs.append((float(now_ts - st0), str(p0)))
-                            pairs.sort(key=lambda x: float(x[0]), reverse=True)
-                            for dur, p0 in pairs[:5]:
-                                samples.append(f"{dur:.1f}s:{os.path.basename(p0)}")
-                        except Exception:
-                            samples = []
-                        focus_trace(
-                            f"stage=focus.timeout path={timed_out_path} timeout_s={int(timeout_sec)} inflight={len(inflight)} slowest={';'.join(samples)}"
-                        )
-                    except Exception:
-                        pass
 
                     try:
                         rest = [p for p, _ in inflight if str(p) != str(timed_out_path)]
@@ -1229,56 +1325,8 @@ def detect_focus_batch_for_import(
                         pool.join()
                     except Exception:
                         pass
-                    try:
-                        pool_restart_count += 1
-                    except Exception:
-                        pass
-                    if pool_restart_count >= 5:
-                        try:
-                            remain_paths = []
-                            try:
-                                remain_paths.extend(list(rest))
-                            except Exception:
-                                pass
-                            try:
-                                remain_paths.extend(list(_queue))
-                            except Exception:
-                                pass
-                            for p_bad in remain_paths:
-                                try:
-                                    p_bad = str(p_bad or "")
-                                except Exception:
-                                    p_bad = ""
-                                if not p_bad:
-                                    continue
-                                r = {"path": p_bad, "_error": "timeout_restart_limit"}
-                                results_by_path[p_bad] = r
-                                _record_result(p_bad, r)
-                                _error_count += 1
-                                done += 1
-                                if callable(progress_callback):
-                                    try:
-                                        progress_callback("对焦检测", int(done), int(total), float(start_ts))
-                                    except Exception:
-                                        pass
-                            done = total
-                        except Exception:
-                            pass
-                        break
-                    try:
-                        remaining = int(len(rest) + len(_queue))
-                    except Exception:
-                        remaining = int(len(rest))
-                    if remaining <= 0:
-                        break
-                    try:
-                        new_proc = int(proc)
-                        if len(rest) > 0:
-                            new_proc = max(1, min(int(proc), int(len(rest))))
-                    except Exception:
-                        new_proc = int(proc)
                     pool = ctx.Pool(
-                        processes=new_proc,
+                        processes=proc,
                         initializer=_focus_detect_worker_init,
                         initargs=(
                             model_path,
@@ -1291,12 +1339,11 @@ def detect_focus_batch_for_import(
                         ),
                     )
                     try:
-                        if hasattr(_queue, "extendleft"):
-                            _queue.extendleft(reversed(rest))
-                        else:
-                            _queue = list(rest) + list(_queue)
+                        from collections import deque
+
+                        _queue = deque(list(rest) + list(_queue))
                     except Exception:
-                        pass
+                        _queue = list(rest) + list(_queue)
                     continue
 
                 try:
@@ -1305,12 +1352,6 @@ def detect_focus_batch_for_import(
                     pass
             _t_iter1 = time.perf_counter()
             try:
-                if _first_result_ms is None:
-                    _first_result_ms = float((time.perf_counter() - _t_iter0) * 1000.0)
-            except Exception:
-                _first_result_ms = 0.0
-            try:
-                focus_trace(f"stage=focus.first_result first_result_ms={float(_first_result_ms):.1f}")
                 focus_trace(f"stage=focus.loop elapsed_s={float(_t_iter1 - _t_iter0):.3f} done={done} errors={_error_count}")
             except Exception:
                 pass
@@ -1611,7 +1652,104 @@ def _subject_detect_one(det, image_path: str, targets):
     return info.get("bbox_orig"), fp, info.get("pos"), str(info.get("_error") or "")
 
 
+def _subject_detect_cpu_fallback_one_path(image_path: str):
+    p = ""
+    try:
+        p = str(image_path or "")
+    except Exception:
+        p = ""
+
+    fp = None
+    try:
+        from utils.exif.camera_af_point import get_camera_af_center_point_or_none
+
+        fp = get_camera_af_center_point_or_none(p)
+    except Exception:
+        fp = None
+
+    img = None
+    try:
+        import utils.file.file as FileUtils
+
+        if hasattr(FileUtils, "load_image"):
+            img = FileUtils.load_image(p)
+    except Exception:
+        img = None
+
+    if img is None:
+        return None, fp, "Center"
+
+    try:
+        h, w = img.shape[:2]
+    except Exception:
+        h, w = 0, 0
+
+    if w <= 0 or h <= 0:
+        return None, fp, "Center"
+
+    x1 = int(w * 0.15)
+    y1 = int(h * 0.15)
+    x2 = int(w * 0.85)
+    y2 = int(h * 0.85)
+    bbox = (max(0, x1), max(0, y1), max(0, x2), max(0, y2))
+
+    cx = float(w) * 0.5
+    cy = float(h) * 0.5
+    try:
+        if isinstance(fp, dict) and ("x" in fp) and ("y" in fp):
+            fx = fp.get("x")
+            fy = fp.get("y")
+            if fx is not None and fy is not None:
+                cx = float(fx)
+                cy = float(fy)
+                if 0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0:
+                    cx = cx * float(w)
+                    cy = cy * float(h)
+    except Exception:
+        cx = float(w) * 0.5
+        cy = float(h) * 0.5
+
+    pos_x = "C"
+    pos_y = "C"
+    try:
+        if cx < float(w) * 0.4:
+            pos_x = "L"
+        elif cx > float(w) * 0.6:
+            pos_x = "R"
+        else:
+            pos_x = "C"
+    except Exception:
+        pos_x = "C"
+    try:
+        if cy < float(h) * 0.4:
+            pos_y = "T"
+        elif cy > float(h) * 0.6:
+            pos_y = "B"
+        else:
+            pos_y = "C"
+    except Exception:
+        pos_y = "C"
+
+    pos_map = {
+        ("C", "C"): "Center",
+        ("L", "C"): "Left",
+        ("R", "C"): "Right",
+        ("C", "T"): "Top",
+        ("C", "B"): "Bottom",
+        ("L", "T"): "LeftTop",
+        ("L", "B"): "LeftBottom",
+        ("R", "T"): "RightTop",
+        ("R", "B"): "RightBottom",
+        ("L", "M"): "Left",
+        ("R", "M"): "Right",
+        ("C", "M"): "Center",
+    }
+    pos = pos_map.get((pos_x, pos_y), "Center")
+    return bbox, fp, pos
+
+
 def _subject_detect_warmup_in_subprocess(targets):
+    _ensure_std_streams()
     try:
         import cv2
         if hasattr(cv2, "ocl"):
@@ -1629,6 +1767,7 @@ def _subject_detect_warmup_in_subprocess(targets):
 
 
 def _subject_detect_one_in_subprocess(image_path: str, targets):
+    _ensure_std_streams()
     try:
         import cv2
         if hasattr(cv2, "ocl"):
@@ -1670,10 +1809,16 @@ def _get_subject_detector(targets: Optional[Sequence[str]] = None):
         except Exception:
             pass
         model_path = _resolve_valid_yolo_seg_model_path(model)
+        effective_gpu = False
+        try:
+            effective_gpu = bool(use_gpu) and bool(_is_focus_cuda_usable())
+        except Exception:
+            effective_gpu = False
         det = BirdFocusDetector(
             str(model_path),
             target_size=int(target_size or 640),
             initial_conf=float(initial_conf or 0.15),
+            use_gpu=bool(effective_gpu),
             multi_check=False,
             exp_frame_check=False,
             save_output=False,
@@ -1684,7 +1829,6 @@ def _get_subject_detector(targets: Optional[Sequence[str]] = None):
         except Exception:
             pass
         try:
-            effective_gpu = bool(use_gpu) and bool(_is_focus_cuda_usable())
             det.device = "cuda" if bool(effective_gpu) else "cpu"
         except Exception:
             pass
@@ -1772,6 +1916,13 @@ class _SubjectDetectService:
                         except Exception as e:
                             bbox = fp = pos = None
                             err = str(e)
+                    if p and (bbox is None) and _subject_detect_should_use_subprocess(err):
+                        try:
+                            bbox, fp, pos = _subject_detect_cpu_fallback_one_path(p)
+                            if bbox is not None:
+                                err = ""
+                        except Exception:
+                            pass
                     if future is not None and not future.done():
                         future.set_result({"bbox": bbox, "focus_point": fp, "position": pos})
                     if callable(callback):
@@ -1793,6 +1944,13 @@ class _SubjectDetectService:
                         except Exception as e:
                             bbox = fp = pos = None
                             err = str(e)
+                    if p and (bbox is None) and _subject_detect_should_use_subprocess(err):
+                        try:
+                            bbox, fp, pos = _subject_detect_cpu_fallback_one_path(p)
+                            if bbox is not None:
+                                err = ""
+                        except Exception:
+                            pass
                     results[p] = {"bbox": bbox, "focus_point": fp, "position": pos, "err": err}
                     if callable(callback):
                         callback(p, bbox, fp, pos, err)

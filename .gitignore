@@ -20,4 +20,6 @@ dist/*
 build/installer/*
 build/_pyi_work/*
 models/*
+opensource/*
+cache/focus_scaled/*
 .git-backup1/*

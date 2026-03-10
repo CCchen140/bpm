@@ -4,7 +4,7 @@ import sys
 from utils.log_manager import LogManager
 
 APP_NAME = "栖图"
-APP_VERSION = "V0.0.3"
+APP_VERSION = "V0.0.4"
 
 class AppInfoManager:
     """

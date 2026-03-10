@@ -73,6 +73,22 @@ class PreviewPanel(QWidget):
         
         self.init_ui()
         ColorManager.instance().register_listener(self._apply_theme_styles)
+        try:
+            if hasattr(self.settings_manager, "setting_changed"):
+                self.settings_manager.setting_changed.connect(self._on_setting_changed)
+        except Exception:
+            pass
+
+    def _on_setting_changed(self, key, _value):
+        try:
+            k = str(key or "")
+        except Exception:
+            k = ""
+        if k in ("focus_detect_ui/show_subject_rect", "focus_detect_ui/show_focus_point"):
+            try:
+                self.update_image_size()
+            except Exception:
+                pass
         
     def init_ui(self):
         # 基本属性
@@ -1123,10 +1139,18 @@ class PreviewPanel(QWidget):
                     except Exception:
                         pass
 
-                # 禁用主体框显示（预览面板不显示鸟框）
-                can_draw_bbox = False
-                can_draw_fp = (fp is not None) and (base_w_fp > 0.0) and (base_h_fp > 0.0)
-                can_draw_eye = (eye_coordinates is not None) and (base_w_eye > 0.0) and (base_h_eye > 0.0)
+                show_bbox = True
+                show_fp = True
+                try:
+                    if self.settings_manager is not None:
+                        show_bbox = bool(self.settings_manager.get("focus_detect_ui/show_subject_rect", True))
+                        show_fp = bool(self.settings_manager.get("focus_detect_ui/show_focus_point", True))
+                except Exception:
+                    show_bbox = True
+                    show_fp = True
+                can_draw_bbox = bool(show_bbox) and (bbox is not None) and (base_w_bbox > 0.0) and (base_h_bbox > 0.0)
+                can_draw_fp = bool(show_fp) and (fp is not None) and (base_w_fp > 0.0) and (base_h_fp > 0.0)
+                can_draw_eye = bool(show_bbox) and (eye_coordinates is not None) and (base_w_eye > 0.0) and (base_h_eye > 0.0)
 
                 if (can_draw_bbox or can_draw_fp or can_draw_eye) and scaled_pixmap.width() > 1 and scaled_pixmap.height() > 1:
                     sx_bbox = float(scaled_pixmap.width()) / float(base_w_bbox) if base_w_bbox > 0.0 else 0.0
@@ -1145,7 +1169,7 @@ class PreviewPanel(QWidget):
                         pen_w = max(2, int(max(scaled_pixmap.width(), scaled_pixmap.height()) // 250))
                     except Exception:
                         pen_w = 2
-                    if bbox is not None:
+                    if can_draw_bbox and bbox is not None:
                         try:
                             x1, y1, x2, y2 = bbox
                             rx = int(round(float(x1) * sx_bbox))
@@ -1160,7 +1184,7 @@ class PreviewPanel(QWidget):
                             painter.drawRect(QRect(int(rx), int(ry), int(rw), int(rh)))
                         except Exception:
                             pass
-                    if fp is not None:
+                    if can_draw_fp and fp is not None:
                         try:
                             fx, fy = fp
                             px = int(round(float(fx) * sx_fp))

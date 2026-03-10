@@ -90,6 +90,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 
@@ -215,6 +216,7 @@ class BirdFocusDetector:
         minimal_threshold: float = 0.001,
         multi_check: bool = True,
         exp_frame_check: bool = True,
+        use_gpu: bool = True,
         save_output: bool = True,
         print_focus_point: bool = True,
     ):
@@ -238,10 +240,24 @@ class BirdFocusDetector:
         """
         if not _TORCH_YOLO_AVAILABLE or YOLO is None:
             msg = "缺少依赖：PyTorch/Ultralytics YOLO 未正确安装或无法加载"
-            raise RuntimeError(msg if _TORCH_IMPORT_ERROR is None else f"{msg} ({_TORCH_IMPORT_ERROR})")
+            detail = ""
+            try:
+                if _TORCH_IMPORT_ERROR is not None:
+                    detail = str(_TORCH_IMPORT_ERROR)
+            except Exception:
+                detail = ""
+            low = str(detail or "").lower()
+            if ("winerror 126" in low) or ("caffe2_nvrtc.dll" in low):
+                msg = f"{msg}。通常是 torch GPU 版的 DLL 依赖在打包后缺失/被裁剪"
+            raise RuntimeError(msg if not detail else f"{msg} ({detail})")
 
         self.model_path = model_path
-        self.device = self._select_device()
+        self.device = "cpu"
+        try:
+            if bool(use_gpu):
+                self.device = self._select_device()
+        except Exception:
+            self.device = "cpu"
         self.model = YOLO(model_path, verbose=False)
 
         self.target_size = target_size
@@ -719,13 +735,40 @@ class BirdFocusDetector:
                         img_array = np.frombuffer(thumb.data, dtype=np.uint8)
                         with suppress_stderr_fd():
                             image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                        if image is None:
+                            try:
+                                image = BirdFocusDetector._load_image_qt(file_path)
+                            except Exception:
+                                image = None
+                            if bool(getattr(sys, "frozen", False)):
+                                try:
+                                    if image is not None:
+                                        LogManager.instance().debug(f"[FocusDetect] image_decode qt_fallback ok file={os.path.basename(file_path)} ext={ext}")
+                                    else:
+                                        LogManager.instance().warning(f"[FocusDetect] image_decode failed file={os.path.basename(file_path)} ext={ext}")
+                                except Exception:
+                                    pass
                         return image
                     return None
 
             if ext.upper() in FileUtils.img_exts:
                 img_array = np.fromfile(file_path, dtype=np.uint8)
                 with suppress_stderr_fd():
-                    return cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if image is None:
+                    try:
+                        image = BirdFocusDetector._load_image_qt(file_path)
+                    except Exception:
+                        image = None
+                    if bool(getattr(sys, "frozen", False)):
+                        try:
+                            if image is not None:
+                                LogManager.instance().debug(f"[FocusDetect] image_decode qt_fallback ok file={os.path.basename(file_path)} ext={ext}")
+                            else:
+                                LogManager.instance().warning(f"[FocusDetect] image_decode failed file={os.path.basename(file_path)} ext={ext}")
+                        except Exception:
+                            pass
+                return image
 
         except Exception as e:
             try:
@@ -735,6 +778,55 @@ class BirdFocusDetector:
             return None
 
         return None
+
+    @staticmethod
+    def _load_image_qt(file_path: str):
+        try:
+            from PyQt6.QtGui import QImageReader, QImage
+        except Exception:
+            return None
+        try:
+            reader = QImageReader(str(file_path))
+            reader.setAutoTransform(True)
+            img = reader.read()
+        except Exception:
+            img = None
+        if img is None or img.isNull():
+            return None
+        try:
+            if img.format() not in (
+                QImage.Format.Format_RGB888,
+                QImage.Format.Format_RGBA8888,
+                QImage.Format.Format_ARGB32,
+            ):
+                img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        except Exception:
+            try:
+                img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+            except Exception:
+                return None
+        try:
+            w = int(img.width())
+            h = int(img.height())
+        except Exception:
+            return None
+        if w <= 1 or h <= 1:
+            return None
+        try:
+            ptr = img.bits()
+            ptr.setsize(int(img.sizeInBytes()))
+            buf = np.frombuffer(ptr, dtype=np.uint8)
+        except Exception:
+            return None
+        try:
+            if img.format() == QImage.Format.Format_RGB888:
+                arr = buf.reshape((h, w, 3))
+                return arr[:, :, ::-1].copy()
+            arr = buf.reshape((h, w, 4))
+            bgr = arr[:, :, :3][:, :, ::-1]
+            return bgr.copy()
+        except Exception:
+            return None
 
     def extract_thumbnail(self, file_path):
         try:
@@ -758,6 +850,99 @@ class BirdFocusDetector:
         if masks is None:
             return []
         return list(masks.xy)
+
+    def _get_model_names_map(self) -> dict[int, str]:
+        names = None
+        try:
+            names = getattr(getattr(self, "model", None), "names", None)
+        except Exception:
+            names = None
+        if isinstance(names, dict):
+            out = {}
+            for k, v in names.items():
+                try:
+                    idx = int(k)
+                except Exception:
+                    continue
+                try:
+                    out[idx] = str(v)
+                except Exception:
+                    out[idx] = ""
+            return out
+        if isinstance(names, (list, tuple)):
+            out = {}
+            for i in range(len(names)):
+                try:
+                    out[int(i)] = str(names[i])
+                except Exception:
+                    out[int(i)] = ""
+            return out
+        return {}
+
+    def _get_bird_classes_for_model(self) -> list[int] | None:
+        names_map = self._get_model_names_map()
+        if not names_map:
+            return [14]
+        idxs: list[int] = []
+        for idx, name in names_map.items():
+            s = str(name or "").strip().lower()
+            if not s:
+                continue
+            if ("bird" in s) or ("avian" in s) or ("鸟" in s):
+                idxs.append(int(idx))
+        if idxs:
+            try:
+                return sorted(list(dict.fromkeys([int(x) for x in idxs])))
+            except Exception:
+                return [int(x) for x in idxs]
+        if len(names_map) == 1:
+            return [0]
+        if 14 in names_map:
+            return [14]
+        return None
+
+    def _extract_masks_xy_list_from_results(self, results) -> list[np.ndarray]:
+        if not results:
+            return []
+        r0 = None
+        try:
+            r0 = results[0]
+        except Exception:
+            r0 = None
+        if r0 is None:
+            return []
+        try:
+            masks = getattr(r0, "masks", None)
+            if masks is not None:
+                out = self.safe_get_masks_xy_list(masks)
+                if out:
+                    return out
+        except Exception:
+            pass
+        try:
+            boxes = getattr(r0, "boxes", None)
+            if boxes is None:
+                return []
+            xyxy = getattr(boxes, "xyxy", None)
+            if xyxy is None:
+                return []
+            try:
+                arr = xyxy.cpu().numpy()
+            except Exception:
+                arr = np.asarray(xyxy)
+            if arr is None or not hasattr(arr, "shape") or arr.size <= 0:
+                return []
+            out: list[np.ndarray] = []
+            for row in arr:
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in row[:4]]
+                except Exception:
+                    continue
+                poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+                out.append(poly)
+            return out
+        except Exception:
+            return []
 
     def enhance_contrast(self, gray_img):
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -1188,12 +1373,23 @@ class BirdFocusDetector:
         if not np.isfinite(conf0):
             conf0 = 0.15
         conf0 = float(max(0.0, min(1.0, conf0)))
-        results = self._run_model(image, conf=conf0, classes=[14], verbose=False, retina_masks=True)
+        classes_arg = None
+        try:
+            classes_arg = self._get_bird_classes_for_model()
+        except Exception:
+            classes_arg = [14]
+        _kw0 = {"conf": conf0, "verbose": False, "retina_masks": True}
+        if classes_arg is not None:
+            _kw0["classes"] = classes_arg
+        results = self._run_model(image, **_kw0)
         calls += 1
 
-        if results and results[0].masks:
-            masks_xy_list = self.safe_get_masks_xy_list(results[0].masks)
-            results[0]._masks_xy_list = masks_xy_list
+        masks_xy_list = self._extract_masks_xy_list_from_results(results)
+        if masks_xy_list:
+            try:
+                results[0]._masks_xy_list = masks_xy_list
+            except Exception:
+                pass
             _set_stats("first")
             _log_slow("first")
             return results, masks_xy_list
@@ -1229,10 +1425,11 @@ class BirdFocusDetector:
             crop = image[y1:y2, x1:x2]
             if crop is None or crop.size <= 0:
                 return None, []
-            r0 = self._run_model(crop, conf=float(conf), classes=[14], verbose=False)
-            if not r0 or not r0[0].masks:
-                return r0, []
-            m0 = self.safe_get_masks_xy_list(r0[0].masks)
+            _kw = {"conf": float(conf), "verbose": False}
+            if classes_arg is not None:
+                _kw["classes"] = classes_arg
+            r0 = self._run_model(crop, **_kw)
+            m0 = self._extract_masks_xy_list_from_results(r0)
             if not m0:
                 return r0, []
             for i in range(len(m0)):
@@ -1252,11 +1449,17 @@ class BirdFocusDetector:
         if results_focus is not None:
             calls += 1
 
-        results = self._run_model(image, conf=0.05, classes=[14], verbose=False)
+        _kw1 = {"conf": 0.05, "verbose": False}
+        if classes_arg is not None:
+            _kw1["classes"] = classes_arg
+        results = self._run_model(image, **_kw1)
         calls += 1
-        if results and results[0].masks:
-            masks_xy_list = self.safe_get_masks_xy_list(results[0].masks)
-            results[0]._masks_xy_list = masks_xy_list
+        masks_xy_list = self._extract_masks_xy_list_from_results(results)
+        if masks_xy_list:
+            try:
+                results[0]._masks_xy_list = masks_xy_list
+            except Exception:
+                pass
             _set_stats("low_conf_full")
             _log_slow("low_conf_full")
             return results, masks_xy_list
@@ -1276,13 +1479,16 @@ class BirdFocusDetector:
         x2 = x1 + crop_w
         y2 = y1 + crop_h
         center_crop = image[y1:y2, x1:x2]
-        results = self._run_model(center_crop, conf=0.05, classes=[14], verbose=False)
+        _kw2 = {"conf": 0.05, "verbose": False}
+        if classes_arg is not None:
+            _kw2["classes"] = classes_arg
+        results = self._run_model(center_crop, **_kw2)
         calls += 1
-        if not results or not results[0].masks:
+        masks_xy_list = self._extract_masks_xy_list_from_results(results)
+        if not masks_xy_list:
             _set_stats("center_crop_nomask")
             _log_slow("center_crop_nomask")
             return results, []
-        masks_xy_list = self.safe_get_masks_xy_list(results[0].masks)
         num_masks = len(masks_xy_list)
         if num_masks == 0:
             _set_stats("center_crop_empty")
@@ -2116,6 +2322,77 @@ class BirdFocusDetector:
             }
 
         filename = os.path.basename(image_path)
+        diag_enabled = bool(getattr(sys, "frozen", False)) or bool(_is_focus_save_output_enabled())
+        def _no_bird_out(reason: str, *, orig_w: int = 0, orig_h: int = 0) -> Dict[str, Any]:
+            out: Dict[str, Any] = {
+                "filename": filename,
+                "orig_w": int(orig_w or 0),
+                "orig_h": int(orig_h or 0),
+                "status": "NoBird",
+                "has_bird": False,
+                "score": 0.0,
+                "norm_score": 0.0,
+                "area": 0.0,
+                "conf": 0.0,
+            }
+            try:
+                out["_nobird_reason"] = str(reason or "")
+            except Exception:
+                out["_nobird_reason"] = ""
+            try:
+                out["_device"] = str(getattr(self, "device", "cpu") or "cpu")
+            except Exception:
+                pass
+            try:
+                out["_model_calls"] = int(getattr(self, "_prof_model_calls", 0) or 0)
+            except Exception:
+                pass
+            try:
+                out["_model_s"] = float(getattr(self, "_prof_model_s", 0.0) or 0.0)
+            except Exception:
+                pass
+            try:
+                out["_model_max_s"] = float(getattr(self, "_prof_model_max_s", 0.0) or 0.0)
+            except Exception:
+                pass
+            try:
+                out["_model_fallback"] = int(getattr(self, "_prof_model_fallback", 0) or 0)
+            except Exception:
+                pass
+            try:
+                out["_seg_calls"] = int(getattr(self, "_prof_seg_calls", 0) or 0)
+            except Exception:
+                pass
+            try:
+                out["_seg_exif_s"] = float(getattr(self, "_prof_seg_exif_s", 0.0) or 0.0)
+            except Exception:
+                pass
+            try:
+                out["_seg_tag"] = str(getattr(self, "_prof_seg_tag", "") or "")
+            except Exception:
+                pass
+            try:
+                out["_t_load_s"] = float(t_load_s)
+                out["_t_seg_s"] = float(t_seg_s)
+                out["_t_score_s"] = float(t_score_s)
+                out["_t_tex_s"] = float(t_tex_s)
+                out["_t_focus_s"] = float(t_focus_s)
+            except Exception:
+                pass
+            try:
+                total_s = float(time.perf_counter() - float(t_all0))
+            except Exception:
+                total_s = 0.0
+            if diag_enabled:
+                try:
+                    LogManager.instance().debug(
+                        f"[FocusDetect] nobird reason={str(reason or '')} file={filename} elapsed_s={total_s:.3f} "
+                        f"load_s={t_load_s:.3f} seg_s={t_seg_s:.3f} model_calls={int(out.get('_model_calls') or 0)} "
+                        f"seg_calls={int(out.get('_seg_calls') or 0)} seg_tag={str(out.get('_seg_tag') or '')}"
+                    )
+                except Exception:
+                    pass
+            return out
         _t0 = time.perf_counter()
         image_small, scale_x, scale_y, orig_w, orig_h = self.load_image_scaled_for_detection(image_path)
         _t1 = time.perf_counter()
@@ -2124,7 +2401,7 @@ class BirdFocusDetector:
         except Exception:
             t_load_s = 0.0
         if image_small is None:
-            return {"filename": filename, "orig_w": int(orig_w or 0), "orig_h": int(orig_h or 0), "has_bird": False, "score": 0.0, "norm_score": 0.0, "area": 0.0, "conf": 0.0}
+            return _no_bird_out("load_image_scaled_none", orig_w=int(orig_w or 0), orig_h=int(orig_h or 0))
 
         need_full = any(
             k
@@ -2163,7 +2440,7 @@ class BirdFocusDetector:
         if not need_full and wanted.issubset({"bbox", "bbox_orig", "pos", "center", "filename"}):
             quick = self.quick_detect_file(image_path)
             if not quick:
-                return {"filename": filename, "orig_w": int(orig_w or 0), "orig_h": int(orig_h or 0), "has_bird": False, "score": 0.0, "norm_score": 0.0, "area": 0.0, "conf": 0.0}
+                return _no_bird_out("quick_detect_empty", orig_w=int(orig_w or 0), orig_h=int(orig_h or 0))
             bbox_orig = quick.get("bbox_orig")
             if bbox_orig:
                 x1, y1, x2, y2 = bbox_orig
@@ -2201,7 +2478,7 @@ class BirdFocusDetector:
                     _save_focus_debug_image(vis, filename)
             except Exception:
                 pass
-            return {"filename": filename, "orig_w": int(orig_w or 0), "orig_h": int(orig_h or 0), "has_bird": False, "score": 0.0, "norm_score": 0.0, "area": 0.0, "conf": 0.0}
+            return _no_bird_out("segment_nomask", orig_w=int(orig_w or 0), orig_h=int(orig_h or 0))
 
         _t0 = time.perf_counter()
         bird_stats, gray, laplacian, global_score, vis_img = self.score_birds(image_small, results, masks_xy_list, filename)
@@ -2219,7 +2496,7 @@ class BirdFocusDetector:
                     _save_focus_debug_image(vis, filename)
             except Exception:
                 pass
-            return {"filename": filename, "has_bird": False, "score": 0.0, "norm_score": 0.0, "area": 0.0, "conf": 0.0}
+            return _no_bird_out("score_empty", orig_w=int(orig_w or 0), orig_h=int(orig_h or 0))
 
         best_bird = bird_stats[0]
         kernel_bg = np.ones((5, 5), np.uint8)

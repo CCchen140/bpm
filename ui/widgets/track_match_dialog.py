@@ -382,14 +382,18 @@ class TrackMatchDialog(BasePopupDialog):
         self.content_layout.addWidget(self.map_container, 1)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["文件名", "拍摄时间", "匹配经纬度", "具体位置", ""])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["文件名", "拍摄时间", "匹配经纬度", "具体位置"])
         self.table.setMinimumHeight(240)
         self.table.setRowCount(0)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+        try:
+            self.table.verticalHeader().setDefaultSectionSize(36)
+        except Exception:
+            pass
         try:
             self.table.itemChanged.connect(self._on_table_item_changed)
         except Exception:
@@ -400,7 +404,6 @@ class TrackMatchDialog(BasePopupDialog):
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         except Exception:
             pass
 
@@ -409,6 +412,18 @@ class TrackMatchDialog(BasePopupDialog):
             self._apply_table_scrollbar_style()
         except Exception:
             pass
+
+        calibrate_bar = QWidget()
+        calibrate_layout = QHBoxLayout(calibrate_bar)
+        calibrate_layout.setContentsMargins(0, 8, 0, 0)
+        calibrate_layout.setSpacing(10)
+        calibrate_layout.addStretch(1)
+        self.calibrate_btn = QPushButton("时间校准")
+        self.calibrate_btn.setFixedSize(92, 32)
+        self.apply_dialog_button_style(self.calibrate_btn, "secondary")
+        self.calibrate_btn.clicked.connect(self._on_calibrate_clicked)
+        calibrate_layout.addWidget(self.calibrate_btn)
+        self.content_layout.addWidget(calibrate_bar, 0)
 
         close_btn = QPushButton("关闭")
         close_btn.setFixedSize(92, 32)
@@ -1339,12 +1354,10 @@ class TrackMatchDialog(BasePopupDialog):
                 item3 = QTableWidgetItem(p.location_text or "")
                 item3.setFlags(item3.flags() | Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(row, 3, item3)
-
-                btn = QPushButton("时间校准")
-                btn.setFixedHeight(28)
-                self.apply_dialog_button_style(btn, "secondary")
-                btn.clicked.connect(lambda checked=False, r=row: self._enter_calibration(r))
-                self.table.setCellWidget(row, 4, btn)
+                try:
+                    self.table.setRowHeight(int(row), 36)
+                except Exception:
+                    pass
         finally:
             try:
                 self.table.blockSignals(False)
@@ -1356,6 +1369,16 @@ class TrackMatchDialog(BasePopupDialog):
                 self.table.selectRow(int(self._calibrating_row))
             except Exception:
                 pass
+
+    def _on_calibrate_clicked(self):
+        try:
+            row = int(self.table.currentRow())
+        except Exception:
+            row = -1
+        if row < 0:
+            NotificationManager.instance().show_warning("提示", "请先在表格中选中一张图片")
+            return
+        self._enter_calibration(int(row))
 
     def _enter_calibration(self, row: int):
         if row < 0 or row >= len(self._photos):
