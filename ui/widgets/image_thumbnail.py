@@ -1186,7 +1186,54 @@ class ImageThumbnail(QWidget):
     def paintEvent(self, event):
         t0 = time.perf_counter()
         from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics
+        
+        # 调试：检查特定图片
+        img_name = self.image_info.get('name', 'unknown') if self.image_info else 'unknown'
+        if '白鹭_027' in img_name or '白鹭_026' in img_name:
+            print(f"[DEBUG] paintEvent called: {img_name}")
+            print(f"[DEBUG]   isVisible={self.isVisible()}")
+            print(f"[DEBUG]   size={self.size()}")
+            print(f"[DEBUG]   rect={self.rect()}")
+            print(f"[DEBUG]   parent={self.parent()}")
+            print(f"[DEBUG]   has image_info={self.image_info is not None}")
+        
         painter = QPainter(self)
+        
+        # 首先绘制边框（确保即使后续出错，边框也能显示）
+        try:
+            base_color = QColor(self.base_bg_color) if self.base_bg_color else None
+            if self.selected:
+                painter.fillRect(self.rect(), QColor("#e3f2fd"))
+                painter.setPen(QPen(QColor("#2196F3"), 2))
+                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+            elif self.hovered:
+                if base_color is not None:
+                    painter.fillRect(self.rect(), base_color.lighter(110))
+                    painter.setPen(QPen(base_color.darker(130), 1))
+                    painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+                else:
+                    painter.fillRect(self.rect(), QColor("#e8e8e8"))
+                    painter.setPen(QPen(QColor("#c0c0c0"), 1))
+                    painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+            else:
+                if base_color is not None:
+                    painter.fillRect(self.rect(), base_color)
+                    painter.setPen(QPen(base_color.darker(200), 1))
+                    painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+                else:
+                    painter.fillRect(self.rect(), QColor("#f0f0f0"))
+                    painter.setPen(QPen(QColor("#a0a0a0"), 1))
+                    painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+            if '白鹭_027' in img_name or '白鹭_026' in img_name:
+                print(f"[DEBUG] border drawn for {img_name}")
+        except Exception as e:
+            # 如果绘制边框失败，至少绘制一个默认边框
+            if '白鹭_027' in img_name or '白鹭_026' in img_name:
+                print(f"[DEBUG] border exception for {img_name}: {e}")
+            painter.fillRect(self.rect(), QColor("#f0f0f0"))
+            painter.setPen(QPen(QColor("#808080"), 1))
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        
         # 开启抗锯齿和平滑变换，解决缩略图锯齿感问题
         # 优化：默认关闭全局抗锯齿和平滑变换，仅在需要时开启，提升性能
         # painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1214,30 +1261,6 @@ class ImageThumbnail(QWidget):
                 # 最小格式下也显示文件名
                 show_name = size_for_calcs >= 30
                 show_details = False
-        # 绘制背景和边框
-        base_color = QColor(self.base_bg_color) if self.base_bg_color else None
-        if self.selected:
-            painter.fillRect(self.rect(), QColor("#e3f2fd"))
-            painter.setPen(QPen(QColor("#2196F3"), 2))
-            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-        elif self.hovered:
-            if base_color is not None:
-                painter.fillRect(self.rect(), base_color.lighter(110))
-                painter.setPen(QPen(base_color.darker(130), 1))
-                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-            else:
-                painter.fillRect(self.rect(), QColor("#e8e8e8"))
-                painter.setPen(QPen(QColor("#c0c0c0"), 1))
-                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-        else:
-            if base_color is not None:
-                painter.fillRect(self.rect(), base_color)
-                painter.setPen(QPen(base_color.darker(150), 1))
-                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-            else:
-                painter.fillRect(self.rect(), QColor("#f0f0f0"))
-                painter.setPen(QPen(QColor("#d0d0d0"), 1))
-                painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         # 计算边距
         border_width = 1
         # 紧贴图片

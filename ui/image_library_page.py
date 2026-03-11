@@ -4651,7 +4651,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
                                 orig_size = (int(ow), int(oh))
                         except Exception:
                             orig_size = orig_size
-                    self.preview_panel.set_overlays(bbox=bbox, focus_point=focus_point, eye_coordinates=eye_coordinates, orig_size=orig_size)
+                    self.preview_panel.set_overlays(bbox=None, focus_point=focus_point, eye_coordinates=eye_coordinates, orig_size=orig_size)
             except Exception:
                 pass
 

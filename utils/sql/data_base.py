@@ -13,14 +13,34 @@ def get_default_db_path():
     return str(PathManager.instance().get_user_db_path())
 
 class BirdLibraryDB:
-    """数据库管理类"""
+    """数据库管理类（单例模式）"""
     _lock = threading.Lock() # 用于多线程写入时的互斥锁
     _fastid_uuid_sync_guard = threading.Lock()
     _fastid_uuid_sync_started = False
+    _instance = None
+    _instance_lock = threading.Lock()
+    _initialized_paths = set()
+
+    def __new__(cls, db_path=None):
+        """单例模式：确保同一数据库路径只有一个实例"""
+        if db_path is None:
+            db_path = get_default_db_path()
+        
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._db_path_resolved = db_path
+            return cls._instance
 
     def __init__(self, db_path=None):
         if db_path is None:
             db_path = get_default_db_path()
+        
+        # 检查是否已经初始化过该路径
+        with BirdLibraryDB._instance_lock:
+            if db_path in BirdLibraryDB._initialized_paths:
+                return
+            BirdLibraryDB._initialized_paths.add(db_path)
         
         self.db_path = db_path
         

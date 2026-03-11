@@ -701,23 +701,16 @@ class _VirtualThumbnailDelegate(QStyledItemDelegate):
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, draw_name)
 
         if selected:
-            try:
-                sel_bg = QColor(primary)
-                sel_bg.setAlphaF(0.22)
-                painter.fillRect(rect.adjusted(1, 1, -1, -1), sel_bg)
-            except Exception:
-                pass
-            pen = painter.pen()
-            pen.setColor(QColor(primary))
-            pen.setWidth(3)
+            # 使用主题色绘制选中边框
+            pen = QPen(QColor(primary), 3)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(rect.adjusted(2, 2, -3, -3))
+            border_rect = rect.adjusted(2, 2, -3, -3)
+            painter.drawRect(border_rect)
         else:
-            pen = painter.pen()
-            pen.setColor(QColor(border))
-            pen.setWidth(1)
-            painter.setPen(pen)
+            # 使用较淡的灰色边框
+            normal_pen = QPen(QColor("#A0A0A0"), 1)
+            painter.setPen(normal_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect.adjusted(1, 1, -2, -2))
 

@@ -314,6 +314,142 @@ class InfoPanel(QWidget):
             }}
         """)
 
+    @staticmethod
+    def get_exif_data_sync(image_path: str, timeout: int = 5) -> dict:
+        """同步获取图片的EXIF数据（供外部调用）
+        
+        Args:
+            image_path: 图片路径
+            timeout: 超时时间（秒）
+            
+        Returns:
+            包含EXIF数据的字典，包含以下键：
+            - iso: ISO感光度
+            - aperture: 光圈值（如 "f/2.8"）
+            - shutter: 快门速度
+            - focal_length: 焦距
+            - dimensions: 图片尺寸（如 "1920x1080"）
+            - make: 相机厂商
+            - model: 相机型号
+            - lens: 镜头信息
+        """
+        result = {
+            'iso': None,
+            'aperture': None,
+            'shutter': None,
+            'focal_length': None,
+            'dimensions': None,
+            'make': None,
+            'model': None,
+            'lens': None,
+        }
+        
+        if not image_path or not os.path.exists(image_path):
+            return result
+            
+        try:
+            from utils.exif.exif_utils import run_exiftool, get_exiftool_path
+            import json
+            
+            tool_path = get_exiftool_path()
+            cmd = [tool_path, "-j", image_path]
+            exif_result = run_exiftool(cmd, timeout=timeout)
+            
+            if exif_result.returncode == 0 and exif_result.stdout:
+                data = json.loads(exif_result.stdout)
+                if isinstance(data, list) and data:
+                    exif = data[0]
+                    
+                    # 提取ISO
+                    for key in ['ISO', 'PhotographicSensitivity', 'EXIF:ISO', 'EXIF:PhotographicSensitivity']:
+                        if key in exif and exif[key]:
+                            try:
+                                result['iso'] = int(float(str(exif[key])))
+                                break
+                            except Exception:
+                                pass
+                    
+                    # 提取光圈
+                    for key in ['FNumber', 'ApertureValue', 'EXIF:FNumber', 'EXIF:ApertureValue']:
+                        if key in exif and exif[key]:
+                            try:
+                                val = float(str(exif[key]))
+                                result['aperture'] = f"f/{val}"
+                                break
+                            except Exception:
+                                pass
+                    
+                    # 提取快门速度
+                    for key in ['ExposureTime', 'ShutterSpeedValue', 'EXIF:ExposureTime', 'EXIF:ShutterSpeedValue']:
+                        if key in exif and exif[key]:
+                            try:
+                                val = str(exif[key]).strip()
+                                # 处理分数形式（如 "1/250"）
+                                if '/' in val:
+                                    result['shutter'] = val
+                                else:
+                                    # 处理小数形式，转换为分数
+                                    try:
+                                        fval = float(val)
+                                        if fval < 1:
+                                            result['shutter'] = f"1/{int(1/fval)}"
+                                        else:
+                                            result['shutter'] = str(int(fval))
+                                    except Exception:
+                                        result['shutter'] = val
+                                break
+                            except Exception:
+                                pass
+                    
+                    # 提取焦距
+                    for key in ['FocalLength', 'EXIF:FocalLength']:
+                        if key in exif and exif[key]:
+                            try:
+                                val = str(exif[key]).strip().replace('mm', '').strip()
+                                result['focal_length'] = int(float(val))
+                                break
+                            except Exception:
+                                pass
+                    
+                    # 提取图片尺寸
+                    for key in ['ImageSize', 'ImageWidth', 'ExifImageWidth', 'EXIF:ImageSize']:
+                        if key in exif and exif[key]:
+                            try:
+                                val = str(exif[key]).strip()
+                                if 'x' in val.lower():
+                                    result['dimensions'] = val.lower().replace('x', ' x ')
+                                elif key == 'ImageWidth':
+                                    width = val
+                                    height = exif.get('ImageHeight') or exif.get('ExifImageHeight')
+                                    if height:
+                                        result['dimensions'] = f"{width} x {height}"
+                                break
+                            except Exception:
+                                pass
+                    
+                    # 提取相机厂商
+                    for key in ['Make', 'EXIF:Make']:
+                        if key in exif and exif[key]:
+                            result['make'] = str(exif[key]).strip()
+                            break
+                    
+                    # 提取相机型号
+                    for key in ['Model', 'EXIF:Model']:
+                        if key in exif and exif[key]:
+                            result['model'] = str(exif[key]).strip()
+                            break
+                    
+                    # 提取镜头信息
+                    for key in ['LensModel', 'Lens', 'LensInfo', 'EXIF:LensModel', 'EXIF:Lens']:
+                        if key in exif and exif[key]:
+                            result['lens'] = str(exif[key]).strip()
+                            break
+                            
+        except Exception as e:
+            print(f"[ERROR] get_exif_data_sync failed: {e}, path={image_path}")
+            
+        return result
+
     def _init_info_tree(self):
         """初始化信息树结构"""
         self.info_tree.clear()

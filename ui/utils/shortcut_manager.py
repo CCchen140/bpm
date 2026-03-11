@@ -89,6 +89,7 @@ class ShortcutManager(QObject):
         self.register_default("ImageDetail.MagnifierLensBiggerWheel", "Shift+WheelUp", "放大镜大小增加（Shift+滚轮上）")
         self.register_default("ImageDetail.MagnifierLensSmallerWheel", "Shift+WheelDown", "放大镜大小减少（Shift+滚轮下）")
         self.register_default("ImageDetail.Close", "F", "退出大图模式")
+        self.register_default("ImageDetail.Delete", "Delete", "删除当前图片（大图模式）")
         self.register_default("ImageLibrary.ZoomIn", "Ctrl+WheelUp", "在图库中放大缩略图")
         self.register_default("ImageLibrary.ZoomOut", "Ctrl+WheelDown", "在图库中缩小缩略图")
         self.register_default("ImageLibrary.SelectAll", "Ctrl+A", "在图库中全选图片")

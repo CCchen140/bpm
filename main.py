@@ -13,9 +13,18 @@ from datetime import datetime
 def _write_crash_log(message: str):
     """写入崩溃日志到文件"""
     try:
-        log_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "栖图", "logs")
+        # 获取程序根目录
+        if getattr(sys, "frozen", False):
+            root_dir = os.path.dirname(sys.executable)
+        else:
+            root_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # 日志保存到 cache/logs/crash 目录
+        log_dir = os.path.join(root_dir, "cache", "logs", "crash")
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "startup_crash.log")
+        
+        # 按日期命名日志文件
+        log_file = os.path.join(log_dir, f"crash_{datetime.now().strftime('%Y%m%d')}.log")
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]\n")

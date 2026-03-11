@@ -610,8 +610,11 @@ class ExifHandleWorker:
                 continue
             try:
                 p.terminate()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 终止活跃进程失败: {e}")
+                except Exception:
+                    pass
         deadline = time.time() + max(0.0, float(timeout or 0.0))
         for p in procs:
             try:
@@ -632,8 +635,11 @@ class ExifHandleWorker:
                 continue
             try:
                 p.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 强制杀死进程失败: {e}")
+                except Exception:
+                    pass
 
     def _acquire_file_locks(self, file_paths):
         paths = []
@@ -659,8 +665,11 @@ class ExifHandleWorker:
         for lock in reversed(list(locks or [])):
             try:
                 lock.release()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 释放文件锁失败: {e}")
+                except Exception:
+                    pass
 
     def _cleanup_exiftool_tmp(self, file_paths):
         for p in (file_paths or []):
@@ -670,8 +679,11 @@ class ExifHandleWorker:
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 清理临时文件失败 {tmp_path}: {e}")
+                except Exception:
+                    pass
 
     def has_pending_tasks(self):
         """检查是否有正在进行的写入任务（包括队列中的和批量处理中的）"""
@@ -777,7 +789,11 @@ class ExifHandleWorker:
             process.kill()
             try:
                 stdout, stderr = process.communicate(timeout=5)
-            except Exception:
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 超时后读取进程输出失败: {e}")
+                except Exception:
+                    pass
                 stdout, stderr = "", ""
             raise
         finally:
@@ -790,8 +806,11 @@ class ExifHandleWorker:
             try:
                 if proc.poll() is None:
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 检查进程状态失败: {e}")
+                except Exception:
+                    pass
 
         tool_path = get_exiftool_path()
         cmd = [tool_path]
@@ -836,7 +855,11 @@ class ExifHandleWorker:
                     if line == "" and p.poll() is not None:
                         break
                     self._stayopen_stdout_queue.put(line)
-            except Exception:
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] stdout读取线程异常退出: {e}")
+                except Exception:
+                    pass
                 return
 
         def _reader_err():
@@ -847,7 +870,11 @@ class ExifHandleWorker:
                 for line in iter(p.stderr.readline, ""):
                     if line == "" and p.poll() is not None:
                         break
-            except Exception:
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] stderr读取线程异常退出: {e}")
+                except Exception:
+                    pass
                 return
 
         self._stayopen_reader_thread = threading.Thread(target=_reader, daemon=True)
@@ -864,15 +891,21 @@ class ExifHandleWorker:
                 try:
                     proc.stdin.write("-stay_open\nFalse\n-execute\n")
                     proc.stdin.flush()
+                except Exception as e:
+                    try:
+                        LogManager.instance().warning(f"[ExifTool] 发送停止命令失败: {e}")
+                    except Exception:
+                        pass
+            try:
+                proc.terminate()
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 终止进程失败: {e}")
                 except Exception:
                     pass
             try:
-                proc.terminate()
-            except Exception:
-                pass
-            try:
                 proc.wait(timeout=1.5)
-            except Exception:
+            except Exception as e:
                 pass
         finally:
             try:
@@ -886,18 +919,27 @@ class ExifHandleWorker:
             try:
                 if proc.stdin is not None:
                     proc.stdin.close()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 关闭stdin失败: {e}")
+                except Exception:
+                    pass
             try:
                 if proc.stdout is not None:
                     proc.stdout.close()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 关闭stdout失败: {e}")
+                except Exception:
+                    pass
             try:
                 if proc.stderr is not None:
                     proc.stderr.close()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 关闭stderr失败: {e}")
+                except Exception:
+                    pass
             self._unregister_active_process(proc)
 
     def _stayopen_exec(self, args, timeout=10):
@@ -939,27 +981,63 @@ class ExifHandleWorker:
             return "".join(out_lines)
 
     def _read_json(self, file_path, tags=None, timeout=3, config_file=None):
+        def _read_one(path_value: str) -> dict:
+            p = str(path_value or "")
+            if not p:
+                return {}
+            args = ["-j"]
+            if tags:
+                args += [f"-{t}" for t in tags]
+            args.append(p)
+
+            code, stdout, stderr = self._popen_exiftool(args, timeout=timeout, config_file=config_file)
+            if code != 0:
+                raise RuntimeError((stderr or stdout or "").strip())
+            data = json.loads(stdout or "[]")
+            if isinstance(data, list) and data:
+                if isinstance(data[0], dict):
+                    return data[0]
+            return {}
+
         mode = _get_exif_write_mode()
         target_path = str(file_path or "")
-        if mode == "xmp":
-            target_path = _to_sidecar_xmp_path(target_path)
-            try:
-                if not os.path.exists(target_path):
-                    return {}
-            except Exception:
-                return {}
-        args = ["-j"]
-        if tags:
-            args += [f"-{t}" for t in tags]
-        args.append(target_path)
+        if not target_path:
+            return {}
 
-        code, stdout, stderr = self._popen_exiftool(args, timeout=timeout, config_file=config_file)
-        if code != 0:
-            raise RuntimeError((stderr or stdout or "").strip())
-        data = json.loads(stdout or "[]")
-        if isinstance(data, list) and data:
-            return data[0]
-        return {}
+        try:
+            if target_path.lower().endswith(".xmp"):
+                return _read_one(target_path)
+        except Exception:
+            pass
+
+        if mode != "xmp":
+            return _read_one(target_path)
+
+        xmp_path = _to_sidecar_xmp_path(target_path)
+        meta_file = {}
+        try:
+            meta_file = _read_one(target_path)
+        except Exception:
+            meta_file = {}
+
+        meta_xmp = {}
+        try:
+            if xmp_path and os.path.exists(xmp_path):
+                meta_xmp = _read_one(xmp_path)
+        except Exception:
+            meta_xmp = {}
+
+        if not meta_xmp:
+            return meta_file
+        if not meta_file:
+            return meta_xmp
+
+        merged = dict(meta_file)
+        try:
+            merged.update(meta_xmp)
+        except Exception:
+            merged = meta_xmp
+        return merged
 
     def _read_tags_popen(self, file_path, tags, timeout=3):
         meta = self._read_json(file_path, tags=tags, timeout=timeout)
@@ -1351,8 +1429,11 @@ class ExifHandleWorker:
             if arg_file and os.path.exists(arg_file):
                 try:
                     os.remove(arg_file)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        LogManager.instance().warning(f"[ExifTool] 删除临时参数文件失败 {arg_file}: {e}")
+                    except Exception:
+                        pass
             self._release_file_locks(file_locks)
 
     def _process_loop(self):
@@ -1361,8 +1442,11 @@ class ExifHandleWorker:
             try:
                 try:
                     self._flush_write_buffer_ready()
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        LogManager.instance().warning(f"[ExifTool] 刷新写入缓冲区失败: {e}")
+                    except Exception:
+                        pass
                 if self._write_futures:
                     completed = []
                     for item in self._write_futures:
@@ -1467,13 +1551,20 @@ class ExifHandleWorker:
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     with open(target_path, "a", encoding="utf-8"):
                         pass
-            except Exception:
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"[ExifTool] 创建XMP文件失败 {target_path}: {e}")
+                except Exception:
+                    pass
                 return
         try:
             if self._should_skip_duplicate_write(target_path, tags):
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"[ExifTool] 检查重复写入失败: {e}")
+            except Exception:
+                pass
         self._buffer_write(target_path, tags)
     
     def _read_async(self, file_path, tags=None):
@@ -1517,7 +1608,11 @@ class ExifHandleWorker:
     def get_times(self, file_paths, timeout=10):
         try:
             return self._read_time_popen_multi(file_paths, timeout=int(timeout))
-        except Exception:
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"[ExifTool] 批量读取时间失败: {e}")
+            except Exception:
+                pass
             out = {}
             try:
                 for p in (file_paths or []):
@@ -1858,8 +1953,11 @@ class ExifHandleWorker:
             if arg_file and os.path.exists(arg_file):
                 try:
                     os.remove(arg_file)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        LogManager.instance().warning(f"[ExifTool] 删除临时参数文件失败 {arg_file}: {e}")
+                    except Exception:
+                        pass
             self._release_file_locks(file_locks)
         
         return processed_count

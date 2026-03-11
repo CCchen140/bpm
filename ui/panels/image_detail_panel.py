@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QGraphicsView, QGraphicsScene, 
                              QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsItem, QFrame, QScrollArea, QSizePolicy,
                              QToolButton, QGraphicsOpacityEffect, QStackedWidget, QSplitter, QApplication, QMenu, QListView, QStyle, QTextBrowser)
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QTimer, QThread, QEvent, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QTimer, QThread, QEvent, QRectF, QObject
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QColor, QPainter, QAction, QTransform, QPainterPath, QBrush, QPen, QRadialGradient, QImageReader, QShortcut
 from ui.utils.icon_loader import qta
 
@@ -56,6 +56,10 @@ def _track_loader_thread(t: QThread):
     except Exception:
         pass
     return t
+
+
+class _OverlayExifBridge(QObject):
+    ready = pyqtSignal(str, dict)
 
 
 class MagnifierGraphicsView(QGraphicsView):
@@ -553,7 +557,8 @@ class ImageInfoOverlay(QWidget):
         
         # 详细信息 (ISO, 光圈等)
         self.lbl_details = QLabel()
-        self.lbl_details.setStyleSheet("color: #cccccc; font-size: 12px; background: transparent;")
+        self.lbl_details.setStyleSheet("color: white; font-size: 12px; background: transparent;")
+        self.lbl_details.setWordWrap(True)
         container_layout.addWidget(self.lbl_details)
         
         layout.addWidget(self.container)
@@ -566,11 +571,14 @@ class ImageInfoOverlay(QWidget):
     def set_data(self, filename, details_text, extra_text=None):
         self.lbl_filename.setText(filename)
         self.lbl_details.setText(details_text)
+        
+        self.container.show()
         self.adjustSize()
         self.show()
 
 class ImageAllInfoOverlay(QWidget):
     collapse_requested = pyqtSignal()
+    html_loaded = pyqtSignal()  # HTML 加载完成信号
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -626,6 +634,25 @@ class ImageAllInfoOverlay(QWidget):
         header_layout.addStretch(1)
         container_layout.addWidget(header)
 
+        # 创建滚动区域
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 隐藏滚动条但保持滚动功能
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        try:
+            self.scroll_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        except Exception:
+            pass
+        
+        # 创建内容容器
+        self.content_container = QWidget()
+        self.content_layout = QVBoxLayout(self.content_container)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(0)
+        
+        # 创建 QTextBrowser
         self.content = QTextBrowser()
         self.content.setOpenExternalLinks(False)
         self.content.setFrameShape(QFrame.Shape.NoFrame)
@@ -639,7 +666,10 @@ class ImageAllInfoOverlay(QWidget):
             "color: #FFFFFF; font-size: 12px; background: transparent; border: none; outline: none;"
             "QTextBrowser:focus { border: none; outline: none; }"
         )
-        container_layout.addWidget(self.content, 1)
+        
+        self.content_layout.addWidget(self.content)
+        self.scroll_area.setWidget(self.content_container)
+        container_layout.addWidget(self.scroll_area, 1)
 
         layout.addWidget(self.container)
 
@@ -656,12 +686,22 @@ class ImageAllInfoOverlay(QWidget):
                 self.content.setText("")
             self.hide()
             return
+        
+        # 保存当前滚动位置（使用 QScrollArea 的滚动条）
+        scrollbar = self.scroll_area.verticalScrollBar()
+        old_value = scrollbar.value() if scrollbar else 0
+        old_max = scrollbar.maximum() if scrollbar else 0
+        
         try:
             self.content.setHtml(t)
         except Exception:
             self.content.setText(t)
+        
         self.show()
         self.adjustSize()
+        
+        # 发射信号通知 HTML 加载完成
+        self.html_loaded.emit()
 
     def _apply_theme_styles(self):
         cm = ColorManager.instance()
@@ -688,8 +728,13 @@ class ImageAllInfoOverlay(QWidget):
         except Exception:
             pass
         self.content.setStyleSheet(
-            f"color: {text_color}; font-size: 12px; background: transparent; border: none; outline: none;"
-            "QTextBrowser:focus { border: none; outline: none; }"
+            f"QTextBrowser {{ color: {text_color}; font-size: 12px; background: transparent; border: none; outline: none; }}"
+            f"QTextBrowser:focus {{ border: none; outline: none; }}"
+            f"p {{ color: {text_color}; }}"
+            f"div {{ color: {text_color}; }}"
+            f"span {{ color: {text_color}; }}"
+            f"b {{ color: {text_color}; }}"
+            f"body {{ color: {text_color}; }}"
         )
 
 class ImageActionOverlay(QWidget):
@@ -931,6 +976,7 @@ class ImageDetailPanel(QWidget):
     subject_detected = pyqtSignal(str, str, object, object, str, str, object) # side, path, bbox, focus_point, position, err, targets
     import_to_library_requested = pyqtSignal(object)
     stash_toggle_requested = pyqtSignal(str)
+    _all_info_html_ready = pyqtSignal(str)  # 后台线程 EXIF 数据准备就绪
 
     def __init__(self, image_list, current_index=0, parent=None, compare_indices=None, cache_manager=None, show_action_overlay: bool = True, show_import_to_library_button: bool = False, show_stash_controls: bool = False, db_table_name: str = "bird_results", big_cache_context: str = "library"):
         super().__init__(parent)
@@ -981,6 +1027,13 @@ class ImageDetailPanel(QWidget):
         self.db = BirdLibraryDB()
         self._uuid_cache = {}
         self._exif_orientation_cache = {}
+        self._overlay_exif_brief_cache = {}
+        self._overlay_exif_brief_pending = set()
+        try:
+            self._overlay_exif_bridge = _OverlayExifBridge(self)
+            self._overlay_exif_bridge.ready.connect(self._on_overlay_exif_brief_ready)
+        except Exception:
+            self._overlay_exif_bridge = None
         self._is_zoomed_to_bird = False
         self._is_zoomed_to_bird_compare = False
         self._settings_manager = None
@@ -1102,7 +1155,7 @@ class ImageDetailPanel(QWidget):
             self._detail_toggle_subject_rect_shortcut = None
         try:
             if not hasattr(self, "_detail_delete_shortcut") or self._detail_delete_shortcut is None:
-                self._detail_delete_shortcut = QShortcut("Ctrl+D", self)
+                self._detail_delete_shortcut = QShortcut(self)
                 self._detail_delete_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
                 self._detail_delete_shortcut.activated.connect(self._on_delete_clicked)
         except Exception:
@@ -1222,6 +1275,14 @@ class ImageDetailPanel(QWidget):
                 return self.db.get_result_by_path(path, table_name="import_cache")
             except Exception:
                 return None
+        # 首先尝试通过路径直接获取记录（与 info_panel 保持一致）
+        try:
+            record = self.db.get_result_by_path(path, table_name=self._db_table_name)
+            if isinstance(record, dict) and record:
+                return record
+        except Exception:
+            pass
+        # 如果路径查找失败，尝试通过 UUID 获取
         uuid_val = self._ensure_uuid_for_path(path)
         if not uuid_val:
             return None
@@ -1368,170 +1429,438 @@ class ImageDetailPanel(QWidget):
         # 加载左侧图片的元数据并更新 Overlay
         self._update_overlay_data(path, self.overlay_left, self.info_overlay_left)
 
+    def _format_overlay_details(self, path: str, brief: dict | None) -> str:
+        dims = "-"
+        try:
+            p = str(path or "")
+        except Exception:
+            p = ""
+        try:
+            cached_size = _ORIG_IMAGE_SIZE_BY_PATH.get(p) if p else None
+        except Exception:
+            cached_size = None
+        if cached_size and isinstance(cached_size, (tuple, list)) and len(cached_size) >= 2:
+            try:
+                w = int(cached_size[0])
+                h = int(cached_size[1])
+                if w > 0 and h > 0:
+                    dims = f"{w} x {h}"
+            except Exception:
+                pass
+        if dims == "-":
+            try:
+                d = (brief or {}).get("dimensions")
+                if d is not None and str(d).strip():
+                    dims = str(d).strip()
+            except Exception:
+                pass
+
+        iso_disp = "-"
+        aperture_disp = "-"
+        shutter_disp = "-"
+        focal_disp = "-"
+        try:
+            v = (brief or {}).get("iso")
+            if v not in (None, "", 0):
+                iso_disp = str(v)
+        except Exception:
+            pass
+        try:
+            v = (brief or {}).get("aperture")
+            if v is not None and str(v).strip():
+                aperture_disp = str(v).strip()
+        except Exception:
+            pass
+        try:
+            v = (brief or {}).get("shutter")
+            if v is not None and str(v).strip():
+                shutter_disp = str(v).strip()
+        except Exception:
+            pass
+        try:
+            v = (brief or {}).get("focal_length")
+            if v not in (None, "", 0):
+                focal_disp = f"{int(float(v))}"
+        except Exception:
+            pass
+
+        shutter_suffix = ""
+        try:
+            if shutter_disp != "-" and not shutter_disp.lower().endswith("s"):
+                shutter_suffix = "s"
+        except Exception:
+            shutter_suffix = ""
+        focal_suffix = ""
+        try:
+            if focal_disp != "-" and not focal_disp.lower().endswith("mm"):
+                focal_suffix = "mm"
+        except Exception:
+            focal_suffix = ""
+
+        return f"尺寸 {dims}\nISO {iso_disp}  |  光圈 {aperture_disp}  |  快门 {shutter_disp}{shutter_suffix}  |  焦距 {focal_disp}{focal_suffix}"
+
+    def _extract_overlay_exif_brief(self, meta: object) -> dict:
+        brief = {
+            "iso": None,
+            "aperture": None,
+            "shutter": None,
+            "focal_length": None,
+            "dimensions": None,
+        }
+        exif = meta
+        if isinstance(exif, list) and exif:
+            exif = exif[0]
+        if not isinstance(exif, dict):
+            return brief
+
+        for key in ["ISO", "PhotographicSensitivity", "EXIF:ISO", "EXIF:PhotographicSensitivity"]:
+            try:
+                if key in exif and exif[key]:
+                    brief["iso"] = int(float(str(exif[key])))
+                    break
+            except Exception:
+                pass
+
+        for key in ["FNumber", "ApertureValue", "EXIF:FNumber", "EXIF:ApertureValue"]:
+            try:
+                if key in exif and exif[key]:
+                    val = float(str(exif[key]))
+                    brief["aperture"] = f"f/{val}"
+                    break
+            except Exception:
+                pass
+
+        for key in ["ExposureTime", "ShutterSpeedValue", "EXIF:ExposureTime", "EXIF:ShutterSpeedValue"]:
+            try:
+                if key in exif and exif[key]:
+                    val = str(exif[key]).strip()
+                    if "/" in val:
+                        brief["shutter"] = val
+                    else:
+                        try:
+                            fval = float(val)
+                            if fval < 1:
+                                brief["shutter"] = f"1/{int(1 / fval)}"
+                            else:
+                                brief["shutter"] = str(int(fval))
+                        except Exception:
+                            brief["shutter"] = val
+                    break
+            except Exception:
+                pass
+
+        for key in ["FocalLength", "EXIF:FocalLength"]:
+            try:
+                if key in exif and exif[key]:
+                    val = str(exif[key]).strip().replace("mm", "").strip()
+                    brief["focal_length"] = int(float(val))
+                    break
+            except Exception:
+                pass
+
+        for key in ["ImageSize", "ImageWidth", "ExifImageWidth", "EXIF:ImageSize"]:
+            try:
+                if key in exif and exif[key]:
+                    val = str(exif[key]).strip()
+                    if "x" in val.lower():
+                        brief["dimensions"] = val.lower().replace("x", " x ")
+                    elif key == "ImageWidth":
+                        width = val
+                        height = exif.get("ImageHeight") or exif.get("ExifImageHeight")
+                        if height:
+                            brief["dimensions"] = f"{width} x {height}"
+                    break
+            except Exception:
+                pass
+
+        return brief
+
+    def _normalize_overlay_path_key(self, path: str) -> str:
+        try:
+            p = str(path or "")
+        except Exception:
+            p = ""
+        if not p:
+            return ""
+        try:
+            p = os.path.normpath(p)
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                p = p.replace("/", "\\")
+            except Exception:
+                pass
+        try:
+            p = os.path.normcase(p)
+        except Exception:
+            pass
+        return p
+
+    def _is_effective_overlay_brief(self, brief: object) -> bool:
+        if not isinstance(brief, dict):
+            return False
+        for k in ("iso", "aperture", "shutter", "focal_length", "dimensions"):
+            try:
+                v = brief.get(k)
+            except Exception:
+                v = None
+            if v not in (None, "", 0, "-"):
+                return True
+        return False
+
+    def _on_overlay_exif_brief_ready(self, path_key: str, brief_value: dict):
+        key = self._normalize_overlay_path_key(path_key)
+        if not key:
+            return
+        try:
+            b = brief_value or {}
+            if not self._is_effective_overlay_brief(b):
+                b = {}
+            self._overlay_exif_brief_cache[key] = b
+            if len(self._overlay_exif_brief_cache) > 600:
+                self._overlay_exif_brief_cache.clear()
+        except Exception:
+            pass
+        try:
+            self._overlay_exif_brief_pending.discard(key)
+        except Exception:
+            pass
+        try:
+            self._refresh_overlay_data_for_path(key)
+        except Exception:
+            pass
+
+    def _request_overlay_exif_brief(self, path: str):
+        try:
+            p_src = str(path or "")
+        except Exception:
+            p_src = ""
+        if not p_src:
+            return
+        p = self._normalize_overlay_path_key(p_src)
+        if not p:
+            return
+        try:
+            if p in self._overlay_exif_brief_cache:
+                return
+        except Exception:
+            pass
+        try:
+            if p in self._overlay_exif_brief_pending:
+                return
+        except Exception:
+            pass
+        self._overlay_exif_brief_pending.add(p)
+        def _looks_valid(b: dict) -> bool:
+            return self._is_effective_overlay_brief(b)
+
+        def _worker_info_panel():
+            brief = {}
+            try:
+                brief = InfoPanel.get_exif_data_sync(p_src, timeout=5) or {}
+            except Exception:
+                brief = {}
+
+            if not _looks_valid(brief):
+                try:
+                    from utils.exif.exif_utils import ExifHandleWorker, READ_PICTURE_METADATA_TAG
+                    worker = ExifHandleWorker.get_instance()
+                    meta = worker._read_sync(p_src, READ_PICTURE_METADATA_TAG, timeout=5)
+                    brief2 = self._extract_overlay_exif_brief(meta)
+                    if _looks_valid(brief2):
+                        brief = brief2
+                except Exception:
+                    pass
+            if not _looks_valid(brief):
+                brief = {}
+
+            try:
+                bridge = getattr(self, "_overlay_exif_bridge", None)
+                if bridge is not None:
+                    bridge.ready.emit(p, brief)
+                else:
+                    self._on_overlay_exif_brief_ready(p, brief)
+            except Exception:
+                try:
+                    self._on_overlay_exif_brief_ready(p, brief)
+                except Exception:
+                    pass
+
+        try:
+            import threading
+            t = threading.Thread(target=_worker_info_panel, daemon=True, name="ImageDetailOverlayExif")
+            t.start()
+        except Exception as e:
+            try:
+                self._overlay_exif_brief_pending.discard(p)
+            except Exception:
+                pass
+            try:
+                LogManager.instance().warning(f"[ImageDetail] 请求EXIF读取失败 {p}: {e}")
+            except Exception:
+                pass
+
+    def _refresh_overlay_data_for_path(self, path: str):
+        try:
+            p0 = str(path or "")
+        except Exception:
+            p0 = ""
+        p = self._normalize_overlay_path_key(p0)
+        if not p:
+            return
+        try:
+            if not bool(getattr(self, "compare_mode", False)):
+                cur = ""
+                try:
+                    if self.image_list and 0 <= int(self.current_index) < len(self.image_list):
+                        cur = self._normalize_overlay_path_key(str(self.image_list[int(self.current_index)].get("path") or ""))
+                except Exception:
+                    cur = ""
+                if cur and cur == p:
+                    try:
+                        src_path = str(self.image_list[int(self.current_index)].get("path") or "")
+                    except Exception:
+                        src_path = p0
+                    self._update_overlay_data(src_path, getattr(self, "overlay_main", None), getattr(self, "info_overlay_main", None))
+                    try:
+                        self._update_main_info_stack_layout()
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
+
+        try:
+            left_path = ""
+            try:
+                idx = int(getattr(self, "saved_left_index", -1))
+            except Exception:
+                idx = -1
+            if self.image_list and 0 <= idx < len(self.image_list):
+                left_path = self._normalize_overlay_path_key(str(self.image_list[idx].get("path") or ""))
+            if left_path and left_path == p:
+                try:
+                    src_path = str(self.image_list[idx].get("path") or "")
+                except Exception:
+                    src_path = p0
+                self._update_overlay_data(src_path, getattr(self, "overlay_left", None), getattr(self, "info_overlay_left", None))
+        except Exception:
+            pass
+
+        try:
+            right_path = ""
+            try:
+                idx = int(getattr(self, "current_index", -1))
+            except Exception:
+                idx = -1
+            if self.image_list and 0 <= idx < len(self.image_list):
+                right_path = self._normalize_overlay_path_key(str(self.image_list[idx].get("path") or ""))
+            if right_path and right_path == p:
+                try:
+                    src_path = str(self.image_list[idx].get("path") or "")
+                except Exception:
+                    src_path = p0
+                self._update_overlay_data(src_path, getattr(self, "overlay_right", None), getattr(self, "info_overlay_right", None))
+        except Exception:
+            pass
+
     def _update_overlay_data(self, path, overlay, info_overlay=None):
         if not overlay and not info_overlay:
             return
             
         try:
-            def _first_tag(tags: dict, keys):
-                for k in keys:
-                    try:
-                        if k in tags and tags[k] is not None:
-                            return tags[k]
-                    except Exception:
-                        continue
-                return None
-
-            def _tag_str(tag):
-                if tag is None:
-                    return None
-                try:
-                    s = getattr(tag, "printable", None)
-                    if s is not None:
-                        s = str(s).strip()
-                        return s if s else None
-                except Exception:
-                    pass
-                try:
-                    s = str(tag).strip()
-                    return s if s else None
-                except Exception:
-                    return None
-
-            def _parse_ratio(val):
-                if val is None:
-                    return None
-                try:
-                    return float(val)
-                except Exception:
-                    pass
-                try:
-                    s = str(val).strip()
-                    if not s:
-                        return None
-                    if "/" in s:
-                        a, b = s.split("/", 1)
-                        return float(a) / float(b)
-                    return float(s)
-                except Exception:
-                    return None
-
-            def _strip_suffix_unit(s: str, unit: str):
-                if not s:
-                    return s
-                t = str(s).strip()
-                u = str(unit).strip().lower()
-                if not u:
-                    return t
-                low = t.lower()
-                if low.endswith(u):
-                    t = t[: len(t) - len(unit)].strip()
-                return t
-
-            # 默认值
             is_fav = False
             rating = 0
             label = ''
-            iso = None
-            fnumber = None
-            shutter = None
-            focal = None
-
+            
+            # 首先尝试从数据库获取基本信息
             try:
-                record = self._get_record_for_path(path) or {}
-            except Exception:
-                record = {}
-            if isinstance(record, dict) and record:
-                try:
-                    is_fav = int(record.get('is_favorite', record.get('favorite', 0)) or 0) == 1
-                except Exception:
-                    is_fav = False
-                try:
+                record = self.db.get_result_by_path(path, table_name="bird_results")
+                if not record:
+                    record = self.db.get_result_by_path(path, table_name="import_cache")
+                
+                if isinstance(record, dict) and record:
+                    is_fav = int(record.get('is_favorite', 0) or 0) == 1
                     rating = int(record.get('rating', 0) or 0)
-                except Exception:
-                    rating = 0
-                label = record.get('label', '') or ''
-
-            # 读取 EXIF 信息
-            # 首先尝试从数据库读取
-            iso = record.get('iso')
-            fnumber = record.get('fnumber')
-            shutter = record.get('shutter')
-            focal = record.get('focal_length')
+                    label = record.get('label', '') or ''
+            except Exception as e:
+                pass
             
-            # 辅助检查函数
-            def _is_valid_float(v):
-                if v is None: return False
-                try:
-                    return float(v) > 0
-                except:
-                    return False
-
-            def _is_valid_str(v):
-                if v is None: return False
-                return bool(str(v).strip())
-
-            # 检查是否有缺失的关键信息（数据库可能只有部分信息，或者全为默认值）
-            need_iso = not _is_valid_float(iso)
-            need_fnumber = not _is_valid_float(fnumber)
-            need_shutter = not _is_valid_str(shutter)
-            need_focal = not _is_valid_str(focal)
+            brief = {}
+            try:
+                key = self._normalize_overlay_path_key(str(path or ""))
+                brief = self._overlay_exif_brief_cache.get(key, {}) or {}
+            except Exception:
+                brief = {}
+            try:
+                if not self._is_effective_overlay_brief(brief):
+                    brief = {}
+            except Exception:
+                brief = {}
             
-            # 如果有缺失，尝试从文件读取补全
-            if need_iso or need_fnumber or need_shutter or need_focal:
+            try:
+                record_brief = {}
+                if isinstance(record, dict) and record:
+                    try:
+                        v = record.get("iso")
+                        if v not in (None, "", 0, "-"):
+                            record_brief["iso"] = int(float(str(v)))
+                    except Exception:
+                        pass
+                    try:
+                        v = record.get("fnumber")
+                        if v not in (None, "", 0, "-"):
+                            fv = float(str(v))
+                            record_brief["aperture"] = f"f/{fv}"
+                    except Exception:
+                        try:
+                            v = record.get("aperture")
+                            if v is not None and str(v).strip() and str(v).strip() != "-":
+                                record_brief["aperture"] = str(v).strip()
+                        except Exception:
+                            pass
+                    try:
+                        v = record.get("shutter")
+                        if v is not None and str(v).strip() and str(v).strip() != "-":
+                            sv = str(v).strip()
+                            if "/" in sv:
+                                record_brief["shutter"] = sv
+                            else:
+                                try:
+                                    fsv = float(sv)
+                                    if fsv < 1:
+                                        record_brief["shutter"] = f"1/{int(1 / fsv)}"
+                                    else:
+                                        record_brief["shutter"] = str(int(fsv))
+                                except Exception:
+                                    record_brief["shutter"] = sv
+                    except Exception:
+                        pass
+                    try:
+                        v = record.get("focal_length")
+                        if v not in (None, "", 0, "-"):
+                            record_brief["focal_length"] = int(float(str(v).replace("mm", "").strip()))
+                    except Exception:
+                        pass
+                if record_brief:
+                    if not isinstance(brief, dict) or not brief:
+                        brief = dict(record_brief)
+                    else:
+                        for _k, _v in record_brief.items():
+                            try:
+                                curv = brief.get(_k)
+                            except Exception:
+                                curv = None
+                            if curv in (None, "", 0, "-"):
+                                brief[_k] = _v
+            except Exception:
+                pass
+            if not brief:
                 try:
-                    with open(path, "rb") as f:
-                        tags = exifread.process_file(f, details=False, strict=False)
-                    
-                    if need_iso:
-                        val = _tag_str(_first_tag(tags, ["EXIF ISOSpeedRatings", "EXIF PhotographicSensitivity"]))
-                        if val: 
-                            iso = val
-                    
-                    if need_fnumber:
-                        val = _tag_str(_first_tag(tags, ["EXIF FNumber"]))
-                        if val: 
-                            fnumber = val
-                        
-                    if need_shutter:
-                        val = _tag_str(_first_tag(tags, ["EXIF ExposureTime", "EXIF ShutterSpeedValue"]))
-                        if val: 
-                            shutter = val
-                        
-                    if need_focal:
-                        val = _tag_str(_first_tag(tags, ["EXIF FocalLength"]))
-                        if val: 
-                            focal = val
+                    self._request_overlay_exif_brief(str(path or ""))
                 except Exception:
                     pass
-
-            if shutter:
-                shutter = str(shutter).replace(" sec", "").replace("sec", "").strip()
-            if focal:
-                focal = _strip_suffix_unit(str(focal).replace(" ", ""), "mm")
-
-            iso_disp = "-"
-            if iso is not None:
-                try:
-                    iso_val = float(str(iso).strip())
-                    if iso_val > 0:
-                        iso_disp = str(int(iso_val))
-                except Exception:
-                    s = str(iso).strip()
-                    if s:
-                        iso_disp = s
-
-            fnumber_val = _parse_ratio(fnumber)
-            shutter_disp = "-"
-            if shutter is not None:
-                s = str(shutter).strip()
-                if s:
-                    shutter_disp = s
-            focal_disp = "-"
-            if focal is not None:
-                s = str(focal).strip()
-                if s:
-                    focal_disp = s
                 
             # 更新操作浮层 (Action Overlay)
             if overlay:
@@ -1542,19 +1871,23 @@ class ImageDetailPanel(QWidget):
             
             # 更新信息浮层 (Info Overlay)
             if info_overlay:
-                # 格式化光圈
-                try:
-                    f_val = float(fnumber_val)
-                    aperture = f"f/{f_val}" if f_val > 0 else "-"
-                except:
-                    aperture = "-"
-                    
-                details = f"ISO {iso_disp}  |  {aperture}  |  {shutter_disp}s  |  {focal_disp}mm"
+                details = self._format_overlay_details(str(path or ""), brief)
                 filename = os.path.basename(path)
+                
                 try:
                     info_overlay.set_data(filename, details, None)
                 except TypeError:
                     info_overlay.set_data(filename, details)
+                
+                # 确保信息浮层及其父控件可见
+                try:
+                    info_overlay.show()
+                    info_overlay.raise_()
+                    if info_overlay.parentWidget():
+                        info_overlay.parentWidget().show()
+                        info_overlay.parentWidget().raise_()
+                except Exception as e:
+                    pass
                 try:
                     if info_overlay is not getattr(self, "info_overlay_main", None) and info_overlay.parentWidget():
                         self._update_overlay_pos(info_overlay.parentWidget(), info_overlay, is_info=True)
@@ -1563,7 +1896,7 @@ class ImageDetailPanel(QWidget):
                 try:
                     if info_overlay is getattr(self, "info_overlay_main", None):
                         self._update_main_info_stack_layout()
-                except Exception:
+                except Exception as e:
                     pass
 
             try:
@@ -1581,7 +1914,124 @@ class ImageDetailPanel(QWidget):
                                 mirror = None
                         if mirror is not None:
                             mirror.update_info(path, context=None)
+                            
+                            # 启动后台线程获取 EXIF 信息并更新浮层
+                            def _load_exif_and_update():
+                                try:
+                                    from ui.panels.info_panel import InfoPanel
+                                    exif_data = InfoPanel.get_exif_data_sync(path, timeout=3)
+                                except Exception:
+                                    exif_data = {}
+                                
+                                def _esc(s: object) -> str:
+                                    try:
+                                        t = str(s if s is not None else "").strip()
+                                    except Exception:
+                                        t = ""
+                                    return (
+                                        t.replace("&", "&amp;")
+                                        .replace("<", "&lt;")
+                                        .replace(">", "&gt;")
+                                        .replace('"', "&quot;")
+                                    )
+                                
+                                def _get_exif_direct(key, default="-"):
+                                    if key in exif_data and exif_data[key] is not None:
+                                        v = str(exif_data[key]).strip()
+                                        if v and v != "-" and v != "None":
+                                            return v
+                                    return default
+                                
+                                parts = []
+                                try:
+                                    tree = getattr(mirror, "info_tree", None)
+                                    top_n = int(tree.topLevelItemCount()) if tree is not None else 0
+                                except Exception:
+                                    tree = None
+                                    top_n = 0
+                                for i0 in range(top_n):
+                                    try:
+                                        g = tree.topLevelItem(int(i0))
+                                    except Exception:
+                                        continue
+                                    try:
+                                        gt = str(g.text(0) or "").strip()
+                                    except Exception:
+                                        gt = ""
+                                    if gt.startswith("+ ") or gt.startswith("- "):
+                                        gt = gt[2:].strip()
+                                    if gt:
+                                        parts.append(f"<div style='margin-top:6px;'><b>{_esc(gt)}</b></div>")
+                                    try:
+                                        child_n = int(g.childCount())
+                                    except Exception:
+                                        child_n = 0
+                                    cm = ColorManager.instance()
+                                    text_light = cm.get("theme.text.light")
+                                    try:
+                                        qc_text = QColor(str(text_light or ""))
+                                    except Exception:
+                                        qc_text = QColor("#FFFFFF")
+                                    if not qc_text.isValid():
+                                        qc_text = QColor("#FFFFFF")
+                                    label_color = f"rgba({qc_text.red()}, {qc_text.green()}, {qc_text.blue()}, 0.7)"
+                                    value_color = qc_text.name()
+                                    for j0 in range(child_n):
+                                        try:
+                                            it = g.child(int(j0))
+                                        except Exception:
+                                            continue
+                                        try:
+                                            k = str(it.text(0) or "").strip()
+                                        except Exception:
+                                            k = ""
+                                        try:
+                                            v = str(it.text(1) or "").strip()
+                                        except Exception:
+                                            v = ""
+                                        if not k:
+                                            continue
+                                        
+                                        # 如果是 EXIF 相关字段，使用同步获取的数据
+                                        k_stripped = k.strip()
+                                        if k_stripped == "ISO":
+                                            v = _get_exif_direct("iso", v)
+                                        elif k_stripped == "光圈":
+                                            v = _get_exif_direct("aperture", v)
+                                        elif k_stripped == "快门":
+                                            v = _get_exif_direct("shutter", v)
+                                        elif k_stripped == "焦距":
+                                            v = _get_exif_direct("focal_length", v)
+                                        elif k_stripped == "尺寸":
+                                            v = _get_exif_direct("dimensions", v)
+                                        elif k_stripped == "相机":
+                                            v = _get_exif_direct("model", v)
+                                        elif k_stripped == "镜头":
+                                            v = _get_exif_direct("lens", v)
+                                        
+                                        parts.append(f"<div><span style='color:{label_color};'>{_esc(k)}</span>：<span style='color:{value_color};'>{_esc(v)}</span></div>")
 
+                                html = "<div style='line-height: 1.45;'>" + "".join(parts) + "</div>" if parts else ""
+                                
+                                # 发射信号，让主线程更新 UI
+                                try:
+                                    self._all_info_html_ready.emit(html)
+                                except Exception:
+                                    pass
+                            
+                            # 连接信号（只连接一次）
+                            try:
+                                self._all_info_html_ready.disconnect()
+                            except Exception:
+                                pass
+                            self._all_info_html_ready.connect(lambda html: all_overlay.set_html(html))
+                            
+                            # 启动后台线程
+                            import threading
+                            thread = threading.Thread(target=_load_exif_and_update, daemon=True)
+                            thread.start()
+                            
+                            # 先显示基本信息（不含 EXIF）
                             def _esc(s: object) -> str:
                                 try:
                                     t = str(s if s is not None else "").strip()
@@ -1593,7 +2043,7 @@ class ImageDetailPanel(QWidget):
                                     .replace(">", "&gt;")
                                     .replace('"', "&quot;")
                                 )
-
+                            
                             parts = []
                             try:
                                 tree = getattr(mirror, "info_tree", None)
@@ -2161,6 +2611,7 @@ class ImageDetailPanel(QWidget):
 
         try:
             self.all_info_overlay_main.collapse_requested.connect(lambda: self._set_all_info_collapsed(True, persist=True))
+            self.all_info_overlay_main.html_loaded.connect(self._restore_all_info_scroll_pos)
         except Exception:
             pass
         try:
@@ -3486,18 +3937,19 @@ class ImageDetailPanel(QWidget):
 
         info = getattr(self, "info_overlay_main", None)
         try:
-            if info is not None and info.isVisible():
+            if info is not None:
                 info.setMaximumWidth(int(w))
                 info.adjustSize()
                 info.move(0, 0)
                 info.raise_()
-        except Exception:
+                info.show()
+        except Exception as e:
             pass
         all_overlay = getattr(self, "all_info_overlay_main", None)
         expand_btn = getattr(self, "all_info_expand_btn", None)
 
         try:
-            info_h = int(info.height()) if info is not None and info.isVisible() else 0
+            info_h = int(info.height()) if info is not None else 0
         except Exception:
             info_h = 0
         y_all = int(info_h) + int(gap)
@@ -3524,13 +3976,17 @@ class ImageDetailPanel(QWidget):
             pass
 
         if all_overlay is None:
+            print(f"[DEBUG] all_overlay is None")
             return
+        html_content = str(getattr(all_overlay, "_html", "") or "").strip()
         try:
-            if not str(getattr(all_overlay, "_html", "") or "").strip():
+            if not html_content:
+                print(f"[DEBUG] all_overlay hiding due to empty html")
                 all_overlay.hide()
                 return
             all_overlay.show()
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] all_overlay show/hide exception: {e}")
             pass
         try:
             all_overlay.setFixedWidth(int(w))
@@ -3550,6 +4006,15 @@ class ImageDetailPanel(QWidget):
         try:
             all_overlay.move(0, int(y_all))
             all_overlay.raise_()
+        except Exception:
+            pass
+
+    def _update_all_info_html(self, html: str):
+        """后台线程更新 all_info_overlay HTML 的槽方法"""
+        try:
+            all_overlay = getattr(self, "all_info_overlay_main", None)
+            if all_overlay is not None:
+                all_overlay.set_html(html)
         except Exception:
             pass
 
@@ -4131,6 +4596,11 @@ class ImageDetailPanel(QWidget):
                 self._detail_toggle_subject_rect_shortcut.setKey(sm.get_sequence("ImageDetail.ToggleSubjectRect"))
         except Exception:
             pass
+        try:
+            if getattr(self, "_detail_delete_shortcut", None) is not None:
+                self._detail_delete_shortcut.setKey(sm.get_sequence("ImageDetail.Delete"))
+        except Exception:
+            pass
 
     def update_thumbnail_selection(self, center_index=None):
         try:
@@ -4268,7 +4738,7 @@ class ImageDetailPanel(QWidget):
         self.btn_delete.setIcon(qta.icon('mdi6.trash-can-outline', color='#e74c3c'))
         self.btn_delete.setIconSize(QSize(24, 24))
         self.btn_delete.setFixedSize(36, 36)
-        self.btn_delete.setToolTip("删除 (Ctrl+D)")
+        self.btn_delete.setToolTip(f"删除 ({ShortcutManager.instance().get_sequence('ImageDetail.Delete').toString()})")
         self.btn_delete.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_delete.setStyleSheet(f"""
             QPushButton {{ background-color: transparent; border: none; border-radius: 4px; }}
@@ -4658,10 +5128,9 @@ class ImageDetailPanel(QWidget):
                 if self.pixmap_item_left.pixmap() and not self.pixmap_item_left.pixmap().isNull():
                     self._fit_view(self.view_left, self.pixmap_item_left)
                 try:
-                    # 重置 zoom_scale
-                    self.zoom_scale = 1.0
+                    # 保持当前的缩放比例，不重置
                     for view in self._get_active_views():
-                        # view.scale(float(self.zoom_scale), float(self.zoom_scale))
+                        view.scale(float(self.zoom_scale), float(self.zoom_scale))
                         if hasattr(view, "horizontalScrollBar"):
                             view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
                             view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
@@ -4677,10 +5146,11 @@ class ImageDetailPanel(QWidget):
                 except Exception:
                     pass
             else:
-                # 单图模式：更新主视图并重置状态
+                # 单图模式：更新主视图
                 self.rotation_angle = 0
                 self._clear_subject_rect()
-                self.fit_image_to_view()
+                # 保持当前的缩放比例，不重置
+                self._apply_zoom_scale()
                 try:
                     QTimer.singleShot(0, self._refresh_subject_rect_overlay)
                     QTimer.singleShot(0, self._refresh_focus_point_overlay)
@@ -4770,10 +5240,22 @@ class ImageDetailPanel(QWidget):
             finally:
                 self._is_syncing_scroll = False
 
+    def _apply_zoom_scale(self):
+        """应用当前的缩放比例到视图"""
+        try:
+            # 先适应窗口，然后再应用缩放
+            self._fit_view(self.view, self.pixmap_item)
+            # 应用当前的缩放比例
+            for view in self._get_active_views():
+                view.scale(float(self.zoom_scale), float(self.zoom_scale))
+            self.update_zoom_label()
+        except Exception:
+            pass
+
     def fit_image_to_view(self):
         # 重置 zoom_scale 为 1.0 (适应窗口)
         self.zoom_scale = 1.0
-        
+
         if self.compare_mode:
             self._fit_view(self.view_left, self.pixmap_item_left)
             self._fit_view(self.view_right, self.pixmap_item_right)
@@ -4809,6 +5291,8 @@ class ImageDetailPanel(QWidget):
 
     def show_prev_image(self):
         if self.current_index > 0:
+            # 保存大浮层的滚动位置
+            self._save_all_info_scroll_pos()
             self.current_index -= 1
             self.load_current_image()
             self.update_thumbnail_selection()
@@ -4816,10 +5300,42 @@ class ImageDetailPanel(QWidget):
 
     def show_next_image(self):
         if self.current_index < len(self.image_list) - 1:
+            # 保存大浮层的滚动位置
+            self._save_all_info_scroll_pos()
             self.current_index += 1
             self.load_current_image()
             self.update_thumbnail_selection()
             self.update_nav_buttons_pos()
+
+    def _save_all_info_scroll_pos(self):
+        """保存大浮层的滚动位置"""
+        try:
+            all_overlay = getattr(self, "all_info_overlay_main", None)
+            if all_overlay is not None and hasattr(all_overlay, "scroll_area"):
+                scrollbar = all_overlay.scroll_area.verticalScrollBar()
+                if scrollbar:
+                    self._saved_scroll_value = scrollbar.value()
+                    self._saved_scroll_max = scrollbar.maximum()
+                    print(f"[DEBUG] Saved scroll: value={self._saved_scroll_value}, max={self._saved_scroll_max}")
+        except Exception as e:
+            print(f"[DEBUG] Save scroll error: {e}")
+
+    def _restore_all_info_scroll_pos(self):
+        """恢复大浮层的滚动位置"""
+        try:
+            if hasattr(self, "_saved_scroll_value") and hasattr(self, "_saved_scroll_max"):
+                all_overlay = getattr(self, "all_info_overlay_main", None)
+                if all_overlay is not None and hasattr(all_overlay, "scroll_area"):
+                    scrollbar = all_overlay.scroll_area.verticalScrollBar()
+                    if scrollbar and self._saved_scroll_max > 0:
+                        new_max = scrollbar.maximum()
+                        if new_max > 0:
+                            ratio = self._saved_scroll_value / self._saved_scroll_max
+                            new_value = int(ratio * new_max)
+                            scrollbar.setValue(new_value)
+                            print(f"[DEBUG] Restored scroll: old={self._saved_scroll_value}, new={new_value}, ratio={ratio}")
+        except Exception as e:
+            print(f"[DEBUG] Restore scroll error: {e}")
 
     def _on_prev_image_shortcut(self):
         if self.current_index > 0:
@@ -4863,6 +5379,11 @@ class ImageDetailPanel(QWidget):
                     view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
             self.zoom_scale = float(new_zoom)
             self.update_zoom_label()
+            # 刷新鸟眼框位置
+            try:
+                QTimer.singleShot(0, self._refresh_eye_rect_overlay)
+            except Exception:
+                pass
             try:
                 if self._settings_manager is not None:
                     self._settings_manager.set("image_detail/zoom_scale", float(self.zoom_scale))
@@ -4898,6 +5419,11 @@ class ImageDetailPanel(QWidget):
                     view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
             self.zoom_scale = float(new_zoom)
             self.update_zoom_label()
+            # 刷新鸟眼框位置
+            try:
+                QTimer.singleShot(0, self._refresh_eye_rect_overlay)
+            except Exception:
+                pass
             try:
                 if self._settings_manager is not None:
                     self._settings_manager.set("image_detail/zoom_scale", float(self.zoom_scale))
@@ -5749,7 +6275,7 @@ class ImageDetailPanel(QWidget):
         item = QGraphicsRectItem(rect)
         pen = QPen(ColorManager.instance().qcolor("border.subject_rect", default="#f50f0f"))
         pen.setWidth(3)
-        pen.setCosmetic(True)
+        pen.setCosmetic(False)
         item.setPen(pen)
         item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         item.setZValue(100)
@@ -6941,18 +7467,13 @@ class ImageDetailPanel(QWidget):
                     r = 8.0
                 except Exception:
                     r = 8.0
-                item = QGraphicsRectItem(QRectF(-r, -r, 2 * r, 2 * r))
-                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                item = QGraphicsRectItem(QRectF(scene_x - r, scene_y - r, 2 * r, 2 * r))
                 c = QColor("#2196F3")
                 c.setAlpha(240)
                 pen = QPen(c, 3)
-                try:
-                    pen.setCosmetic(True)
-                except Exception:
-                    pass
+                pen.setCosmetic(False)
                 item.setPen(pen)
                 item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-                item.setPos(scene_x, scene_y)
                 item.setZValue(101)
                 scene.addItem(item)
                 try:
@@ -7244,18 +7765,13 @@ class ImageDetailPanel(QWidget):
                 except Exception:
                     r = 8.0
                 try:
-                    item = QGraphicsRectItem(QRectF(-r, -r, 2 * r, 2 * r))
-                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                    item = QGraphicsRectItem(QRectF(scene_x - r, scene_y - r, 2 * r, 2 * r))
                     c = QColor("#2196F3")
                     c.setAlpha(240)
                     pen = QPen(c, 3)
-                    try:
-                        pen.setCosmetic(True)
-                    except Exception:
-                        pass
+                    pen.setCosmetic(False)
                     item.setPen(pen)
                     item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-                    item.setPos(scene_x, scene_y)
                     item.setZValue(101)
                     self.scene.addItem(item)
                     self._eye_rect_item = item
@@ -7937,10 +8453,6 @@ class ImageDetailPanel(QWidget):
 
         img_info = self.image_list[self.current_index]
         path = img_info['path']
-        
-        # 只需要更新当前主视图的 Overlay (如果不是对比模式)
-        if not self.compare_mode and hasattr(self, 'overlay_main') and self.overlay_main:
-             self._update_overlay_data(path, self.overlay_main, self.info_overlay_main)
         
         # 只需要更新当前主视图的 Overlay (如果不是对比模式)
         if not self.compare_mode and hasattr(self, 'overlay_main') and self.overlay_main:
