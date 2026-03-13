@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 from PyQt6.QtGui import QImage
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -12,6 +11,85 @@ _build_flavor_cache: str | None = None
 _torch_cuda_probe_cache: tuple[bool, str, int, float] | None = None
 _torch_cuda_probe_thread_started: bool = False
 _torch_cuda_probe_thread_lock = threading.Lock()
+_gpu_summary_thread_started: bool = False
+_gpu_summary_thread_lock = threading.Lock()
+
+# 日志限流控制
+_gpu_log_last_time: dict[str, float] = {}
+_gpu_log_min_interval: float = 5.0  # 相同日志的最小输出间隔（秒）
+
+
+def _gpu_log(level: str, msg: str, throttle_key: str | None = None) -> None:
+    """
+    输出 GPU 相关日志，支持限流控制。
+    
+    参数：
+        level: 日志级别 (debug, info, warning, error)
+        msg: 日志消息
+        throttle_key: 限流标识，相同 key 的日志在 _gpu_log_min_interval 秒内只输出一次
+    """
+    global _gpu_log_last_time
+    try:
+        if throttle_key is not None:
+            now = float(time.monotonic())
+            last_time = _gpu_log_last_time.get(str(throttle_key), 0.0)
+            if float(now - last_time) < float(_gpu_log_min_interval):
+                return
+            _gpu_log_last_time[str(throttle_key)] = now
+    except Exception:
+        pass
+    
+    try:
+        from utils.log_manager import LogManager
+
+        logger = LogManager.instance()
+        log_fn = getattr(logger, str(level or "debug").lower(), None)
+        if callable(log_fn):
+            log_fn(f"[TorchCUDA] {msg}")
+            return
+        logger.debug(f"[TorchCUDA] {msg}")
+    except Exception:
+        pass
+
+
+def log_gpu_summary_async(reason: str = "manual", force: bool = False) -> None:
+    """
+    在后台线程输出一条 GPU/CUDA 环境摘要日志。
+
+    默认做轻量去重，避免短时间内重复刷屏；`force=True` 可强制输出。
+    """
+    global _gpu_summary_thread_started
+    try:
+        with _gpu_summary_thread_lock:
+            if bool(_gpu_summary_thread_started) and (not bool(force)):
+                _gpu_log("debug", f"skip gpu summary: thread already started reason={reason}")
+                return
+            _gpu_summary_thread_started = True
+    except Exception:
+        return
+
+    def _run():
+        global _gpu_summary_thread_started
+        try:
+            summary = str(get_gpu_summary() or "").strip()
+            if summary:
+                _gpu_log("info", f"summary reason={reason} {summary}")
+            else:
+                _gpu_log("info", f"summary reason={reason} empty")
+        except Exception as e:
+            _gpu_log("warning", f"summary failed reason={reason} err={e}")
+        finally:
+            try:
+                with _gpu_summary_thread_lock:
+                    _gpu_summary_thread_started = False
+            except Exception:
+                _gpu_summary_thread_started = False
+
+    try:
+        t = threading.Thread(target=_run, name=f"GpuSummary-{reason}", daemon=True)
+        t.start()
+    except Exception as e:
+        _gpu_log("warning", f"failed to start gpu summary thread reason={reason} err={e}")
 
 
 def _get_build_flavor() -> str:
@@ -70,6 +148,25 @@ def is_gpu_build() -> bool:
         return False
 
 
+def _should_probe_torch_cuda() -> bool:
+    """
+    判断当前运行形态下是否应该执行 torch CUDA 可用性探测。
+
+    规则：
+    - 开发态直接允许探测，避免源码运行时被固定判成 False；
+    - 打包态仅 GPU 构建执行探测，CPU 包直接视为不可用。
+    """
+    try:
+        if not bool(getattr(sys, "frozen", False)):
+            return True
+    except Exception:
+        return True
+    try:
+        return bool(is_gpu_build())
+    except Exception:
+        return False
+
+
 def _get_torch_cuda_probe_timeout_s() -> float:
     try:
         if bool(getattr(sys, "frozen", False)):
@@ -85,7 +182,7 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
 
     设计目标：
     - 启动阶段尽快开始探测，减少后续业务（例如对焦检测）第一次触发时的等待；
-    - 探测在子进程中进行，避免主进程因 CUDA 相关原生崩溃被带走；
+    - 探测放到后台子线程中执行，避免阻塞调用线程；
     - 后续调用 is_torch_cuda_usable()/get_torch_cuda_check_brief() 直接复用缓存结果。
 
     参数：
@@ -93,7 +190,8 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
     """
     global _torch_cuda_probe_thread_started
     try:
-        if not bool(is_gpu_build()):
+        if not bool(_should_probe_torch_cuda()):
+            _gpu_log("debug", "skip async probe: current runtime should not probe CUDA")
             return
     except Exception:
         return
@@ -101,11 +199,13 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
     if bool(force):
         try:
             reset_torch_cuda_cache()
+            _gpu_log("debug", "async probe requested with force=True, cache reset")
         except Exception:
             pass
 
     try:
         if bool(_torch_cuda_checked) or (_torch_cuda_probe_cache is not None):
+            _gpu_log("debug", "skip async probe: cached result already exists")
             return
     except Exception:
         pass
@@ -113,6 +213,7 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
     try:
         with _torch_cuda_probe_thread_lock:
             if bool(_torch_cuda_probe_thread_started):
+                _gpu_log("debug", "skip async probe: background probe thread already started")
                 return
             _torch_cuda_probe_thread_started = True
     except Exception:
@@ -121,12 +222,18 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
     def _run():
         global _torch_cuda_cache, _torch_cuda_checked, _torch_cuda_checked_at, _torch_cuda_checked_code
         try:
-            ok, _, code = _probe_torch_cuda_via_subprocess(timeout_s=_get_torch_cuda_probe_timeout_s())
+            _gpu_log("info", f"background probe start timeout_s={_get_torch_cuda_probe_timeout_s():.1f}")
+            ok, _, code = _probe_torch_cuda(timeout_s=_get_torch_cuda_probe_timeout_s())
             try:
                 _torch_cuda_cache = bool(ok)
                 _torch_cuda_checked_code = int(code)
                 _torch_cuda_checked = True
                 _torch_cuda_checked_at = float(time.monotonic())
+                _gpu_log(
+                    "info" if bool(ok) else "warning",
+                    f"background probe done ok={bool(ok)} code={int(code)} brief={get_torch_cuda_check_brief()}",
+                )
+                log_gpu_summary_async(reason="background_probe_done", force=True)
             except Exception:
                 pass
         except Exception:
@@ -135,14 +242,17 @@ def start_torch_cuda_probe_async(force: bool = False) -> None:
                 _torch_cuda_checked = True
                 _torch_cuda_checked_code = 12
                 _torch_cuda_checked_at = float(time.monotonic())
+                _gpu_log("warning", "background probe failed with unexpected exception, fallback to unavailable")
+                log_gpu_summary_async(reason="background_probe_exception", force=True)
             except Exception:
                 pass
 
     try:
         t = threading.Thread(target=_run, name="TorchCudaProbe", daemon=True)
         t.start()
+        _gpu_log("debug", "background probe thread started")
     except Exception:
-        pass
+        _gpu_log("warning", "failed to start background probe thread")
 
 
 def get_gpu_summary() -> str:
@@ -176,7 +286,7 @@ def get_gpu_summary() -> str:
     except Exception:
         pass
     try:
-        ok, out, code = _probe_torch_cuda_via_subprocess(timeout_s=_get_torch_cuda_probe_timeout_s())
+        ok, out, code = _probe_torch_cuda(timeout_s=_get_torch_cuda_probe_timeout_s())
         if bool(ok):
             parts.append("torch.cuda=True")
         else:
@@ -220,32 +330,102 @@ def reset_torch_cuda_cache():
     _torch_cuda_checked = False
     _torch_cuda_checked_at = None
     _torch_cuda_checked_code = None
-    global _torch_cuda_probe_cache
+    global _torch_cuda_probe_cache, _torch_cuda_probe_thread_started
     _torch_cuda_probe_cache = None
+    _torch_cuda_probe_thread_started = False
+    _gpu_log("debug", "CUDA probe cache reset")
 
 
-def _subprocess_no_window_kwargs() -> dict:
-    if os.name != "nt":
-        return {}
-    creationflags = 0
+def _run_torch_cuda_action_in_thread(action: str, timeout_s: float = 5.0) -> tuple[bool, str, int]:
+    """
+    在子线程中执行 torch/CUDA 相关操作，避免阻塞调用线程。
+
+    返回：
+    - ok: 是否成功
+    - out: 单行摘要文本
+    - code: 0=成功, 2=不可用/未执行, 3=导入失败, 11=超时, 12=异常
+    """
+    result: dict[str, tuple[bool, str, int]] = {}
+    done = threading.Event()
+    t0 = float(time.perf_counter())
+
     try:
-        creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        _gpu_log("debug", f"thread action start action={action} timeout_s={float(timeout_s):.1f}")
     except Exception:
-        creationflags |= 0x08000000
+        pass
+
+    def _worker():
+        try:
+            import torch
+
+            if str(action) == "probe":
+                v = str(getattr(torch, "__version__", "") or "")
+                cuda = getattr(getattr(torch, "version", None), "cuda", None)
+                ok = 0
+                dc = -1
+                name = ""
+                err = ""
+                try:
+                    if bool(torch.cuda.is_available()):
+                        dc = int(torch.cuda.device_count() or 0)
+                        if dc > 0:
+                            ok = 1
+                            try:
+                                name = str(torch.cuda.get_device_name(0) or "")
+                            except Exception:
+                                name = ""
+                except Exception as e:
+                    err = str(e)
+                out = f"torch={v}|torch_cuda={cuda}|ok={ok}|dc={dc}|name0={name}|err={err}"
+                result["value"] = (bool(ok), out, 0 if ok else 2)
+                return
+
+            if str(action) == "clear_cache":
+                ok = 0
+                err = ""
+                try:
+                    if bool(torch.cuda.is_available()):
+                        torch.cuda.empty_cache()
+                        ok = 1
+                except Exception as e:
+                    err = str(e)
+                out = f"torch_cuda_cache_cleared={ok}|err={err}"
+                result["value"] = (bool(ok), out, 0 if ok else 2)
+                return
+
+            result["value"] = (False, f"unknown_action={action}", 12)
+        except Exception as e:
+            if str(action) == "clear_cache":
+                result["value"] = (False, f"torch_clear_cache_error={e}", 3)
+            else:
+                result["value"] = (False, f"torch_probe_error={e}", 3)
+        finally:
+            done.set()
+
     try:
-        creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
-    except Exception:
-        creationflags |= 0x00000008
+        t = threading.Thread(target=_worker, name=f"TorchCudaAction-{action}", daemon=True)
+        t.start()
+    except Exception as e:
+        _gpu_log("warning", f"thread action launch failed action={action} err={e}")
+        return (False, f"run_error={e}", 12)
+
+    if not done.wait(timeout=float(timeout_s)):
+        elapsed_ms = float((time.perf_counter() - t0) * 1000.0)
+        _gpu_log("warning", f"thread action timeout action={action} elapsed_ms={elapsed_ms:.1f}")
+        return (False, "timeout", 11)
+
+    out = result.get("value", (False, "thread_no_result", 12))
     try:
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = subprocess.SW_HIDE
-        return {"creationflags": int(creationflags), "startupinfo": si}
+        elapsed_ms = float((time.perf_counter() - t0) * 1000.0)
+        ok, out_txt, code = out
+        level = "info" if bool(ok) else ("warning" if int(code) in (3, 11, 12) else "debug")
+        _gpu_log(level, f"thread action done action={action} ok={bool(ok)} code={int(code)} elapsed_ms={elapsed_ms:.1f} out={str(out_txt)[:240]}")
     except Exception:
-        return {"creationflags": int(creationflags)}
+        pass
+    return out
 
 
-def _probe_torch_cuda_via_subprocess(timeout_s: float = 5.0) -> tuple[bool, str, int]:
+def _probe_torch_cuda(timeout_s: float = 5.0) -> tuple[bool, str, int]:
     global _torch_cuda_probe_cache
     if _torch_cuda_probe_cache is not None:
         try:
@@ -254,87 +434,23 @@ def _probe_torch_cuda_via_subprocess(timeout_s: float = 5.0) -> tuple[bool, str,
             age_s = float(now - float(ts0))
             ttl_s = 300.0 if (bool(ok0) or int(code0) == 2) else 30.0
             if age_s <= ttl_s:
+                _gpu_log("debug", f"probe cache hit ok={bool(ok0)} code={int(code0)} age_s={age_s:.1f}")
                 return bool(ok0), str(out0 or ""), int(code0)
             _torch_cuda_probe_cache = None
+            _gpu_log("debug", f"probe cache expired code={int(code0)} age_s={age_s:.1f}")
         except Exception:
             _torch_cuda_probe_cache = None
-
-    exe = str(sys.executable or "")
-    if not exe:
-        now = float(time.monotonic())
-        _torch_cuda_probe_cache = (False, "no_executable", 10, now)
-        return (False, "no_executable", 10)
-
-    is_frozen = bool(getattr(sys, "frozen", False))
-    if is_frozen:
-        args = [exe, "--torch-cuda-probe"]
-    else:
-        code = (
-            "import sys\n"
-            "try:\n"
-            " import torch\n"
-            " v=str(getattr(torch,'__version__','') or '')\n"
-            " cuda=getattr(getattr(torch,'version',None),'cuda',None)\n"
-            " ok=0\n"
-            " dc=-1\n"
-            " name=''\n"
-            " err=''\n"
-            " try:\n"
-            "  if bool(torch.cuda.is_available()):\n"
-            "   dc=int(torch.cuda.device_count() or 0)\n"
-            "   if dc>0:\n"
-            "    ok=1\n"
-            "    try:\n"
-            "     name=str(torch.cuda.get_device_name(0) or '')\n"
-            "    except Exception:\n"
-            "     name=''\n"
-            " except Exception as e:\n"
-            "  err=str(e)\n"
-            " print(f'torch={v}|torch_cuda={cuda}|ok={ok}|dc={dc}|name0={name}|err={err}')\n"
-            " sys.exit(0 if ok else 2)\n"
-            "except Exception as e:\n"
-            " print('torch_probe_error='+str(e))\n"
-            " sys.exit(3)\n"
-        )
-        args = [exe, "-c", code]
 
     try:
         now = float(time.monotonic())
-        cp = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=float(timeout_s),
-            **_subprocess_no_window_kwargs(),
-        )
-        out = (str(cp.stdout or "") + "\n" + str(cp.stderr or "")).strip()
-        out = out.replace("\r\n", "\n").replace("\r", "\n")
-        out_lines = []
-        try:
-            out_lines = [str(x).strip() for x in str(out or "").splitlines()]
-        except Exception:
-            out_lines = []
-        out_lines = [x for x in out_lines if x]
-        out_one = ""
-        for line in reversed(out_lines):
-            s = str(line or "").strip()
-            if not s:
-                continue
-            if s.startswith("torch=") or s.startswith("torch_probe_error=") or s.startswith("torch_import_error="):
-                out_one = s
-                break
-        if not out_one:
-            out_one = (out_lines[-1] if out_lines else "").strip()
-        ok = int(cp.returncode) == 0
-        _torch_cuda_probe_cache = (bool(ok), str(out_one or ""), int(cp.returncode), now)
-        return (bool(ok), str(out_one or ""), int(cp.returncode))
-    except subprocess.TimeoutExpired:
-        now = float(time.monotonic())
-        _torch_cuda_probe_cache = (False, "timeout", 11, now)
-        return (False, "timeout", 11)
+        ok, out_one, code = _run_torch_cuda_action_in_thread("probe", timeout_s=float(timeout_s))
+        _torch_cuda_probe_cache = (bool(ok), str(out_one or ""), int(code), now)
+        _gpu_log("debug", f"probe cache store ok={bool(ok)} code={int(code)}")
+        return (bool(ok), str(out_one or ""), int(code))
     except Exception as e:
         now = float(time.monotonic())
         _torch_cuda_probe_cache = (False, f"run_error={e}", 12, now)
+        _gpu_log("warning", f"probe execution failed err={e}")
         return (False, f"run_error={e}", 12)
 
 
@@ -344,10 +460,10 @@ def get_torch_cuda_check_brief() -> str:
 
     设计目标：
     - UI/日志需要展示“是否可用”与“为什么不可用”的关键原因；
-    - 该函数尽量只读取已有缓存，避免在 UI 线程里启动子进程或阻塞。
+    - 该函数尽量只读取已有缓存，避免在 UI 线程里触发新的探测并阻塞。
     """
     try:
-        if not bool(is_gpu_build()):
+        if not bool(_should_probe_torch_cuda()):
             return "否"
     except Exception:
         pass
@@ -390,63 +506,32 @@ def get_torch_cuda_check_brief() -> str:
     return "未知"
 
 
-def _clear_torch_cuda_cache_via_subprocess(timeout_s: float = 5.0) -> tuple[bool, str, int]:
+def _clear_torch_cuda_cache(timeout_s: float = 5.0) -> tuple[bool, str, int]:
     """
-    在子进程中尝试执行 torch.cuda.empty_cache()。
+    在子线程中尝试执行 torch.cuda.empty_cache()。
 
     目的：
-    - 避免主进程直接触发 torch 的 CUDA 初始化逻辑，从而规避 c10_cuda.dll 这类原生崩溃把主进程带走。
+    - 避免在调用线程中直接执行清缓存逻辑，降低 UI 卡顿风险。
 
     参数：
-    - timeout_s: 子进程最大执行时长（秒），超时会被终止并返回失败。
+    - timeout_s: 子线程等待时长上限（秒），超时后直接返回失败。
 
     返回：
     - (是否成功, 输出摘要, 退出码)
     """
-    exe = str(sys.executable or "")
-    if not exe:
-        return (False, "no_executable", 10)
-
-    is_frozen = bool(getattr(sys, "frozen", False))
-    if is_frozen:
-        args = [exe, "--torch-cuda-clear-cache"]
-    else:
-        code = (
-            "import sys\n"
-            "try:\n"
-            " import torch\n"
-            " ok=0\n"
-            " err=''\n"
-            " try:\n"
-            "  if bool(torch.cuda.is_available()):\n"
-            "   torch.cuda.empty_cache()\n"
-            "   ok=1\n"
-            " except Exception as e:\n"
-            "  err=str(e)\n"
-            " print(f'torch_cuda_cache_cleared={ok}|err={err}')\n"
-            " sys.exit(0 if ok else 2)\n"
-            "except Exception as e:\n"
-            " print('torch_clear_cache_error='+str(e))\n"
-            " sys.exit(3)\n"
-        )
-        args = [exe, "-c", code]
-
     try:
-        cp = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=float(timeout_s),
-            **_subprocess_no_window_kwargs(),
-        )
-        out = (str(cp.stdout or "") + "\n" + str(cp.stderr or "")).strip()
-        out = out.replace("\r\n", "\n").replace("\r", "\n")
-        out_one = (out.splitlines()[-1] if out else "").strip()
-        ok = int(cp.returncode) == 0
-        return (bool(ok), str(out_one or ""), int(cp.returncode))
-    except subprocess.TimeoutExpired:
-        return (False, "timeout", 11)
+        out = _run_torch_cuda_action_in_thread("clear_cache", timeout_s=float(timeout_s))
+        try:
+            ok, out_txt, code = out
+            _gpu_log(
+                "info" if bool(ok) else "warning",
+                f"clear cache result ok={bool(ok)} code={int(code)} out={str(out_txt)[:240]}",
+            )
+        except Exception:
+            pass
+        return out
     except Exception as e:
+        _gpu_log("warning", f"clear cache failed err={e}")
         return (False, f"run_error={e}", 12)
 
 
@@ -455,22 +540,22 @@ def try_clear_torch_cuda_cache(timeout_s: float = 4.0) -> bool:
     尝试清理 torch CUDA 缓存（如果是 GPU 构建）。
 
     设计说明：
-    - 仅在检测到 GPU 构建时才尝试执行；
-    - 实际执行在子进程中完成，尽量避免主进程因 CUDA 驱动/运行库问题发生原生崩溃。
+    - 开发态允许直接探测/清理；打包态仅 GPU 构建尝试执行；
+    - 实际执行在子线程中完成，避免阻塞调用线程。
 
     参数：
-    - timeout_s: 子进程最大执行时长（秒）。
+    - timeout_s: 子线程等待时长上限（秒）。
 
     返回：
     - True 表示清理执行成功；False 表示未清理或清理失败（含超时/异常/非 GPU 构建）。
     """
     try:
-        if not bool(is_gpu_build()):
+        if not bool(_should_probe_torch_cuda()):
             return False
     except Exception:
         return False
     try:
-        ok, _, _ = _clear_torch_cuda_cache_via_subprocess(timeout_s=float(timeout_s))
+        ok, _, _ = _clear_torch_cuda_cache(timeout_s=float(timeout_s))
         return bool(ok)
     except Exception:
         return False
@@ -483,33 +568,43 @@ def is_torch_cuda_usable() -> bool:
     if _torch_cuda_checked:
         try:
             if bool(_torch_cuda_cache):
+                _gpu_log("debug", "is_torch_cuda_usable return cached True", throttle_key="cuda_cached_true")
                 return True
             if _torch_cuda_checked_at is None:
+                _gpu_log("debug", "is_torch_cuda_usable return cached value without timestamp", throttle_key="cuda_cached_no_ts")
                 return bool(_torch_cuda_cache)
             now = float(time.monotonic())
-            if float(now - float(_torch_cuda_checked_at)) <= 30.0:
+            age_s = float(now - float(_torch_cuda_checked_at))
+            if float(age_s) <= 30.0:
+                # 使用限流，避免频繁输出相同的缓存日志
+                _gpu_log("debug", f"is_torch_cuda_usable return cached False age_s={age_s:.1f}", throttle_key="cuda_cached_false")
                 return False
             _torch_cuda_checked = False
+            _gpu_log("debug", "is_torch_cuda_usable cached False expired, re-probing")
         except Exception:
             return bool(_torch_cuda_cache)
 
     try:
-        if not bool(is_gpu_build()):
+        if not bool(_should_probe_torch_cuda()):
             _torch_cuda_cache = False
             _torch_cuda_checked = True
+            _gpu_log("debug", "is_torch_cuda_usable skip probe because runtime should not probe")
             return False
     except Exception:
         _torch_cuda_cache = False
         _torch_cuda_checked = True
+        _gpu_log("warning", "is_torch_cuda_usable failed to evaluate probe policy")
         return False
     
     try:
-        ok, _, code = _probe_torch_cuda_via_subprocess(timeout_s=_get_torch_cuda_probe_timeout_s())
+        ok, _, code = _probe_torch_cuda(timeout_s=_get_torch_cuda_probe_timeout_s())
         _torch_cuda_cache = bool(ok)
         _torch_cuda_checked_code = int(code)
+        _gpu_log("info" if bool(ok) else "warning", f"is_torch_cuda_usable fresh probe result ok={bool(ok)} code={int(code)}")
     except Exception:
         _torch_cuda_cache = False
         _torch_cuda_checked_code = 12
+        _gpu_log("warning", "is_torch_cuda_usable fresh probe raised exception")
     
     _torch_cuda_checked = True
     try:

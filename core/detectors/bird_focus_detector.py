@@ -104,11 +104,23 @@ try:
     from ultralytics import YOLO
     _TORCH_YOLO_AVAILABLE = True
     _TORCH_IMPORT_ERROR: Exception | None = None
+    # 调试日志：记录成功导入
+    try:
+        from utils.log_manager import LogManager
+        LogManager.instance().debug(f"[FocusDetect] torch和ultralytics导入成功: torch={torch.__version__}")
+    except Exception:
+        pass
 except Exception as _e:
     torch = None  # type: ignore[assignment]
     YOLO = None  # type: ignore[assignment]
     _TORCH_YOLO_AVAILABLE = False
     _TORCH_IMPORT_ERROR = _e
+    # 调试日志：记录导入失败
+    try:
+        from utils.log_manager import LogManager
+        LogManager.instance().error(f"[FocusDetect] torch或ultralytics导入失败: {_e}")
+    except Exception:
+        pass
 
 import utils.file.file as FileUtils
 from utils.system.gpu_utils import GPUScaler, is_torch_cuda_usable
@@ -204,7 +216,7 @@ def _save_focus_debug_image(vis_img: np.ndarray, filename: str):
 class BirdFocusDetector:
     def __init__(
         self,
-        model_path: str = "yolo26n-seg.pt",
+        model_path: str = "yolov8n-seg.pt",
         *,
         target_size: int = 512,
         initial_conf: float = 0.15,
@@ -251,14 +263,31 @@ class BirdFocusDetector:
                 msg = f"{msg}。通常是 torch GPU 版的 DLL 依赖在打包后缺失/被裁剪"
             raise RuntimeError(msg if not detail else f"{msg} ({detail})")
 
-        self.model_path = model_path
+        # 解析模型路径，支持打包后的环境
+        self.model_path = self._resolve_model_path(model_path)
+        
+        # 调试日志：记录模型路径解析结果
+        try:
+            LogManager.instance().debug(f"[FocusDetect] 模型路径解析: 原始={model_path}, 解析后={self.model_path}, 存在={os.path.isfile(self.model_path)}")
+        except Exception:
+            pass
+        
         self.device = "cpu"
         try:
             if bool(use_gpu):
                 self.device = self._select_device()
         except Exception:
             self.device = "cpu"
-        self.model = YOLO(model_path, verbose=False)
+        self.model = YOLO(self.model_path, verbose=False)
+        
+        # 验证模型是否正确加载
+        try:
+            model_type = type(self.model).__name__
+            model_task = getattr(self.model, 'task', 'unknown')
+            model_names = getattr(self.model, 'names', {})
+            LogManager.instance().debug(f"[FocusDetect] YOLO模型加载成功: type={model_type}, task={model_task}, classes={len(model_names)}")
+        except Exception as e:
+            LogManager.instance().warning(f"[FocusDetect] YOLO模型加载后验证失败: {e}")
 
         self.target_size = target_size
         try:
@@ -297,12 +326,77 @@ class BirdFocusDetector:
 
     @staticmethod
     def _select_device():
+        """
+        选择运行设备（CPU或CUDA）
+        
+        使用简单的torch.cuda.is_available()检测，避免复杂的探测逻辑
+        在AMD GPU上会自动回退到CPU模式
+        
+        返回:
+            "cuda" - 如果CUDA可用
+            "cpu" - 否则
+        """
         try:
-            if bool(is_torch_cuda_usable()):
+            # 使用简单的检测逻辑，与BirdCheck/check.py保持一致
+            if torch is not None and torch.cuda.is_available():
                 return "cuda"
-        except Exception:
-            pass
+        except Exception as e:
+            LogManager.instance().error(f"import torch error: {e}")
         return "cpu"
+
+    @staticmethod
+    def _resolve_model_path(model_path: str) -> str:
+        """
+        解析YOLO模型路径，支持打包后的环境
+        
+        在打包后的环境中，模型文件可能位于不同的位置。
+        此方法尝试多个候选路径来找到模型文件。
+        
+        参数:
+            model_path: 原始模型路径（可能是相对路径或绝对路径）
+            
+        返回:
+            解析后的绝对路径
+            
+        异常:
+            FileNotFoundError: 当模型文件不存在时抛出
+        """
+        # 如果已经是绝对路径且存在，直接返回
+        if os.path.isabs(model_path) and os.path.isfile(model_path):
+            return str(model_path)
+        
+        # 获取文件名
+        model_name = os.path.basename(model_path)
+        
+        # 候选路径列表
+        candidates = [
+            # 原始路径（如果是相对路径，相对于当前工作目录）
+            model_path,
+            # 当前工作目录下的 models 文件夹
+            os.path.join(os.getcwd(), "models", model_name),
+            # 项目根目录下的 models 文件夹
+            os.path.join(_get_project_root(), "models", model_name),
+            # 打包后 exe 所在目录下的 models 文件夹
+            os.path.join(os.path.dirname(sys.executable), "models", model_name),
+            # 打包后当前目录下的 models 文件夹
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "models", model_name),
+        ]
+        
+        # 尝试每个候选路径
+        tried_paths = []
+        for candidate in candidates:
+            try:
+                # 解析为绝对路径
+                abs_path = os.path.abspath(candidate)
+                tried_paths.append(abs_path)
+                if os.path.isfile(abs_path):
+                    return str(abs_path)
+            except Exception:
+                continue
+        
+        # 如果都没找到，抛出异常
+        error_msg = f"模型文件不存在: {model_name}\n尝试过的路径:\n" + "\n".join(f"  - {p}" for p in tried_paths)
+        raise FileNotFoundError(error_msg)
 
     def _get_scaled_cache_max_count(self) -> int:
         try:
@@ -528,12 +622,25 @@ class BirdFocusDetector:
         t0 = time.perf_counter()
         try:
             out = self.model(source, device=used_device, **kwargs)
-        except Exception:
+        except Exception as e:
+            # 记录模型调用异常
+            try:
+                LogManager.instance().warning(f"[FocusDetect] 模型调用异常: {e}, device={used_device}")
+            except Exception:
+                pass
             if used_device != "cpu":
                 fallback = True
                 self.device = "cpu"
                 used_device = "cpu"
-                out = self.model(source, device="cpu", **kwargs)
+                try:
+                    out = self.model(source, device="cpu", **kwargs)
+                except Exception as e2:
+                    # CPU 回退也失败，记录异常
+                    try:
+                        LogManager.instance().error(f"[FocusDetect] CPU回退也失败: {e2}")
+                    except Exception:
+                        pass
+                    raise
             else:
                 raise
         finally:
@@ -1383,6 +1490,19 @@ class BirdFocusDetector:
             _kw0["classes"] = classes_arg
         results = self._run_model(image, **_kw0)
         calls += 1
+        
+        # 调试日志：记录模型调用结果
+        try:
+            if results is None:
+                LogManager.instance().warning(f"[FocusDetect] _run_model 返回 None, file={filename}")
+            else:
+                try:
+                    num_boxes = len(results[0].boxes) if (results and results[0] and hasattr(results[0], 'boxes') and results[0].boxes) else 0
+                    LogManager.instance().debug(f"[FocusDetect] _run_model 返回结果: boxes={num_boxes}, file={filename}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         masks_xy_list = self._extract_masks_xy_list_from_results(results)
         if masks_xy_list:

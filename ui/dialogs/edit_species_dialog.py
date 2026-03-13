@@ -327,6 +327,14 @@ class EditSpeciesDialog(QDialog):
              self._recognition_done.emit(result_text, "")
              
         except Exception as e:
+             # 记录详细错误信息
+             try:
+                 import traceback
+                 from utils.log_manager import LogManager
+                 error_detail = traceback.format_exc()
+                 LogManager.instance().error(f"[FocusDetect] 识别失败: {e}\n{error_detail}")
+             except Exception:
+                 pass
              self._recognition_done.emit("", str(e))
 
     def _on_recognition_done(self, text, err):

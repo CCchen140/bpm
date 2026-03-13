@@ -1,4 +1,6 @@
 import argparse
+import importlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -69,6 +71,61 @@ def _write_build_flavor_marker(dist_dir: str, flavor: str):
             f.write(v)
     except Exception:
         pass
+
+
+def _get_module_origin(module_name: str) -> str:
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        return ""
+    origin = getattr(spec, "origin", None)
+    if isinstance(origin, str) and origin:
+        return origin
+    search_locations = getattr(spec, "submodule_search_locations", None)
+    if search_locations:
+        try:
+            return str(next(iter(search_locations), "") or "")
+        except Exception:
+            return ""
+    return ""
+
+
+def _verify_packaging_environment(flavor: str):
+    pyinstaller_origin = _get_module_origin("PyInstaller")
+    if not pyinstaller_origin:
+        raise RuntimeError(
+            "当前 Python 环境未安装 PyInstaller。\n"
+            f"解释器: {sys.executable}\n"
+            "请先在用于打包的同一个 Python 环境中安装 PyInstaller。"
+        )
+
+    print(f"[打包环境] Python: {sys.executable}")
+    print(f"[打包环境] PyInstaller: {pyinstaller_origin}")
+
+    required_modules = [
+        ("qtawesome", "UI 图标"),
+        ("pypinyin", "拼音排序"),
+        ("PyQt6.QtWebEngineWidgets", "地图/WebEngine"),
+        ("torch", f"{str(flavor or 'cpu').upper()} 推理"),
+        ("ultralytics", "YOLO 推理"),
+    ]
+
+    missing: list[str] = []
+    for module_name, usage in required_modules:
+        origin = _get_module_origin(module_name)
+        if not origin:
+            missing.append(f"{module_name} ({usage})")
+            continue
+        print(f"[打包环境] {module_name}: {origin}")
+
+    if missing:
+        missing_txt = "\n".join(f"  - {item}" for item in missing)
+        raise RuntimeError(
+            "当前用于打包的 Python 环境缺少关键依赖，继续打包会导致程序运行时缺图标、缺拼音排序或模型不可用。\n"
+            f"解释器: {sys.executable}\n"
+            "缺失依赖:\n"
+            f"{missing_txt}\n"
+            "请确认你执行 `build/build.py` 的解释器，就是安装这些依赖的同一个 Python 环境。"
+        )
 
 
 def _walk_dist_files(root_dir: str) -> dict[str, tuple[str, int, int]]:
@@ -623,6 +680,8 @@ def main():
         if v_token.lower().startswith('v'):
             v_token = v_token[1:]
     
+    suffix_token = str(suffix or "").strip()
+
     # 确定 cpu/gpu 后缀
     flavor_suffix = ""
     if flavor:
@@ -679,9 +738,6 @@ def main():
         print(f"[打包] is_full={is_full}")
         
         if delta_from and not is_full:
-            # 检查是否使用 build_delta.py 创建升级包
-            use_build_delta = bool(getattr(args, "delta", False))
-            
             # 检查旧版本目录是否存在
             delta_from_abs = os.path.abspath(delta_from)
             print(f"[打包] 检查旧版本目录: {delta_from_abs}")
@@ -689,9 +745,12 @@ def main():
             if not os.path.isdir(delta_from_abs):
                 print(f"[增量包] 错误: 旧版本目录不存在: {delta_from_abs}")
                 print(f"[增量包] 将生成完整包而不是增量包")
-            elif use_build_delta:
-                # 使用 build_delta.py 创建升级包
-                print("\n[升级包] 使用 build_delta.py 创建升级包...")
+            else:
+                # 统一使用 build_delta.py 创建升级包，避免依赖缺失的旧版 installer 模板
+                if bool(getattr(args, "delta", False)):
+                    print("\n[升级包] 使用 build_delta.py 创建升级包...")
+                else:
+                    print("\n[升级包] 旧版 ISS 增量模式已停用，自动切换为 build_delta.py ...")
                 try:
                     delta_script = os.path.join(root, "build", "build_delta.py")
                     if not os.path.exists(delta_script):
@@ -704,7 +763,7 @@ def main():
                             "--from", delta_from_abs,
                             "--to", dist_dir,
                             "--version", app_version,
-                            "--flavor", flavor if flavor else ""
+                            "--flavor", flavor_suffix if flavor_suffix else ""
                         ]
                         
                         print(f"[升级包] 执行: {' '.join(delta_cmd)}")
@@ -712,43 +771,6 @@ def main():
                         print("\n[升级包] 创建成功！")
                 except Exception as e:
                     print(f"[升级包] 创建失败: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                try:
-                    print(f"[增量包] 开始计算差异文件...")
-                    # 计算差异文件
-                    delta_files = _compute_delta_files(delta_from_abs, dist_dir)
-                    
-                    added_count = len(delta_files.get("added", []))
-                    modified_count = len(delta_files.get("modified", []))
-                    deleted_count = len(delta_files.get("deleted", []))
-                    total_count = added_count + modified_count + deleted_count
-                    
-                    print(f"[增量包] 计算完成: 新增={added_count}, 修改={modified_count}, 删除={deleted_count}")
-                    
-                    iss = os.path.join(root, "build", "installer", "newinstaller.iss")
-                    print(f"[增量包] 更新 iss 文件: {iss}")
-                    
-                    # 重写 iss 文件的 [Files] 段，只包含变化的文件
-                    _rewrite_inno_files_section(iss, dist_dir, delta_files)
-                    
-                    # 更新 iss 文件的版本信息
-                    _update_iss_version_info(iss, from_version, app_version)
-                    
-                    # 生成增量包文件列表报告
-                    delta_report_path = os.path.join(root, "dist", f"{dist_name}_delta_report.txt")
-                    _write_delta_report(delta_report_path, delta_from_abs, dist_dir, delta_files)
-                    
-                    print(f"\n[增量包] 从 {from_version or '未知版本'} 升级到 {app_version}")
-                    print(f"[增量包] 新增: {added_count} 个文件")
-                    print(f"[增量包] 修改: {modified_count} 个文件")
-                    print(f"[增量包] 删除: {deleted_count} 个文件")
-                    print(f"[增量包] 总计: {total_count} 个文件需要处理")
-                    print(f"[增量包] 报告已保存: {delta_report_path}")
-                    print(f"[增量包] 请使用 Inno Setup 编译: {iss}")
-                except Exception as e:
-                    print(f"[增量包] 处理失败: {e}")
                     import traceback
                     traceback.print_exc()
         else:

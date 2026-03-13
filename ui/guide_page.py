@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton,
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtGui import QPixmap, QLinearGradient, QColor, QPalette, QBrush, QPainter
 from ui.utils.icon_loader import qta
-import exiftool
 from utils.setting.settings_manager import SettingsManager
 from utils.system.app_info_manager import AppInfoManager
 from ui.utils.notification_manager import NotificationManager

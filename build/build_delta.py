@@ -18,6 +18,7 @@ import os
 import sys
 import shutil
 import hashlib
+import re
 from datetime import datetime
 
 
@@ -35,6 +36,18 @@ def _walk_dist_files(root_dir: str) -> dict[str, tuple[str, int, int]]:
             rel_base = "."
         if rel_base == ".":
             rel_base = ""
+        try:
+            parts = [p for p in rel_base.replace("\\", "/").split("/") if p]
+        except Exception:
+            parts = []
+        if parts:
+            top = str(parts[0] or "").lower()
+            if top in ("data", "cache"):
+                try:
+                    dirs[:] = []
+                except Exception:
+                    pass
+                continue
         
         for name in files:
             if not name:
@@ -58,6 +71,70 @@ def _walk_dist_files(root_dir: str) -> dict[str, tuple[str, int, int]]:
             out[rel_path] = (abs_path, size, mtime_ns)
     
     return out
+
+
+def _detect_flavor_from_dir_name(dir_name: str) -> str:
+    name = str(dir_name or "").strip().lower()
+    if "_gpu" in name:
+        return "gpu"
+    if "_cpu" in name:
+        return "cpu"
+    return ""
+
+
+def _extract_version_from_dist_name(dir_name: str) -> str:
+    m = re.match(r"^栖图_V([^_]+)", str(dir_name or ""))
+    if not m:
+        return ""
+    return str(m.group(1) or "").strip()
+
+
+def _version_sort_key(version: str):
+    parts = re.findall(r"\d+|[A-Za-z]+", str(version or ""))
+    key = []
+    for p in parts:
+        if str(p).isdigit():
+            key.append((0, int(p)))
+        else:
+            key.append((1, str(p).lower()))
+    return tuple(key)
+
+
+def _select_latest_dist_dir(dist_root: str, preferred_flavor: str = "") -> str:
+    candidates: list[tuple[tuple, str]] = []
+    preferred_flavor = str(preferred_flavor or "").strip().lower()
+    for name in os.listdir(dist_root):
+        full = os.path.join(dist_root, name)
+        if not os.path.isdir(full):
+            continue
+        if not str(name).startswith("栖图_V"):
+            continue
+        if "_update" in str(name).lower():
+            continue
+        version = _extract_version_from_dist_name(name)
+        if not version:
+            continue
+        flavor = _detect_flavor_from_dir_name(name)
+        if preferred_flavor and flavor and flavor != preferred_flavor:
+            continue
+        candidates.append((_version_sort_key(version), name))
+    if not candidates and preferred_flavor:
+        for name in os.listdir(dist_root):
+            full = os.path.join(dist_root, name)
+            if not os.path.isdir(full):
+                continue
+            if not str(name).startswith("栖图_V"):
+                continue
+            if "_update" in str(name).lower():
+                continue
+            version = _extract_version_from_dist_name(name)
+            if not version:
+                continue
+            candidates.append((_version_sort_key(version), name))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return os.path.join(dist_root, candidates[0][1])
 
 
 def _hash_file(path: str, max_bytes: int = 64 * 1024 * 1024) -> str:
@@ -175,8 +252,8 @@ def create_delta_package(
         pass
     
     copied_files = []
-    deleted_files = delta_files.get("deleted", [])
-    renamed_files = delta_files.get("renamed", [])
+    deleted_files = list(delta_files.get("deleted", []) or [])
+    renamed_files = list(delta_files.get("renamed", []) or [])
     
     # 复制新增和修改的文件
     for category in ["added", "modified"]:
@@ -247,6 +324,26 @@ def write_iss_script(
     # 在 Pascal 字符串中，反斜杠需要转义为双反斜杠
     abs_dist_dir = os.path.abspath(dist_dir).replace('\\', '\\\\')
     flavor_suffix = f"_{app_flavor}" if app_flavor else ""
+    iss_output_dir = os.path.dirname(os.path.abspath(iss_output_path))
+    try:
+        os.makedirs(iss_output_dir, exist_ok=True)
+    except Exception:
+        pass
+    icon_line = ""
+    try:
+        build_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+        icon_candidates = [
+            os.path.join(build_root, "ph.bird-fill.ico"),
+            os.path.join(os.path.dirname(build_root), "assets", "icons", "bpm_512.ico"),
+        ]
+        for icon_path in icon_candidates:
+            if not os.path.isfile(icon_path):
+                continue
+            rel_icon = os.path.relpath(icon_path, iss_output_dir).replace("\\", "\\\\")
+            icon_line = f"SetupIconFile={rel_icon}"
+            break
+    except Exception:
+        icon_line = ""
     
     # 生成 [Files] 段，只包含实际存在的文件
     files_section = []
@@ -298,7 +395,8 @@ def write_iss_script(
     lines.append('DisableProgramGroupPage=yes')
     lines.append('OutputDir={#SourcePath}')
     lines.append('OutputBaseFilename={#MyAppName}_V{#MyAppVersion}' + flavor_suffix + '_update{#MyAppUpdate}')
-    lines.append('SetupIconFile={#SourcePath}..\\\\ph.bird-fill.ico')
+    if icon_line:
+        lines.append(icon_line)
     lines.append('SolidCompression=yes')
     lines.append('Compression=lzma2/ultra64')
     lines.append('InternalCompressLevel=ultra64')
@@ -334,7 +432,6 @@ def write_iss_script(
     lines.append('var')
     lines.append('  Path: String;')
     lines.append('  UninstallStr: String;')
-    lines.append('  Path: String;')
     lines.append('begin')
     lines.append('  Path := \'\';')
     lines.append('  UninstallStr := \'\';')
@@ -468,6 +565,8 @@ def main():
     
     print(f"旧版本目录: {old_dist_dir}")
     
+    old_flavor = _detect_flavor_from_dir_name(os.path.basename(old_dist_dir))
+
     # 解析新版本目录
     if args.to_dir:
         new_dist_dir = os.path.abspath(args.to_dir)
@@ -478,22 +577,18 @@ def main():
             print(f"错误: dist 目录不存在: {dist_root}")
             return 1
         
-        # 查找所有版本目录
-        versions = []
-        for name in os.listdir(dist_root):
-            if name.startswith("栖图_V") and os.path.isdir(os.path.join(dist_root, name)):
-                versions.append(name)
+        preferred_flavor = str(args.flavor or old_flavor or "").strip().lower()
+        new_dist_dir = _select_latest_dist_dir(dist_root, preferred_flavor=preferred_flavor)
         
-        if not versions:
+        if not new_dist_dir:
             print(f"错误: 未找到任何版本目录")
             return 1
-        
-        # 按版本号排序，取最新
-        versions.sort(reverse=True)
-        new_dist_dir = os.path.join(dist_root, versions[0])
     
     if not os.path.isdir(new_dist_dir):
         print(f"错误: 新版本目录不存在: {new_dist_dir}")
+        return 1
+    if os.path.normcase(os.path.normpath(new_dist_dir)) == os.path.normcase(os.path.normpath(old_dist_dir)):
+        print("错误: 新旧版本目录相同，无法生成差分升级包")
         return 1
     
     print(f"新版本目录: {new_dist_dir}")
@@ -527,6 +622,8 @@ def main():
             app_flavor = "cpu"
         else:
             app_flavor = ""
+    if not app_flavor:
+        app_flavor = old_flavor
     
     print(f"Flavor: {app_flavor or '无'}")
     

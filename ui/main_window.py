@@ -9,6 +9,7 @@ from ui.utils.notification_manager import NotificationManager
 from ui.utils.status_manager import StatusManager
 from ui.utils.color_manager import ColorManager
 from ui.utils.app_icon import get_app_icon
+from ui.widgets.status_detail_popup import StatusDetailPopup
 
 from ui.utils.icon_loader import qta
 import os
@@ -21,27 +22,61 @@ from utils.setting.settings_manager import SettingsManager
 from utils.paths import PathManager
 from ui.utils.window_effect import apply_dark_title_bar
 from utils.log_manager import LogManager
-from utils.system.gpu_monitor import get_gpu_util_text
+from utils.system.gpu_monitor import get_gpu_detail_metrics, get_gpu_util_text
 from utils.guide_manager import GuideManager
 
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.clicked.emit()
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+
 class GpuUtilWorkerSignals(QObject):
-    result = pyqtSignal(str)
+    result = pyqtSignal(object)
 
 
 class GpuUtilWorker(QRunnable):
-    def __init__(self):
+    def __init__(self, fetch_detail: bool = False, fast_mode: bool = False, last_text: str = "--"):
         super().__init__()
+        self._fetch_detail = bool(fetch_detail)
+        self._fast_mode = bool(fast_mode)
+        self._last_text = str(last_text or "--")
         self.signals = GpuUtilWorkerSignals()
 
     def run(self):
         try:
-            # 增加超时时间，确保 typeperf 等命令有足够时间执行
-            gpu_text = get_gpu_util_text(timeout_s=5.0)
+            # 首次采样保守一点，后续刷新压到接近 CPU 的 1s 节奏
+            total_timeout = 1.0 if self._fast_mode else 5.0
+            detail_timeout = 1.0 if self._fast_mode else 2.0
+            sampled_text = get_gpu_util_text(timeout_s=total_timeout)
+            sample_ok = bool(sampled_text and sampled_text != "--")
+            gpu_text = sampled_text
+            if self._fast_mode and (not gpu_text or gpu_text == "--") and self._last_text and self._last_text != "--":
+                gpu_text = self._last_text
+            detail = None
+            if self._fetch_detail:
+                detail = get_gpu_detail_metrics(timeout_s=detail_timeout) or {}
+                total = detail.get("total") if isinstance(detail, dict) else None
+                if total is not None:
+                    gpu_text = f"{float(total):.2f}%" if float(total) < 1.0 else f"{float(total):.1f}%"
+                    sample_ok = True
         except Exception:
-            gpu_text = "--"
+            detail = None
+            sample_ok = False
+            gpu_text = self._last_text if self._fast_mode and self._last_text and self._last_text != "--" else "--"
         try:
-            self.signals.result.emit(gpu_text)
+            self.signals.result.emit({"text": gpu_text, "detail": detail, "sample_ok": sample_ok})
         except RuntimeError:
             return
 
@@ -153,9 +188,27 @@ class MainWindow(QMainWindow):
         self.lbl_image_counts = QLabel("")
         self.status_bar.addWidget(self.lbl_image_counts)
         
-        # 3. CPU/Mem (最右)
-        self.lbl_sys_status = QLabel("CPU: 0% | Mem: 0%")
-        self.status_bar.addPermanentWidget(self.lbl_sys_status)
+        # 3. 系统资源状态（最右）
+        self.sys_status_widget = QWidget(self.status_bar)
+        self.sys_status_layout = QHBoxLayout(self.sys_status_widget)
+        self.sys_status_layout.setContentsMargins(0, 0, 0, 0)
+        self.sys_status_layout.setSpacing(6)
+        self.lbl_cpu_status = ClickableLabel("CPU: 0%")
+        self.lbl_cpu_status.setToolTip("点击查看 CPU 明细")
+        self.lbl_gpu_status = ClickableLabel("GPU: --")
+        self.lbl_gpu_status.setToolTip("点击查看 GPU 明细")
+        self.lbl_mem_status = QLabel("Mem: 0 MB")
+        for sep_idx in range(2):
+            sep = QLabel("|")
+            sep.setStyleSheet("padding: 0 2px;")
+            self.sys_status_layout.addWidget(
+                self.lbl_cpu_status if sep_idx == 0 else self.lbl_gpu_status
+            )
+            self.sys_status_layout.addWidget(sep)
+        self.sys_status_layout.addWidget(self.lbl_mem_status)
+        self.status_bar.addPermanentWidget(self.sys_status_widget)
+        self.lbl_cpu_status.clicked.connect(lambda: self._toggle_status_detail_popup("cpu"))
+        self.lbl_gpu_status.clicked.connect(lambda: self._toggle_status_detail_popup("gpu"))
         
         # 连接任务管理器信号
         StatusManager.instance().status_changed.connect(self.on_task_status_changed)
@@ -169,16 +222,28 @@ class MainWindow(QMainWindow):
         # 系统资源监控定时器
         self.sys_timer = QTimer(self)
         self.sys_timer.timeout.connect(self.update_sys_status)
+        self._proc = psutil.Process(os.getpid())
         try:
             psutil.cpu_percent(interval=None)
         except Exception:
             pass
+        try:
+            self._proc.cpu_percent(interval=None)
+        except Exception:
+            pass
         self.sys_timer.start(1000) # 0.5秒更新一次
         self._gpu_util_text = "--"
+        self._cpu_detail_cache = {}
+        self._gpu_detail_cache = {}
         self._gpu_query_running = False
         self._gpu_last_request_ts = 0.0
+        self._gpu_last_success_ts = 0.0
         self._gpu_suppress_until = 0.0
         self._gpu_thread_pool = QThreadPool.globalInstance()
+        self._status_popups = {
+            "cpu": StatusDetailPopup("CPU 明细", self),
+            "gpu": StatusDetailPopup("GPU 明细", self),
+        }
         
         # 引导页面 (默认隐藏，覆盖在内容区域之上，或者替代内容区域)
         # 这里我们选择替代策略：如果需要引导，只显示引导页，否则显示主界面
@@ -527,6 +592,12 @@ class MainWindow(QMainWindow):
                     color: {status_text};
                 }}
             """)
+        for popup in getattr(self, "_status_popups", {}).values():
+            try:
+                if popup is not None:
+                    popup.refresh_theme()
+            except Exception:
+                pass
         if hasattr(self, "content_container"):
             self.content_container.setStyleSheet(f"background-color: {page_side_bg};")
         if hasattr(self, "main_widget"):
@@ -683,6 +754,10 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        try:
+            self._reposition_status_detail_popups()
+        except Exception:
+            pass
         if getattr(self, "_window_state_restored", False):
             return
         self._window_state_restored = True
@@ -1539,7 +1614,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _request_gpu_util_update(self):
+    def _request_gpu_util_update(self, force_detail: bool = False):
         try:
             if not bool(self.isActiveWindow()):
                 return
@@ -1565,16 +1640,51 @@ class MainWindow(QMainWindow):
             pass
         if self._gpu_query_running:
             return
-        if now - self._gpu_last_request_ts < 0.6:
+        # 与 CPU 状态栏保持同样的 1s 更新节奏
+        if now - self._gpu_last_request_ts < 1.0:
             return
+        try:
+            gpu_popup = getattr(self, "_status_popups", {}).get("gpu")
+            need_detail = bool(force_detail) or bool(gpu_popup is not None and gpu_popup.isVisible())
+        except Exception:
+            need_detail = bool(force_detail)
+        try:
+            fast_mode = bool(self._gpu_util_text and self._gpu_util_text != "--")
+            if fast_mode and (now - float(getattr(self, "_gpu_last_success_ts", 0.0) or 0.0) >= 3.0):
+                fast_mode = False
+        except Exception:
+            fast_mode = False
         self._gpu_last_request_ts = now
         self._gpu_query_running = True
-        worker = GpuUtilWorker()
+        worker = GpuUtilWorker(fetch_detail=need_detail, fast_mode=fast_mode, last_text=self._gpu_util_text)
         worker.signals.result.connect(self._on_gpu_util_ready)
         self._gpu_thread_pool.start(worker)
 
-    def _on_gpu_util_ready(self, text):
+    def _on_gpu_util_ready(self, payload):
+        text = "--"
+        detail = {}
+        sample_ok = False
+        try:
+            if isinstance(payload, dict):
+                text = str(payload.get("text") or "--")
+                detail_val = payload.get("detail")
+                detail = detail_val if isinstance(detail_val, dict) else None
+                sample_ok = bool(payload.get("sample_ok"))
+            else:
+                text = str(payload or "--")
+                detail = None
+        except Exception:
+            text = "--"
+            detail = None
+            sample_ok = False
         self._gpu_util_text = text or "--"
+        if sample_ok:
+            try:
+                self._gpu_last_success_ts = float(time.monotonic())
+            except Exception:
+                self._gpu_last_success_ts = 0.0
+        if isinstance(detail, dict):
+            self._gpu_detail_cache = detail or {}
         self._gpu_query_running = False
         # GPU 数据更新后，立即刷新状态栏显示
         try:
@@ -1582,14 +1692,257 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
     
+    def _format_mb_text(self, value_mb):
+        try:
+            value = float(value_mb)
+        except Exception:
+            return "--"
+        if value >= 1024.0:
+            return f"{value / 1024.0:.2f} GB"
+        return f"{value:.0f} MB"
+
+    def _format_percent_text(self, value):
+        try:
+            v = float(value)
+        except Exception:
+            return "--"
+        if v < 1.0:
+            return f"{v:.2f}%"
+        return f"{v:.1f}%"
+
+    def _collect_cpu_detail_metrics(self):
+        try:
+            logical = int(psutil.cpu_count(logical=True) or 1)
+        except Exception:
+            logical = 1
+        if logical <= 0:
+            logical = 1
+        metrics = {}
+        try:
+            system_cpu = float(psutil.cpu_percent(interval=None))
+            metrics["system_cpu"] = system_cpu
+        except Exception:
+            metrics["system_cpu"] = None
+        try:
+            process_cpu_raw = float(self._proc.cpu_percent(interval=None))
+        except Exception:
+            process_cpu_raw = None
+        metrics["process_cpu_raw"] = process_cpu_raw
+        try:
+            metrics["process_cpu"] = None if process_cpu_raw is None else float(process_cpu_raw) / float(logical)
+        except Exception:
+            metrics["process_cpu"] = None
+        try:
+            mem_info = self._proc.memory_info()
+            metrics["mem_mb"] = float(mem_info.rss) / 1024.0 / 1024.0
+        except Exception:
+            metrics["mem_mb"] = None
+        try:
+            metrics["mem_percent"] = float(self._proc.memory_percent())
+        except Exception:
+            metrics["mem_percent"] = None
+        try:
+            vm = psutil.virtual_memory()
+            metrics["system_mem_percent"] = float(vm.percent)
+            metrics["system_mem_used_mb"] = float(vm.used) / 1024.0 / 1024.0
+            metrics["system_mem_total_mb"] = float(vm.total) / 1024.0 / 1024.0
+        except Exception:
+            metrics["system_mem_percent"] = None
+            metrics["system_mem_used_mb"] = None
+            metrics["system_mem_total_mb"] = None
+        return metrics
+
+    def _build_cpu_popup_rows(self):
+        data = self._cpu_detail_cache or {}
+        return [
+            ("总 CPU", self._format_percent_text(data.get("system_cpu"))),
+            ("进程 CPU", self._format_percent_text(data.get("process_cpu"))),
+            ("进程 CPU(原始)", self._format_percent_text(data.get("process_cpu_raw"))),
+            ("进程内存", self._format_mb_text(data.get("mem_mb"))),
+            ("进程内存占比", self._format_percent_text(data.get("mem_percent"))),
+            (
+                "系统内存",
+                f"{self._format_mb_text(data.get('system_mem_used_mb'))} / {self._format_mb_text(data.get('system_mem_total_mb'))}",
+            ),
+            ("系统内存占比", self._format_percent_text(data.get("system_mem_percent"))),
+        ]
+
+    def _build_gpu_popup_rows(self):
+        data = self._gpu_detail_cache or {}
+        rows = [("GPU 总和", self._gpu_util_text or "--")]
+        
+        # 获取厂商信息
+        try:
+            vendor = str(data.get("vendor") or "").strip().lower()
+        except Exception:
+            vendor = ""
+        
+        # 对于 AMD 显卡，显示简化的信息
+        if vendor == "amd":
+            rows.append(("", ""))  # 空行
+            rows.append(("提示", "AMD 显卡仅支持总体利用率检测"))
+            rows.append(("", ""))  # 空行
+        else:
+            # NVIDIA/Intel 显示详细引擎信息
+            rows.append(("CUDA/Compute", self._format_percent_text(data.get("compute"))))
+            rows.append(("Video Decode", self._format_percent_text(data.get("decode"))))
+            rows.append(("Video Encode", self._format_percent_text(data.get("encode"))))
+            rows.append(("Copy", self._format_percent_text(data.get("copy"))))
+            rows.append(("3D", self._format_percent_text(data.get("3d"))))
+        
+        mem_used = data.get("memory_used_mb")
+        mem_total = data.get("memory_total_mb")
+        if mem_used is not None or mem_total is not None:
+            rows.append(("显存", f"{self._format_mb_text(mem_used)} / {self._format_mb_text(mem_total)}"))
+        mem_dedicated = data.get("memory_dedicated_mb")
+        if mem_dedicated is not None:
+            rows.append(("专用显存", self._format_mb_text(mem_dedicated)))
+        mem_shared = data.get("memory_shared_mb")
+        if mem_shared is not None:
+            rows.append(("共享显存", self._format_mb_text(mem_shared)))
+        rows.append(("显存带宽", self._format_percent_text(data.get("memory"))))
+        try:
+            detail_available = bool(data.get("detail_available"))
+        except Exception:
+            detail_available = False
+        try:
+            engine_source = str(data.get("engine_source") or "").strip()
+        except Exception:
+            engine_source = ""
+        rows.append(("细分来源", engine_source or "未命中"))
+        rows.append(("细分状态", "已获取" if detail_available else "当前仅拿到总量"))
+        if vendor:
+            rows.append(("厂商", vendor.upper()))
+        try:
+            name = str(data.get("name") or "").strip()
+        except Exception:
+            name = ""
+        if name:
+            rows.append(("设备", name))
+        return rows
+
+    def _refresh_status_detail_popups(self):
+        try:
+            cpu_popup = self._status_popups.get("cpu")
+            if cpu_popup is not None:
+                cpu_popup.set_rows(self._build_cpu_popup_rows())
+        except Exception:
+            pass
+        try:
+            gpu_popup = self._status_popups.get("gpu")
+            if gpu_popup is not None:
+                gpu_popup.set_rows(self._build_gpu_popup_rows())
+        except Exception:
+            pass
+        self._reposition_status_detail_popups()
+
+    def _reposition_status_detail_popups(self):
+        anchor_map = {
+            "cpu": getattr(self, "lbl_cpu_status", None),
+            "gpu": getattr(self, "lbl_gpu_status", None),
+        }
+        try:
+            visible_items = []
+            for kind in ("cpu", "gpu"):
+                popup = getattr(self, "_status_popups", {}).get(kind)
+                anchor = anchor_map.get(kind)
+                if popup is None or anchor is None or not popup.isVisible():
+                    continue
+                top_left = anchor.mapToGlobal(QPoint(0, 0))
+                center_x = int(top_left.x() + anchor.width() / 2)
+                top_y = int(top_left.y())
+                visible_items.append(
+                    {
+                        "kind": kind,
+                        "popup": popup,
+                        "anchor": anchor,
+                        "center_x": center_x,
+                        "top_y": top_y,
+                    }
+                )
+            if not visible_items:
+                return
+        except Exception:
+            return
+
+        gap = 10
+        top_y = max(0, min(int(item["top_y"]) for item in visible_items) - 8)
+
+        if len(visible_items) == 1:
+            item = visible_items[0]
+            popup = item["popup"]
+            try:
+                x = int(item["center_x"] - popup.width() / 2)
+                y = int(top_y - popup.height())
+                popup.move(x, max(0, y))
+            except Exception:
+                return
+            return
+
+        try:
+            visible_items.sort(key=lambda item: item["center_x"])
+            total_width = sum(int(item["popup"].width()) for item in visible_items) + gap * (len(visible_items) - 1)
+            left_center = int(visible_items[0]["center_x"])
+            right_center = int(visible_items[-1]["center_x"])
+            cluster_center = int((left_center + right_center) / 2)
+            start_x = int(cluster_center - total_width / 2)
+        except Exception:
+            start_x = None
+
+        if start_x is None:
+            return
+
+        current_x = int(start_x)
+        for item in visible_items:
+            popup = item["popup"]
+            try:
+                y = int(top_y - popup.height())
+                popup.move(current_x, max(0, y))
+                current_x += int(popup.width()) + gap
+            except Exception:
+                continue
+
+    def _toggle_status_detail_popup(self, kind: str):
+        kind = str(kind or "").strip().lower()
+        popup = getattr(self, "_status_popups", {}).get(kind)
+        if popup is None:
+            return
+        for other_kind, other_popup in getattr(self, "_status_popups", {}).items():
+            if other_kind == kind or other_popup is None:
+                continue
+            if other_popup.isVisible() and not other_popup.is_pinned():
+                other_popup.hide()
+        if popup.isVisible() and not popup.is_pinned():
+            popup.hide()
+            return
+        if kind == "gpu":
+            try:
+                self._gpu_last_request_ts = 0.0
+            except Exception:
+                pass
+            try:
+                self._request_gpu_util_update(force_detail=True)
+            except Exception:
+                pass
+        self._refresh_status_detail_popups()
+        try:
+            popup.show()
+            self._reposition_status_detail_popups()
+            popup.raise_()
+            popup.activateWindow()
+        except Exception:
+            pass
+
     def _refresh_sys_status_text(self):
         """刷新系统状态栏文本（CPU/GPU/内存）"""
         try:
-            cpu_percent = psutil.cpu_percent(interval=None)
-            process = psutil.Process(os.getpid())
-            mem_info = process.memory_info()
-            mem_mb = mem_info.rss / 1024 / 1024
-            self.lbl_sys_status.setText(f"CPU: {cpu_percent:.1f}% | GPU: {self._gpu_util_text} | Mem: {mem_mb:.1f} MB")
+            self._cpu_detail_cache = self._collect_cpu_detail_metrics()
+            cpu_percent = self._cpu_detail_cache.get("system_cpu")
+            mem_mb = self._cpu_detail_cache.get("mem_mb")
+            self.lbl_cpu_status.setText(f"CPU: {self._format_percent_text(cpu_percent)}")
+            self.lbl_gpu_status.setText(f"GPU: {self._gpu_util_text}")
+            self.lbl_mem_status.setText(f"Mem: {self._format_mb_text(mem_mb)}")
+            self._refresh_status_detail_popups()
         except Exception:
             pass
 
@@ -1708,6 +2061,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            for popup in getattr(self, "_status_popups", {}).values():
+                if popup is not None:
+                    popup.hide()
+        except Exception:
+            pass
+        try:
             app = QApplication.instance()
         except Exception:
             app = None
@@ -1817,3 +2176,14 @@ class MainWindow(QMainWindow):
         # 更新 Toast 位置
         if NotificationManager.instance().toast and NotificationManager.instance().toast.isVisible():
             NotificationManager.instance().toast.update_position()
+        try:
+            self._reposition_status_detail_popups()
+        except Exception:
+            pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        try:
+            self._reposition_status_detail_popups()
+        except Exception:
+            pass

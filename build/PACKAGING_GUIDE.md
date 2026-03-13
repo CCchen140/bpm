@@ -5,7 +5,8 @@
 1. [环境准备](#环境准备)
 2. [完整包打包](#完整包打包)
 3. [增量升级包打包](#增量升级包打包)
-4. [常见问题](#常见问题)
+4. [打包依赖白名单](#打包依赖白名单)
+5. [常见问题](#常见问题)
 
 ---
 
@@ -381,6 +382,104 @@ python build/build.py --flavor gpu --delta-from "dist/栖图_V1.0.1_gpu" --delta
 2. 大小相同则比较修改时间戳
 3. 时间戳不同则计算 SHA1 哈希值进行精确对比
 4. 在旧版本中存在但在新版本中不存在的文件标记为删除
+
+---
+
+## 打包依赖白名单
+
+### 背景
+
+本项目在开发环境中可以直接 `pip install` 后运行，但打包为 PyInstaller 程序时，部分第三方库会因为以下原因被漏收：
+
+- 在函数内部动态导入
+- 仅在 `try/except ImportError` 中按需导入
+- 除 Python 代码外还依赖字体、映射表、配置等资源文件
+- 依赖原生扩展、`.pyd`、`.dll` 或额外运行时文件
+
+因此，是否"本地已安装成功"并不等于"打包后一定可用"。
+
+### 当前已显式补入 `bird_picture_manager.spec` 的高风险依赖
+
+这些库已经在 `build/bird_picture_manager.spec` 中做了显式收集：
+
+| 依赖 | 用途 | 风险原因 | 当前处理 |
+|------|------|----------|----------|
+| `qtawesome` | UI 图标 | 依赖包内 `fonts` 资源 | `collect_submodules` + `collect_data_files` |
+| `pypinyin` | 中文拼音排序 | 在 `folder_panel.py` 中存在动态导入 | `collect_submodules` + `collect_data_files` |
+| `exiftool` | ExifTool Python 包兜底 | 之前有顶层导入，且属于可选第三方包 | `collect_submodules` + `collect_data_files` |
+| `torch` | PyTorch 推理 | DLL、CUDA 依赖复杂 | 已做专项收集 |
+| `ultralytics` | YOLO 模型推理 | 模型配置与资源较多 | `collect_submodules` + `collect_data_files` |
+| `geopy` | 地理编码 | 可选导入 | `collect_submodules` + `collect_data_files` |
+| `GPUtil` | GPU 监控 | 函数内导入 | `collect_submodules` + `collect_data_files` |
+| `psutil` | 进程/系统信息 | 多处运行期导入 | `collect_submodules` + `collect_data_files` |
+| `send2trash` | 回收站删除 | 可选导入 | `collect_submodules` + `collect_data_files` |
+
+### 建议重点关注的依赖分类
+
+#### 1. 必须显式收集
+
+这类库一旦漏收，打包后容易直接缺模块或表现异常：
+
+- `qtawesome`
+- `pypinyin`
+- `exiftool`
+- `torch`
+- `ultralytics`
+
+#### 2. 建议显式收集
+
+这类库很多时候 PyInstaller 能自动带上，但项目中存在动态导入、条件导入或回退逻辑，建议继续保留显式收集：
+
+- `geopy`
+- `GPUtil`
+- `psutil`
+- `send2trash`
+
+#### 3. 一般可自动收集，但后续若报错可再专项补
+
+- `rawpy`
+- `exifread`
+- `numpy`
+- `opencv-python`
+- `PyQt6`
+- `PyQt6-WebEngine`
+
+说明：
+
+- `rawpy`、`opencv-python` 偏原生扩展，如果后续出现 `.pyd` / `.dll` 问题，需要单独补动态库
+- `PyQt6-WebEngine` 当前已经在 `spec` 中做了专项处理
+
+#### 4. 可选依赖，有回退逻辑
+
+这类库即使未打进包，也不一定导致程序崩溃，但会触发功能降级或提示：
+
+- `send2trash`
+  说明：缺失时会回退到 Windows API 回收站删除方案
+- `pypinyin`
+  说明：缺失时会回退到英文排序，并弹出提示
+- `GPUtil`
+  说明：缺失时 GPU 监控信息可能不完整
+
+### 当前打包环境核对建议
+
+发布前建议在**打包所用的 Python 环境**中执行一次检查，而不是只看源码环境。
+
+示例：
+
+```bash
+python -c "import importlib.util; mods=['pypinyin','qtawesome','geopy','GPUtil','psutil','send2trash','rawpy','exifread']; [print(m, bool(importlib.util.find_spec(m))) for m in mods]"
+```
+
+如果某个模块输出为 `False`，说明该环境本身就没有安装，打包脚本即使写了显式收集也无法带进去。
+
+### 维护建议
+
+后续新增第三方库时，优先按以下规则判断是否需要同步修改 `bird_picture_manager.spec`：
+
+1. 如果库在函数内部导入，建议补 `hiddenimports`
+2. 如果库带字体、图标、映射表、模板或配置文件，建议补 `collect_data_files`
+3. 如果库依赖 `.dll`、`.pyd`、CUDA、原生扩展，建议额外检查动态库是否被带入
+4. 如果库只是可选能力，代码里要保留明确的降级逻辑和用户提示
 
 ---
 

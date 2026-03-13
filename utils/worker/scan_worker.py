@@ -1,5 +1,4 @@
 from PyQt6.QtCore import QThread, pyqtSignal
-import exiftool
 import os
 import sys
 import time

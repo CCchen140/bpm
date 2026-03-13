@@ -138,21 +138,37 @@ def _configure_windows_dll_search_paths():
         nvidia_root = ""
     if nvidia_root and os.path.isdir(nvidia_root):
         try:
-            for root, _, _ in os.walk(nvidia_root):
+            for root, _, filenames in os.walk(nvidia_root):
                 try:
-                    if str(os.path.basename(root) or "").lower() == "bin":
+                    if any(str(fn).lower().endswith(".dll") for fn in filenames):
                         dll_dirs.append(root)
                 except Exception:
                     pass
         except Exception:
             pass
 
+    existing_dirs = []
     for p in dll_dirs:
         try:
             if p and os.path.isdir(p):
-                os.add_dll_directory(p)
+                existing_dirs.append(p)
         except Exception:
             pass
+
+    try:
+        old_path = os.environ.get("PATH", "")
+        new_entries = [d for d in existing_dirs if d not in old_path]
+        if new_entries:
+            os.environ["PATH"] = os.pathsep.join(new_entries) + os.pathsep + old_path
+    except Exception:
+        pass
+
+    if hasattr(os, "add_dll_directory"):
+        for p in existing_dirs:
+            try:
+                os.add_dll_directory(p)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     # 记录启动日志
@@ -249,17 +265,15 @@ if __name__ == "__main__":
     from ui.utils.color_manager import ColorManager
     from ui.utils.app_icon import get_app_icon
 
-    # 在后台线程预加载 CUDA 信息，避免后续对焦检测时卡顿
-    def _preload_cuda_info():
-        try:
-            from utils.system.gpu_utils import is_torch_cuda_usable
-            print("Preloading CUDA info in background...")
-            result = is_torch_cuda_usable()
-            print(f"CUDA preload complete: available={result}")
-        except Exception as e:
-            print(f"CUDA preload failed: {e}")
-    
-    Thread(target=_preload_cuda_info, daemon=True).start()
+    # 在后台启动 CUDA 探测线程，避免首次用到模型时卡顿
+    try:
+        from utils.system.gpu_utils import start_torch_cuda_probe_async, log_gpu_summary_async
+
+        print("Starting CUDA probe in background...")
+        start_torch_cuda_probe_async()
+        log_gpu_summary_async(reason="startup")
+    except Exception as e:
+        print(f"Start CUDA probe failed: {e}")
 
     cm = ColorManager.instance()
     try:

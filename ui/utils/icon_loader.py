@@ -3,6 +3,7 @@
 使用qtawesome库加载Material Design Icons
 """
 from PyQt6.QtGui import QIcon
+import sys
 
 try:
     import qtawesome as qta_real
@@ -34,7 +35,15 @@ def icon(*names, color=None, options=None, style='line', **kwargs):
         
         return qta_real.icon(*names, **kwargs)
     except Exception as e:
-        # 如果加载失败，返回空图标
+        try:
+            msg = f"[IconLoader] qtawesome icon load failed names={names} err={e}"
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().warning(msg)
+            except Exception:
+                print(msg, file=sys.stderr)
+        except Exception:
+            pass
         return QIcon()
 
 

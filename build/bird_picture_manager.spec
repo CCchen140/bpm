@@ -171,21 +171,92 @@ except Exception:
     pass
 
 try:
+    if collect_submodules is not None:
+        hiddenimports += collect_submodules("qtawesome")
+    else:
+        hiddenimports += ["qtawesome"]
+except Exception:
+    try:
+        hiddenimports += ["qtawesome"]
+    except Exception:
+        pass
+
+try:
+    if collect_data_files is not None:
+        datas += collect_data_files("qtawesome")
+except Exception:
+    pass
+
+for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil"):
+    try:
+        if collect_submodules is not None:
+            hiddenimports += collect_submodules(_opt_pkg)
+        else:
+            hiddenimports += [_opt_pkg]
+    except Exception:
+        try:
+            hiddenimports += [_opt_pkg]
+        except Exception:
+            pass
+    # 注意：send2trash 是单文件模块，不是包，跳过 collect_data_files
+    if _opt_pkg != "send2trash":
+        try:
+            if collect_data_files is not None:
+                datas += collect_data_files(_opt_pkg)
+        except Exception:
+            pass
+
+# 注意：PyQt6 WebEngine 相关模块是 C 扩展，不是 Python 包
+# collect_dynamic_libs 对它们无效，会在后面手动收集
+# 这里跳过以避免警告
+try:
     if collect_dynamic_libs is not None:
-        binaries += collect_dynamic_libs("PyQt6.QtWebEngineCore")
-        binaries += collect_dynamic_libs("PyQt6.QtWebEngineWidgets")
-        binaries += collect_dynamic_libs("PyQt6.QtWebChannel")
+        # 这些模块是 C 扩展，跳过 collect_dynamic_libs
+        pass
+except Exception:
+    pass
+
+try:
+    if collect_submodules is not None:
+        hiddenimports += collect_submodules("exiftool")
+    else:
+        hiddenimports += ["exiftool"]
+except Exception:
+    try:
+        hiddenimports += ["exiftool"]
+    except Exception:
+        pass
+
+try:
+    if collect_data_files is not None:
+        datas += collect_data_files("exiftool")
 except Exception:
     pass
 
 # 收集 torch 相关模块和数据
+# 注意：跳过会导致警告的模块（tensorboard, onnx）
 try:
     if collect_submodules is not None:
-        hiddenimports += collect_submodules("torch")
+        # 使用 exclude 参数跳过不需要的模块
+        _torch_excludes = ["torch.utils.tensorboard", "torch.onnx._internal.fx.passes"]
+        hiddenimports += collect_submodules("torch", exclude=_torch_excludes)
         hiddenimports += collect_submodules("torch.nn")
         hiddenimports += collect_submodules("torch.optim")
-        hiddenimports += collect_submodules("torch.utils")
-        hiddenimports += collect_submodules("torch.onnx")
+        # 跳过 torch.utils 中的 tensorboard 相关子模块
+        hiddenimports += collect_submodules("torch.utils", exclude=["torch.utils.tensorboard"])
+        # 跳过 torch.onnx 中的内部 passes 模块
+        hiddenimports += collect_submodules("torch.onnx", exclude=["torch.onnx._internal.fx.passes"])
+        hiddenimports += collect_submodules("torch.cuda")
+        hiddenimports += collect_submodules("torch.version")
+        hiddenimports += collect_submodules("torch.backends")
+        hiddenimports += collect_submodules("torch.backends.cuda")
+        hiddenimports += collect_submodules("torch.backends.cudnn")
+        # 显式添加 torch 核心 C 扩展模块
+        for _torch_mod in ("torch._C", "torch._C_cuda", "torch._C_cudnn", "torch._C_inductor"):
+            try:
+                hiddenimports += [_torch_mod]
+            except Exception:
+                pass
 except Exception:
     pass
 
@@ -198,13 +269,62 @@ except Exception:
 try:
     if collect_dynamic_libs is not None:
         binaries += collect_dynamic_libs("torch")
-        binaries += collect_dynamic_libs("torch._C")
+        # 注意：torch._C 是 C 扩展模块，不是包，跳过以避免警告
+        # binaries += collect_dynamic_libs("torch._C")
 except Exception:
+    pass
+
+try:
+    import torch as _torch_pkg
+    _torch_version = getattr(_torch_pkg, '__version__', 'unknown')
+    _torch_lib_dir = os.path.join(os.path.dirname(_torch_pkg.__file__), "lib")
+    print(f"[INFO] PyInstaller spec: torch version={_torch_version}, lib_dir={_torch_lib_dir}")
+    if os.path.isdir(_torch_lib_dir):
+        _torch_dll_seen = set()
+        _torch_dll_count = 0
+        # 收集所有 DLL，包括子目录中的
+        for _root, _dirs, _files in os.walk(_torch_lib_dir):
+            for _file in _files:
+                if _file.lower().endswith('.dll'):
+                    _dll = os.path.join(_root, _file)
+                    if os.path.isfile(_dll):
+                        _dname = os.path.basename(_dll).lower()
+                        if _dname not in _torch_dll_seen:
+                            _torch_dll_seen.add(_dname)
+                            _torch_dll_count += 1
+                            # 保持相对路径结构
+                            _rel_path = os.path.relpath(_root, _torch_lib_dir)
+                            if _rel_path == '.':
+                                binaries.append((_dll, "torch/lib"))
+                            else:
+                                binaries.append((_dll, os.path.join("torch/lib", _rel_path)))
+        print(f"[INFO] PyInstaller spec: collected {_torch_dll_count} torch DLLs")
+except Exception as e:
+    print(f"[WARN] Failed to collect torch lib DLLs: {e}")
+    import traceback
+    traceback.print_exc()
     pass
 
 try:
     if collect_submodules is not None:
         hiddenimports += collect_submodules("ultralytics")
+        # 显式添加 ultralytics 的关键子模块
+        hiddenimports += [
+            "ultralytics.nn",
+            "ultralytics.nn.modules",
+            "ultralytics.nn.tasks",
+            "ultralytics.models",
+            "ultralytics.models.yolo",
+            "ultralytics.models.yolo.segment",
+            "ultralytics.utils",
+            "ultralytics.utils.metrics",
+            "ultralytics.utils.loss",
+            "ultralytics.data",
+            "ultralytics.engine",
+            "ultralytics.engine.model",
+            "ultralytics.engine.predictor",
+            "ultralytics.engine.results",
+        ]
 except Exception:
     pass
 
@@ -214,21 +334,57 @@ try:
 except Exception:
     pass
 
+_nvidia_dll_seen = set()
+
+def _collect_nvidia_dlls_from_dir(nvidia_base_dir):
+    if not nvidia_base_dir or not os.path.isdir(nvidia_base_dir):
+        return
+    for _src in glob.glob(os.path.join(nvidia_base_dir, "**", "*.dll"), recursive=True):
+        _dll_name_lower = os.path.basename(_src).lower()
+        if _dll_name_lower in _nvidia_dll_seen:
+            continue
+        _nvidia_dll_seen.add(_dll_name_lower)
+        binaries.append((_src, "torch/lib"))
+
 try:
     import nvidia as _nvidia
 
-    _nvidia_dir = os.path.dirname(getattr(_nvidia, "__file__", "") or "")
-    if _nvidia_dir and os.path.isdir(_nvidia_dir):
-        for _src in glob.glob(os.path.join(_nvidia_dir, "**", "*.dll"), recursive=True):
-            try:
-                rel = os.path.relpath(os.path.dirname(_src), _nvidia_dir)
-            except Exception:
-                rel = ""
-            low_rel = str(rel or "").replace("\\", "/").lower()
-            if "/bin" not in f"/{low_rel}/":
-                continue
-            dest = os.path.join("nvidia", rel).replace("\\", "/")
-            binaries.append((_src, dest))
+    _nvidia_dirs = []
+    if hasattr(_nvidia, "__path__"):
+        for _p in _nvidia.__path__:
+            if _p and os.path.isdir(_p):
+                _nvidia_dirs.append(os.path.abspath(_p))
+    if not _nvidia_dirs:
+        _f = getattr(_nvidia, "__file__", "") or ""
+        if _f:
+            _d = os.path.dirname(_f)
+            if _d and os.path.isdir(_d):
+                _nvidia_dirs.append(os.path.abspath(_d))
+    for _nvidia_dir in _nvidia_dirs:
+        _collect_nvidia_dlls_from_dir(_nvidia_dir)
+except Exception:
+    pass
+
+try:
+    _nvidia_subpkgs = [
+        "nvidia.cublas", "nvidia.cuda_runtime", "nvidia.cuda_nvrtc",
+        "nvidia.cudnn", "nvidia.cufft", "nvidia.curand",
+        "nvidia.cusolver", "nvidia.cusparse", "nvidia.nccl",
+        "nvidia.nvjitlink", "nvidia.nvtx",
+    ]
+    for _pkg_name in _nvidia_subpkgs:
+        try:
+            _pkg = importlib.import_module(_pkg_name)
+            _pkg_dirs = []
+            if hasattr(_pkg, "__path__"):
+                _pkg_dirs = list(_pkg.__path__)
+            elif hasattr(_pkg, "__file__") and _pkg.__file__:
+                _pkg_dirs = [os.path.dirname(_pkg.__file__)]
+            for _pd in _pkg_dirs:
+                if _pd and os.path.isdir(_pd):
+                    _collect_nvidia_dlls_from_dir(os.path.abspath(_pd))
+        except Exception:
+            continue
 except Exception:
     pass
 
@@ -306,11 +462,17 @@ analysis = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=[os.path.join(BUILD_DIR, "pyi_rth_torch_dlls.py")],
+    excludes=[
+        # 排除不需要的 torch 可选模块，减少警告
+        "tensorboard",
+        "onnx",
+        "torch.utils.tensorboard",
+        "torch.onnx._internal.fx.passes",
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    noarchive=False,
+    noarchive=True,
 )
 
 pyz = PYZ(analysis.pure, analysis.zipped_data)
