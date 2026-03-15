@@ -7,6 +7,38 @@ import threading
 import time
 
 
+def _detect_gpu_type() -> str:
+    """
+    检测GPU类型
+    
+    返回:
+        "nvidia" - 检测到NVIDIA GPU
+        "amd" - 检测到AMD GPU
+        "unknown" - 检测失败或没有独立GPU
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["wmic", "path", "win32_VideoController", "get", "name"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        output = result.stdout.lower()
+        
+        # 检查NVIDIA GPU
+        if any(kw in output for kw in ["nvidia", "geforce", "quadro", "tesla"]):
+            return "nvidia"
+        
+        # 检查AMD GPU
+        if any(kw in output for kw in ["amd", "radeon", "rx ", "ryzen"]):
+            return "amd"
+        
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
 _build_flavor_cache: str | None = None
 _torch_cuda_probe_cache: tuple[bool, str, int, float] | None = None
 _torch_cuda_probe_thread_started: bool = False
@@ -427,6 +459,14 @@ def _run_torch_cuda_action_in_thread(action: str, timeout_s: float = 5.0) -> tup
 
 def _probe_torch_cuda(timeout_s: float = 5.0) -> tuple[bool, str, int]:
     global _torch_cuda_probe_cache
+    
+    # 在AMD GPU上跳过CUDA探测，直接返回不可用
+    # 因为AMD GPU不支持CUDA，探测会导致torch导入错误
+    gpu_type = _detect_gpu_type()
+    if gpu_type == "amd":
+        _gpu_log("info", "AMD GPU detected, skipping CUDA probe")
+        return False, "amd_gpu_no_cuda", 2
+    
     if _torch_cuda_probe_cache is not None:
         try:
             ok0, out0, code0, ts0 = _torch_cuda_probe_cache

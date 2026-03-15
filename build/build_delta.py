@@ -52,7 +52,9 @@ def _walk_dist_files(root_dir: str) -> dict[str, tuple[str, int, int]]:
         for name in files:
             if not name:
                 continue
-            if str(name).lower() in ("thumbs.db", "desktop.ini"):
+            # 忽略系统文件
+            name_lower = str(name).lower()
+            if name_lower in ("thumbs.db", "desktop.ini"):
                 continue
             
             abs_path = os.path.join(base, name)
@@ -137,23 +139,30 @@ def _select_latest_dist_dir(dist_root: str, preferred_flavor: str = "") -> str:
     return os.path.join(dist_root, candidates[0][1])
 
 
-def _hash_file(path: str, max_bytes: int = 64 * 1024 * 1024) -> str:
-    """计算文件 SHA1 哈希"""
+def _hash_file(path: str, max_bytes: int = 512 * 1024 * 1024) -> str:
+    """计算文件 SHA1 哈希，支持最大 512MB 的文件"""
     try:
         st = os.stat(path)
-        if int(st.st_size) > int(max_bytes):
-            return ""
+        # 对于超大文件，只计算前 512MB 的哈希
+        file_size = int(st.st_size)
     except Exception:
         return ""
     
     h = hashlib.sha1()
     try:
         with open(path, "rb") as f:
+            bytes_read = 0
             while True:
                 chunk = f.read(1024 * 1024)
                 if not chunk:
                     break
                 h.update(chunk)
+                bytes_read += len(chunk)
+                # 只读取前 max_bytes 字节
+                if bytes_read >= max_bytes:
+                    break
+        # 在哈希中包含文件大小信息，确保大小不同的文件有不同的哈希
+        h.update(str(file_size).encode())
         return h.hexdigest()
     except Exception:
         return ""
@@ -190,20 +199,26 @@ def compute_delta_files(old_dist_dir: str, new_dist_dir: str) -> dict[str, list[
         
         old = old_map.get(old_key)
         _, old_size, old_mtime = old
+        
+        # 1. 大小不同 -> 肯定是修改
         if int(old_size) != int(new_size):
             modified.append(rel)
             continue
         
+        # 2. 大小相同，时间戳也相同 -> 认为是未修改（优化常见情况）
         if int(old_mtime) == int(new_mtime):
             continue
         
+        # 3. 大小相同，时间戳不同 -> 计算哈希进一步比较
         old_hash = _hash_file(old[0])
         new_hash = _hash_file(new_abs)
         if old_hash and new_hash:
             if old_hash != new_hash:
                 modified.append(rel)
+            # 哈希相同 -> 未修改（即使时间戳不同）
             continue
         
+        # 4. 无法计算哈希（极少见），保守起见认为是修改
         modified.append(rel)
     
     # 检查删除的文件（排除已重命名的）

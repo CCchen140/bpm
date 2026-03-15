@@ -99,28 +99,39 @@ import cv2
 import numpy as np
 import exifread
 
-try:
-    import torch
-    from ultralytics import YOLO
-    _TORCH_YOLO_AVAILABLE = True
-    _TORCH_IMPORT_ERROR: Exception | None = None
-    # 调试日志：记录成功导入
+# 延迟导入 torch 和 ultralytics，避免在模块加载时就失败
+# 这些模块将在 BirdFocusDetector.__init__ 中按需导入
+torch = None
+YOLO = None
+_TORCH_YOLO_AVAILABLE = False
+_TORCH_IMPORT_ERROR: Exception | None = None
+
+def _ensure_torch_imported():
+    """
+    确保 torch 和 ultralytics 已导入
+    
+    返回:
+        (torch_module, yolo_class, success, error)
+    """
+    global torch, YOLO, _TORCH_YOLO_AVAILABLE, _TORCH_IMPORT_ERROR
+    
+    if _TORCH_YOLO_AVAILABLE and torch is not None and YOLO is not None:
+        return torch, YOLO, True, None
+    
     try:
-        from utils.log_manager import LogManager
-        LogManager.instance().debug(f"[FocusDetect] torch和ultralytics导入成功: torch={torch.__version__}")
-    except Exception:
-        pass
-except Exception as _e:
-    torch = None  # type: ignore[assignment]
-    YOLO = None  # type: ignore[assignment]
-    _TORCH_YOLO_AVAILABLE = False
-    _TORCH_IMPORT_ERROR = _e
-    # 调试日志：记录导入失败
-    try:
-        from utils.log_manager import LogManager
-        LogManager.instance().error(f"[FocusDetect] torch或ultralytics导入失败: {_e}")
-    except Exception:
-        pass
+        import torch as _torch
+        from ultralytics import YOLO as _YOLO
+        torch = _torch
+        YOLO = _YOLO
+        _TORCH_YOLO_AVAILABLE = True
+        _TORCH_IMPORT_ERROR = None
+        return torch, YOLO, True, None
+    except Exception as _e:
+        torch = None
+        YOLO = None
+        _TORCH_YOLO_AVAILABLE = False
+        _TORCH_IMPORT_ERROR = _e
+        return None, None, False, _e
 
 import utils.file.file as FileUtils
 from utils.system.gpu_utils import GPUScaler, is_torch_cuda_usable
@@ -250,42 +261,85 @@ class BirdFocusDetector:
             save_output: 是否保存输出
             print_focus_point: 是否打印对焦点
         """
-        if not _TORCH_YOLO_AVAILABLE or YOLO is None:
+        # 构造可能失败的情况（打包环境请对照日志排查）:
+        # 1. PyTorch/Ultralytics 未安装或导入失败 → RuntimeError
+        # 2. 模型路径解析不到文件(_resolve_model_path) → FileNotFoundError
+        # 3. YOLO(model_path) 加载失败(文件损坏/格式错误/DLL缺失等) → 由 ultralytics/torch 抛出
+        
+        # 延迟导入 torch 和 ultralytics
+        _torch, _YOLO, _success, _error = _ensure_torch_imported()
+        if not _success or _YOLO is None:
             msg = "缺少依赖：PyTorch/Ultralytics YOLO 未正确安装或无法加载"
-            detail = ""
-            try:
-                if _TORCH_IMPORT_ERROR is not None:
-                    detail = str(_TORCH_IMPORT_ERROR)
-            except Exception:
-                detail = ""
+            detail = str(_error) if _error else ""
             low = str(detail or "").lower()
             if ("winerror 126" in low) or ("caffe2_nvrtc.dll" in low):
                 msg = f"{msg}。通常是 torch GPU 版的 DLL 依赖在打包后缺失/被裁剪"
+            elif ("winerror 1114" in low) or ("c10.dll" in low):
+                msg = (
+                    f"{msg}。c10.dll 初始化失败通常是因为: "
+                    "① 未安装 Visual C++ 运行库(VC++ Redistributable x64); "
+                    "② 打包时 torch 的 DLL 或其依赖未正确包含; "
+                    "③ 可尝试发布 CPU 版(不依赖 CUDA) 或确保 VC++ 运行库与 exe 同机安装。"
+                )
+            LogManager.instance().error(f"[FocusDetect] 构造失败(依赖未加载): {msg}")
             raise RuntimeError(msg if not detail else f"{msg} ({detail})")
+        
+        # 使用导入的模块
+        global torch, YOLO
+        torch = _torch
+        YOLO = _YOLO
 
         # 解析模型路径，支持打包后的环境
-        self.model_path = self._resolve_model_path(model_path)
-        
+        try:
+            self.model_path = self._resolve_model_path(model_path)
+        except FileNotFoundError as e:
+            LogManager.instance().error(f"[FocusDetect] 构造失败(模型文件不存在): {e}")
+            raise
+        except Exception as e:
+            LogManager.instance().error(f"[FocusDetect] 构造失败(模型路径解析异常): {e}")
+            raise
+
         # 调试日志：记录模型路径解析结果
         try:
             LogManager.instance().debug(f"[FocusDetect] 模型路径解析: 原始={model_path}, 解析后={self.model_path}, 存在={os.path.isfile(self.model_path)}")
         except Exception:
             pass
-        
+
         self.device = "cpu"
         try:
             if bool(use_gpu):
                 self.device = self._select_device()
         except Exception:
             self.device = "cpu"
-        self.model = YOLO(self.model_path, verbose=False)
+
+        try:
+            self.model = YOLO(self.model_path, verbose=False)
+        except Exception as e:
+            LogManager.instance().error(
+                f"[FocusDetect] 构造失败(YOLO模型加载异常): model_path={self.model_path}, err={e}"
+            )
+            raise
+        
+        # 将模型移动到指定设备（GPU或CPU）
+        try:
+            if self.device == "cuda":
+                self.model.to("cuda")
+            else:
+                self.model.to("cpu")
+        except Exception:
+            self.device = "cpu"
+            try:
+                self.model.to("cpu")
+            except Exception:
+                pass
         
         # 验证模型是否正确加载
         try:
             model_type = type(self.model).__name__
             model_task = getattr(self.model, 'task', 'unknown')
             model_names = getattr(self.model, 'names', {})
-            LogManager.instance().debug(f"[FocusDetect] YOLO模型加载成功: type={model_type}, task={model_task}, classes={len(model_names)}")
+            actual_device = str(getattr(self.model, 'device', 'unknown'))
+            LogManager.instance().debug(f"[FocusDetect] YOLO模型加载成功: type={model_type}, task={model_task}, classes={len(model_names)}, device={actual_device}")
         except Exception as e:
             LogManager.instance().warning(f"[FocusDetect] YOLO模型加载后验证失败: {e}")
 
@@ -338,10 +392,12 @@ class BirdFocusDetector:
         """
         try:
             # 使用简单的检测逻辑，与BirdCheck/check.py保持一致
+            if torch is None:
+                _ensure_torch_imported()
             if torch is not None and torch.cuda.is_available():
                 return "cuda"
-        except Exception as e:
-            LogManager.instance().error(f"import torch error: {e}")
+        except Exception:
+            pass
         return "cpu"
 
     @staticmethod
@@ -710,11 +766,13 @@ class BirdFocusDetector:
         except Exception:
             p = ""
         if not p or not os.path.isfile(p):
+            LogManager.instance().warning(f"[FocusDetect] 眼睛检测模型文件不存在: {p}")
             return False
         try:
             self._eye_model = YOLO(str(p), verbose=False)
             return True
-        except Exception:
+        except Exception as e:
+            LogManager.instance().error(f"[FocusDetect] 眼睛检测模型加载失败: path={p}, err={e}")
             self._eye_model = None
             return False
 

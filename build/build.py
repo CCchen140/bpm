@@ -9,23 +9,15 @@ import re
 
 
 def _prune_dist_tree(dist_dir: str):
+    """
+    清理打包后的目录，删除不必要的文件以减小体积
+    注意：不删除 torch 相关的任何文件，避免导致 torch 无法加载
+    """
     dist_dir = os.path.abspath(str(dist_dir or ""))
     if not dist_dir or not os.path.isdir(dist_dir):
         return
 
-    # 只删除测试相关的目录，保留核心功能模块
-    remove_dirs = [
-        os.path.join(dist_dir, "torch", "testing"),
-        os.path.join(dist_dir, "torch", "fx", "passes", "tests"),
-    ]
-    # for p in remove_dirs:
-    #     try:
-    #         if os.path.isdir(p):
-    #             shutil.rmtree(p, ignore_errors=True)
-    #     except Exception:
-    #         pass
-
-    # 递归删除所有 __pycache__ 文件夹
+    # 只删除 __pycache__ 文件夹，不删除 torch 相关的任何文件
     for root, dirs, _ in os.walk(dist_dir):
         for d in dirs:
             if d == "__pycache__":
@@ -34,25 +26,6 @@ def _prune_dist_tree(dist_dir: str):
                     shutil.rmtree(pycache_path, ignore_errors=True)
                 except Exception:
                     pass
-
-    torch_lib = os.path.join(dist_dir, "torch", "lib")
-    if os.path.isdir(torch_lib):
-        remove_files = [
-            os.path.join(torch_lib, "nvperf_host.dll"),
-        ]
-        try:
-            for name in os.listdir(torch_lib):
-                low = str(name or "").lower()
-                if low.startswith("cupti") and low.endswith(".dll"):
-                    remove_files.append(os.path.join(torch_lib, name))
-        except Exception:
-            pass
-        # for p in remove_files:
-        #     try:
-        #         if os.path.isfile(p):
-        #             os.remove(p)
-        #     except Exception:
-        #         pass
 
 
 def _write_build_flavor_marker(dist_dir: str, flavor: str):
@@ -155,7 +128,11 @@ def _walk_dist_files(root_dir: str) -> dict[str, tuple[str, int, int]]:
         for name in files:
             if not name:
                 continue
-            if str(name).lower() in ("thumbs.db", "desktop.ini"):
+            # 忽略系统文件和 .pyc 文件
+            name_lower = str(name).lower()
+            if name_lower in ("thumbs.db", "desktop.ini"):
+                continue
+            if name_lower.endswith(".pyc"):
                 continue
             abs_path = os.path.join(base, name)
             try:

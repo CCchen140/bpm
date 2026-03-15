@@ -9,6 +9,45 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 
+
+def _create_no_window_pool(processes, initializer=None, initargs=()):
+    """
+    创建不显示控制台窗口的进程池（Windows）
+    
+    通过 monkey-patch _winapi.CreateProcess 来隐藏子进程的控制台窗口。
+    """
+    if sys.platform != "win32":
+        ctx = mp.get_context("spawn")
+        return ctx.Pool(processes=processes, initializer=initializer, initargs=initargs)
+    
+    # Windows: 在创建 Pool 之前，monkey-patch _winapi.CreateProcess
+    try:
+        import _winapi
+        
+        # 检查是否已经 patch 过
+        if not hasattr(_winapi.CreateProcess, '_no_window_patched'):
+            _original_create_process = _winapi.CreateProcess
+            
+            def _no_window_create_process(*args, **kwargs):
+                # 修改 creation_flags 参数（第6个参数，索引为5）
+                if len(args) >= 6:
+                    args = list(args)
+                    args[5] = args[5] | 0x08000000  # CREATE_NO_WINDOW
+                    args = tuple(args)
+                # 直接调用原始函数
+                return _original_create_process(*args, **kwargs)
+            
+            # 标记为已 patch
+            _no_window_create_process._no_window_patched = True
+            
+            # 替换 _winapi.CreateProcess
+            _winapi.CreateProcess = _no_window_create_process
+    except Exception:
+        pass
+    
+    ctx = mp.get_context("spawn")
+    return ctx.Pool(processes=processes, initializer=initializer, initargs=initargs)
+
 import cv2
 
 from utils.exif.burst_time_reader import read_subsec_create_ts
@@ -190,10 +229,9 @@ class BurstDetector:
                 _fill_with_fallback(p, read_subsec_create_ts(p))
         else:
             try:
-                ctx = mp.get_context("spawn")
                 chunksize = 32
                 bs = max(1, int(batch_size or 1))
-                with ctx.Pool(processes=int(max_workers)) as pool:
+                with _create_no_window_pool(processes=int(max_workers)) as pool:
                     for start in range(0, len(paths), bs):
                         chunk = paths[start : start + bs]
                         results = pool.map(read_subsec_create_ts, chunk, chunksize=chunksize)
@@ -293,11 +331,6 @@ class BurstDetector:
                         interval = float(interval_fs)
             except Exception:
                 pass
-
-        try:
-            LogManager.instance().debug(f"文件间隔: {file_info.file_name} curr={current_timestamp} prev={previous_timestamp} interval_ms={interval}")
-        except Exception:
-            pass
 
         is_burst = self.is_burst_interval(interval)
         if not is_burst and interval == 0.0 and current_timestamp is not None and previous_timestamp is not None:

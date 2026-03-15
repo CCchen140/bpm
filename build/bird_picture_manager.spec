@@ -242,6 +242,9 @@ try:
         hiddenimports += collect_submodules("torch", exclude=_torch_excludes)
         hiddenimports += collect_submodules("torch.nn")
         hiddenimports += collect_submodules("torch.optim")
+        # 显式添加 torch.autograd 及其子模块，避免循环导入错误
+        hiddenimports += collect_submodules("torch.autograd")
+        hiddenimports += ["torch.autograd", "torch.autograd.function", "torch.autograd.grad_mode"]
         # 跳过 torch.utils 中的 tensorboard 相关子模块
         hiddenimports += collect_submodules("torch.utils", exclude=["torch.utils.tensorboard"])
         # 跳过 torch.onnx 中的内部 passes 模块
@@ -276,12 +279,9 @@ except Exception:
 
 try:
     import torch as _torch_pkg
-    _torch_version = getattr(_torch_pkg, '__version__', 'unknown')
     _torch_lib_dir = os.path.join(os.path.dirname(_torch_pkg.__file__), "lib")
-    print(f"[INFO] PyInstaller spec: torch version={_torch_version}, lib_dir={_torch_lib_dir}")
     if os.path.isdir(_torch_lib_dir):
         _torch_dll_seen = set()
-        _torch_dll_count = 0
         # 收集所有 DLL，包括子目录中的
         for _root, _dirs, _files in os.walk(_torch_lib_dir):
             for _file in _files:
@@ -291,18 +291,100 @@ try:
                         _dname = os.path.basename(_dll).lower()
                         if _dname not in _torch_dll_seen:
                             _torch_dll_seen.add(_dname)
-                            _torch_dll_count += 1
                             # 保持相对路径结构
                             _rel_path = os.path.relpath(_root, _torch_lib_dir)
                             if _rel_path == '.':
                                 binaries.append((_dll, "torch/lib"))
                             else:
                                 binaries.append((_dll, os.path.join("torch/lib", _rel_path)))
-        print(f"[INFO] PyInstaller spec: collected {_torch_dll_count} torch DLLs")
+except Exception:
+    pass
+
+# 裁剪 torch 中不需要的文件和目录，减小打包体积
+try:
+    import torch as _torch_pkg
+    _torch_dir = os.path.dirname(_torch_pkg.__file__)
+    
+    # 定义需要排除的 torch 子目录和文件模式
+    _torch_excludes = [
+        # 测试文件
+        "test",
+        "testing",
+        "_C_cuda*.pyd",  # CUDA 相关的 C 扩展（如果不使用 CUDA）
+        "_C_cudnn*.pyd",
+        # 文档和示例
+        "docs",
+        "examples",
+        # 注意：不能排除 profiler 和 autograd\profiler.py
+        # 因为 torch 的核心功能依赖于它们，排除会导致循环导入错误
+        # "profiler",
+        # "autograd\profiler.py",
+        # 分布式训练（单机版不需要）
+        "distributed",
+        # 移动端支持
+        "mobile",
+        "jit\mobile",
+        # 量化工具（如果不使用模型量化）
+        "ao",
+        "quantization",
+        # 一些不常用的模块
+        "onnx",
+        "export",
+        "fx\experimental",
+        "_inductor\test",
+        # 大型测试数据文件
+        "*.pdb",  # 调试符号文件
+        "*.lib",  # 静态库文件
+    ]
+    
+    # 在 Analysis 的 excludes 中添加 torch 的排除项
+    # 注意：这里只是记录，实际的排除在 Analysis 的 excludes 参数中处理
+    print(f"[INFO] PyInstaller spec: torch 裁剪配置已设置，将排除以下模式: {_torch_excludes}")
 except Exception as e:
-    print(f"[WARN] Failed to collect torch lib DLLs: {e}")
-    import traceback
-    traceback.print_exc()
+    print(f"[WARN] 配置 torch 裁剪失败: {e}")
+    pass
+
+# 确保使用 Conda 环境中的 Visual C++ 运行库，避免版本不匹配导致 DLL 初始化失败
+try:
+    import sys
+    _conda_vc_dlls = []
+    _vc_dll_names = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140_threads.dll']
+    
+    if hasattr(sys, 'executable'):
+        _python_dir = os.path.dirname(sys.executable)
+        # 尝试多个可能的位置
+        _possible_dirs = [
+            os.path.join(_python_dir, '..', 'Library', 'bin'),
+            os.path.join(_python_dir, 'Library', 'bin'),
+            os.path.join(_python_dir, '..', '..', 'Library', 'bin'),
+        ]
+        for _dir in _possible_dirs:
+            _abs_dir = os.path.abspath(_dir)
+            if os.path.isdir(_abs_dir):
+                for _dll_name in _vc_dll_names:
+                    _dll_path = os.path.join(_abs_dir, _dll_name)
+                    if os.path.isfile(_dll_path):
+                        _conda_vc_dlls.append(_dll_path)
+                break
+    
+    # 添加所有找到的 VC DLL，覆盖 PyInstaller 默认添加的版本
+    for _dll_path in _conda_vc_dlls:
+        _dll_name_lower = os.path.basename(_dll_path).lower()
+        # 检查是否已经在 binaries 中，如果存在则替换
+        _existing_idx = None
+        for idx, b in enumerate(binaries):
+            if isinstance(b, (list, tuple)) and len(b) >= 2:
+                if os.path.basename(b[0]).lower() == _dll_name_lower:
+                    _existing_idx = idx
+                    break
+        
+        if _existing_idx is not None:
+            # 替换现有的 DLL
+            binaries[_existing_idx] = (_dll_path, '.')
+        else:
+            # 添加新的 DLL
+            binaries.append((_dll_path, '.'))
+except Exception:
     pass
 
 try:
@@ -462,13 +544,27 @@ analysis = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    runtime_hooks=[os.path.join(BUILD_DIR, "pyi_rth_torch_dlls.py")],
+    runtime_hooks=[
+        os.path.join(BUILD_DIR, "pyi_rth_multiprocessing_nowindow.py"),  # 必须在最前面，确保在其他导入之前执行
+        os.path.join(BUILD_DIR, "pyi_rth_torch_dlls.py"),
+    ],
     excludes=[
         # 排除不需要的 torch 可选模块，减少警告
         "tensorboard",
         "onnx",
         "torch.utils.tensorboard",
         "torch.onnx._internal.fx.passes",
+        # 排除测试和调试模块
+        "pytest",
+        # 注意：不能排除 unittest，因为它是 Python 标准库，某些库可能依赖它
+        # "unittest",
+        # 注意：不能排除 test 和 testing，因为某些库在运行时可能检查这些模块
+        # "test",
+        # "testing",
+        # 注意：不能排除 pdb，因为 torch 在探测 CUDA 时需要它
+        # "pdb",
+        "pdbpp",
+        "ipdb",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -487,7 +583,14 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
+    upx_exclude=[
+        # 排除可能导致问题的文件
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+    ],
     contents_directory=".",
     runtime_tmpdir=None,
     console=False,

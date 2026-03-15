@@ -10110,7 +10110,7 @@ class ImportPage(BaseImageBrowserPage):
             try:
                 from utils.log_manager import LogManager
 
-                LogManager.instance().debug(f"[FocusDetectScan] {msg}")
+                # LogManager.instance().debug(f"[FocusDetectScan] {msg}")
             except Exception:
                 pass
 

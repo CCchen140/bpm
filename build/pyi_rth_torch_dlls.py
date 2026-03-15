@@ -59,10 +59,6 @@ def _setup_torch_dll_paths():
     # 检测GPU类型
     gpu_type = _detect_gpu_type()
     
-    # 调试输出（使用stderr，因为此时日志系统可能还未初始化）
-    import sys as _sys
-    print(f"[pyi_rth_torch_dlls] GPU type detected: {gpu_type}", file=_sys.stderr)
-    
     # 在AMD GPU上禁用CUDA，强制使用CPU模式
     if gpu_type == "amd":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""  # 禁用CUDA设备
@@ -72,10 +68,8 @@ def _setup_torch_dll_paths():
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "backend:native"
         # 不添加nvidia DLL目录
         has_nvidia = False
-        print(f"[pyi_rth_torch_dlls] AMD GPU detected, CUDA disabled", file=_sys.stderr)
     else:
         has_nvidia = (gpu_type == "nvidia")
-        print(f"[pyi_rth_torch_dlls] NVIDIA GPU: {has_nvidia}", file=_sys.stderr)
 
     dll_dirs = [
         base,

@@ -55,17 +55,93 @@ def _safe_write_text(path: str, text: str):
 
 
 def focus_trace(msg: str):
+    """记录焦点检测日志"""
     try:
-        LogManager.instance().debug(f"[FocusDetectCLI] {msg}")
-        return
+        LogManager.instance().debug(f"[FocusDetect] {msg}")
     except Exception:
         pass
+
+
+def _patch_multiprocessing_popen():
+    """
+    Monkey-patch _winapi.CreateProcess，添加 CREATE_NO_WINDOW 标志
+    
+    返回 True 表示成功，False 表示已经 patch 过或失败
+    """
     try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        import _winapi
+        
+        # 检查是否已经 patch 过（避免重复 patch）
+        if hasattr(_winapi.CreateProcess, '_no_window_patched'):
+            return False
+        
+        # 保存原始的 _winapi.CreateProcess
+        _original_create_process = _winapi.CreateProcess
+        
+        def _no_window_create_process(*args, **kwargs):
+            # 修改 creation_flags 参数（第6个参数，索引为5）
+            if len(args) >= 6:
+                args = list(args)
+                args[5] = args[5] | 0x08000000  # CREATE_NO_WINDOW
+                args = tuple(args)
+            # 直接调用原始函数
+            return _original_create_process(*args, **kwargs)
+        
+        # 标记为已 patch
+        _no_window_create_process._no_window_patched = True
+        
+        # 替换 _winapi.CreateProcess
+        _winapi.CreateProcess = _no_window_create_process
+        
+        return True
     except Exception:
-        ts = ""
-    line = f"[FocusDetectCLI] {ts} {msg}\n"
-    _safe_write_text(os.path.join(_project_root, "cache", "logs", "focus_detect_cli_fallback.log"), line)
+        return False
+
+
+def _unpatch_multiprocessing_popen():
+    """恢复 _winapi.CreateProcess（实际上不需要恢复，因为使用的是局部变量）"""
+    pass
+
+
+def _create_no_window_pool(processes, initializer=None, initargs=()):
+    """
+    创建不显示控制台窗口的进程池（Windows）
+    
+    通过 monkey-patch multiprocessing 来隐藏子进程的控制台窗口。
+    """
+    import multiprocessing as mp
+    import sys
+    
+    if sys.platform != "win32":
+        ctx = mp.get_context("spawn")
+        return ctx.Pool(processes=processes, initializer=initializer, initargs=initargs)
+    
+    # Windows: 在创建 Pool 之前，monkey-patch _winapi.CreateProcess
+    _patch_multiprocessing_popen()
+    ctx = mp.get_context("spawn")
+    return ctx.Pool(processes=processes, initializer=initializer, initargs=initargs)
+
+
+def _create_no_window_executor(max_workers=1):
+    """
+    创建不显示控制台窗口的 ProcessPoolExecutor（Windows）
+    """
+    import multiprocessing as mp
+    import sys
+    from concurrent.futures import ProcessPoolExecutor
+    
+    if sys.platform != "win32":
+        ctx = mp.get_context("spawn")
+        return ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
+    
+    # Windows: 在创建 Executor 之前，monkey-patch Popen 类
+    _patch_multiprocessing_popen()
+    try:
+        ctx = mp.get_context("spawn")
+        return ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx)
+    except Exception:
+        # 如果失败，尝试不使用 mp_context
+        return ProcessPoolExecutor(max_workers=max_workers)
 
 
 def _is_focus_cuda_usable() -> bool:
@@ -194,10 +270,6 @@ def clear_focus_detector():
     except Exception:
         pass
     try:
-        focus_trace("clear_focus_detector: begin")
-    except Exception:
-        pass
-    try:
         if det is not None:
             try:
                 setattr(det, "model", None)
@@ -213,10 +285,6 @@ def clear_focus_detector():
         from utils.system.gpu_utils import try_clear_torch_cuda_cache
 
         try_clear_torch_cuda_cache()
-    except Exception:
-        pass
-    try:
-        focus_trace("clear_focus_detector: done")
     except Exception:
         pass
 
@@ -368,12 +436,12 @@ def _focus_detect_worker_init(
     initial_conf: float = 0.15,
     enable_eye_detect: bool = False,
 ):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED, _FOCUS_DETECTOR_WORKER_FALLBACK, _FOCUS_DETECTOR_WORKER_INIT_ERROR
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
     t0 = time.time()
     _ensure_std_streams()
     try:
-        focus_trace(
-            f"worker_init start pid={os.getpid()} model={model_path} target_size={int(target_size or 0)} use_gpu={bool(use_gpu)}"
+        LogManager.instance().debug(
+            f"[FocusDetectCLI] worker_init start pid={os.getpid()} model={model_path} target_size={int(target_size or 0)} use_gpu={bool(use_gpu)}"
         )
     except Exception:
         pass
@@ -392,39 +460,19 @@ def _focus_detect_worker_init(
             effective_gpu = False
     except Exception:
         effective_gpu = False
-    try:
-        from core.detectors.bird_focus_detector import BirdFocusDetector
 
-        det = BirdFocusDetector(
-            str(model_path),
-            target_size=int(target_size or 640),
-            initial_conf=float(initial_conf or 0.15),
-            multi_check=bool(multi_check),
-            exp_frame_check=bool(exp_frame_check),
-            use_gpu=bool(effective_gpu),
-            save_output=False,
-            print_focus_point=False,
-        )
-    except Exception as e:
-        try:
-            focus_trace(
-                f"worker_init failed pid={os.getpid()} model={model_path} target_size={int(target_size or 0)} use_gpu={bool(effective_gpu)} err={e}"
-            )
-        except Exception:
-            pass
-        try:
-            import traceback
+    from core.detectors.bird_focus_detector import BirdFocusDetector
 
-            focus_trace(traceback.format_exc())
-        except Exception:
-            pass
-        try:
-            _FOCUS_DETECTOR_WORKER_FALLBACK = True
-            _FOCUS_DETECTOR_WORKER_INIT_ERROR = str(e)
-            _FOCUS_DETECTOR_WORKER_INSTANCE = False
-        except Exception:
-            pass
-        return
+    det = BirdFocusDetector(
+        str(model_path),
+        target_size=int(target_size or 640),
+        initial_conf=float(initial_conf or 0.15),
+        multi_check=bool(multi_check),
+        exp_frame_check=bool(exp_frame_check),
+        use_gpu=bool(effective_gpu),
+        save_output=False,
+        print_focus_point=False,
+    )
     try:
         _FOCUS_DETECT_EYE_ENABLED = bool(enable_eye_detect)
     except Exception:
@@ -444,10 +492,6 @@ def _focus_detect_worker_init(
     except Exception:
         pass
     _FOCUS_DETECTOR_WORKER_INSTANCE = det
-    try:
-        focus_trace(f"worker_init done pid={os.getpid()} elapsed_ms={int((time.time()-t0)*1000)}")
-    except Exception:
-        pass
 
 
 def prewarm_focus_detector(
@@ -476,8 +520,8 @@ def prewarm_focus_detector(
 
 
 def _focus_detect_one_path(image_path: str, af_focus_point=None):
-    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED, _FOCUS_DETECTOR_WORKER_FALLBACK
-    if _FOCUS_DETECTOR_WORKER_INSTANCE is None and (not bool(_FOCUS_DETECTOR_WORKER_FALLBACK)):
+    global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
+    if _FOCUS_DETECTOR_WORKER_INSTANCE is None:
         use_gpu = True
         try:
             from utils.setting.settings_manager import SettingsManager
@@ -502,8 +546,8 @@ def _focus_detect_one_path(image_path: str, af_focus_point=None):
             bool(_FOCUS_DETECT_EYE_ENABLED),
         )
     det = _FOCUS_DETECTOR_WORKER_INSTANCE
-    if det is None or det is False or bool(_FOCUS_DETECTOR_WORKER_FALLBACK):
-        return _focus_detect_cpu_fallback_one_path(image_path, af_focus_point)
+    if det is None:
+        raise RuntimeError("对焦检测器未初始化，请检查 YOLO 模型是否正确加载")
     targets = [
         "score",
         "norm_score",
@@ -647,8 +691,9 @@ def detect_focus_batch_for_import(
                 float(initial_conf or 0.15),
                 bool(enable_eye_detect),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            LogManager.instance().error(f"[FocusDetectCLI] 单进程模式对焦检测器初始化失败: {e}")
+            raise
 
     _t_settings0 = time.perf_counter()
     try:
@@ -667,10 +712,6 @@ def detect_focus_batch_for_import(
     except Exception:
         pass
     _t_settings1 = time.perf_counter()
-    try:
-        focus_trace(f"stage=init.settings elapsed_s={float(_t_settings1 - _t_settings0):.3f}")
-    except Exception:
-        pass
 
     _t_db0 = time.perf_counter()
     db = None
@@ -731,7 +772,18 @@ def detect_focus_batch_for_import(
     try:
         init_s = float(_t_init1 - _t_init0)
         init_avg_ms = (init_s * 1000.0 / float(len(paths))) if paths else 0.0
-        focus_trace(f"stage=init elapsed_s={init_s:.3f} avg_ms_per_file={init_avg_ms:.1f} files={len(paths)} gpu={bool(effective_use_gpu)} mp={bool(use_multiprocess)}")
+        # 计算实际使用的进程数
+        actual_proc = 1
+        if bool(use_multiprocess):
+            try:
+                cpu_count = int(os.cpu_count() or 4)
+                reserve = int(reserve_cpu or 0)
+                actual_proc = max(1, cpu_count - max(0, reserve))
+                if bool(effective_use_gpu):
+                    actual_proc = 1
+            except Exception:
+                actual_proc = 1
+        focus_trace(f"stage=init elapsed_s={init_s:.3f} avg_ms_per_file={init_avg_ms:.1f} files={len(paths)} gpu={bool(effective_use_gpu)} mp={bool(use_multiprocess)} proc={actual_proc}")
     except Exception:
         pass
 
@@ -1041,7 +1093,7 @@ def detect_focus_batch_for_import(
                 reserve = int(reserve_cpu or 0)
             except Exception:
                 reserve = 0
-            max_workers = max(1, min(4, int(cpu_count - max(0, reserve))))
+            max_workers = max(1, int(cpu_count - max(0, reserve)))
 
             def _af_progress(done: int, total: int):
                 try:
@@ -1083,22 +1135,32 @@ def detect_focus_batch_for_import(
             progress_callback("初始化对焦检测", 0, int(len(paths)), float(time.time()))
     except Exception:
         pass
+    # 计算进程数量
+    try:
+        cpu_count = int(os.cpu_count() or 4)
+    except Exception:
+        cpu_count = 4
+    try:
+        reserve = int(reserve_cpu or 0)
+    except Exception:
+        reserve = 0
+    proc = max(1, cpu_count - max(0, reserve))
+    # GPU检测时使用单进程，避免多进程竞争GPU资源导致初始化变慢
+    # if bool(effective_use_gpu):
+    #     proc = 1
+    # 当只需要单进程时，直接使用非多进程路径，避免进程创建开销
+    if proc == 1:
+        use_multiprocess = False
+    
+    # 记录最终的检测配置（使用info级别确保能被看到）
+    try:
+        LogManager.instance().info(f"[FocusDetect] stage=init.config gpu={bool(effective_use_gpu)} mp={bool(use_multiprocess)} proc={proc}")
+    except Exception:
+        pass
+        
     if use_multiprocess:
-        try:
-            cpu_count = int(os.cpu_count() or 4)
-        except Exception:
-            cpu_count = 4
-        try:
-            reserve = int(reserve_cpu or 0)
-        except Exception:
-            reserve = 0
-        proc = max(1, cpu_count - max(0, reserve))
-        proc = min(proc, 12)
-        if bool(effective_use_gpu):
-            proc = 1
-        ctx = mp.get_context("spawn")
         _t_pool0 = time.perf_counter()
-        pool = ctx.Pool(
+        pool = _create_no_window_pool(
             processes=proc,
             initializer=_focus_detect_worker_init,
             initargs=(
@@ -1112,6 +1174,37 @@ def detect_focus_batch_for_import(
             ),
         )
         _t_pool1 = time.perf_counter()
+        
+        # 定义进程池清理函数，确保在任何情况下都能清理进程池
+        def _cleanup_pool():
+            """清理进程池，确保子进程被正确终止"""
+            nonlocal pool
+            if pool is None:
+                return
+            try:
+                # 首先尝试优雅地关闭
+                try:
+                    pool.close()
+                except Exception:
+                    pass
+                # 等待进程结束
+                try:
+                    pool.join(timeout=2.0)
+                except Exception:
+                    pass
+                # 强制终止
+                try:
+                    pool.terminate()
+                except Exception:
+                    pass
+                # 再次等待
+                try:
+                    pool.join(timeout=1.0)
+                except Exception:
+                    pass
+            finally:
+                pool = None
+        
         try:
             mp_paths = list(paths)
             total = len(mp_paths)
@@ -1317,15 +1410,10 @@ def detect_focus_batch_for_import(
                         rest = []
                     inflight = []
                     start_by_path = {}
-                    try:
-                        pool.terminate()
-                    except Exception:
-                        pass
-                    try:
-                        pool.join()
-                    except Exception:
-                        pass
-                    pool = ctx.Pool(
+                    # 使用清理函数清理旧的进程池
+                    _cleanup_pool()
+                    # 创建新的进程池
+                    pool = _create_no_window_pool(
                         processes=proc,
                         initializer=_focus_detect_worker_init,
                         initargs=(
@@ -1356,28 +1444,8 @@ def detect_focus_batch_for_import(
             except Exception:
                 pass
         finally:
-            try:
-                if cancelled:
-                    pool.terminate()
-                    procs = getattr(pool, "_pool", None)
-                    if isinstance(procs, list):
-                        for p0 in procs:
-                            try:
-                                p0.join(timeout=0.6)
-                            except Exception:
-                                pass
-                else:
-                    try:
-                        pool.close()
-                    except Exception:
-                        pool.terminate()
-            except Exception:
-                pass
-            try:
-                if not cancelled:
-                    pool.join()
-            except Exception:
-                pass
+            # 使用统一的清理函数确保进程池被正确清理
+            _cleanup_pool()
     else:
         _focus_detect_worker_init(
             model_path,
@@ -1565,11 +1633,7 @@ def _get_subject_detect_process_executor() -> ProcessPoolExecutor:
     with _SUBJECT_DETECT_PROCESS_LOCK:
         if _SUBJECT_DETECT_PROCESS_EXECUTOR is not None:
             return _SUBJECT_DETECT_PROCESS_EXECUTOR
-        try:
-            ctx = mp.get_context("spawn")
-            _SUBJECT_DETECT_PROCESS_EXECUTOR = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
-        except Exception:
-            _SUBJECT_DETECT_PROCESS_EXECUTOR = ProcessPoolExecutor(max_workers=1)
+        _SUBJECT_DETECT_PROCESS_EXECUTOR = _create_no_window_executor(max_workers=1)
         return _SUBJECT_DETECT_PROCESS_EXECUTOR
 
 

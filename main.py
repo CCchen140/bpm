@@ -6,6 +6,33 @@ import os
 import traceback
 from datetime import datetime
 
+# Windows: 全局 monkey-patch multiprocessing，隐藏子进程控制台窗口
+if sys.platform == "win32":
+    try:
+        import _winapi
+        
+        # 检查是否已经 patch 过（避免重复 patch）
+        if not hasattr(_winapi.CreateProcess, '_no_window_patched'):
+            # 保存原始的 _winapi.CreateProcess
+            _original_create_process = _winapi.CreateProcess
+            
+            def _no_window_create_process(*args, **kwargs):
+                # 修改 creation_flags 参数（第6个参数，索引为5）
+                if len(args) >= 6:
+                    args = list(args)
+                    args[5] = args[5] | 0x08000000  # CREATE_NO_WINDOW
+                    args = tuple(args)
+                # 直接调用原始函数，不要通过 _winapi.CreateProcess
+                return _original_create_process(*args, **kwargs)
+            
+            # 标记为已 patch
+            _no_window_create_process._no_window_patched = True
+            
+            # 替换 _winapi.CreateProcess
+            _winapi.CreateProcess = _no_window_create_process
+    except Exception:
+        pass
+
 # 可选导入：pyecharts（用于思维导图功能，新 UI 不需要）
 # from pyecharts import options as opts
 # from pyecharts.charts import Tree
@@ -181,27 +208,37 @@ if __name__ == "__main__":
     setup_exception_hook()
     _configure_windows_dll_search_paths()
     
-    # 检查是否已有实例在运行
-    if not check_single_instance():
+    # 检查是否是本地识别服务子进程
+    is_bird_ipc_service = "--bird-ipc-service" in sys.argv
+    
+    # 检查是否已有实例在运行（本地识别服务子进程跳过此检查）
+    if not is_bird_ipc_service and not check_single_instance():
         sys.exit(1)
     
-    # 检查进程数量
-    if not check_process_count():
+    # 检查进程数量（本地识别服务子进程跳过此检查）
+    if not is_bird_ipc_service and not check_process_count():
         sys.exit(1)
-    try:
-        if "--bird-ipc-service" in sys.argv:
+    
+    # 本地识别服务子进程
+    if is_bird_ipc_service:
+        try:
+            print("[BirdIPC] 启动本地识别服务子进程...")
             try:
                 import torch
-            except Exception:
-                pass
+                print(f"[BirdIPC] torch 导入成功: {torch.__version__}")
+            except Exception as e:
+                print(f"[BirdIPC] torch 导入失败: {e}")
+                import traceback
+                traceback.print_exc()
             from core.recognizer.bird_species_recognizer import run_local_bird_ipc_service
-
             run_local_bird_ipc_service()
-            raise SystemExit(0)
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"Start bird ipc service failed: {e}")
+            print("[BirdIPC] 本地识别服务子进程正常退出")
+            sys.exit(0)
+        except Exception as e:
+            print(f"[BirdIPC] 本地识别服务子进程异常: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
     try:
         if sys.platform == "win32":
             import ctypes
@@ -274,6 +311,28 @@ if __name__ == "__main__":
         log_gpu_summary_async(reason="startup")
     except Exception as e:
         print(f"Start CUDA probe failed: {e}")
+
+    # 在后台启动本地鸟种检测服务端，避免首次识别时卡顿
+    try:
+        print("Starting local bird species detection service in background...")
+        from core.recognizer.bird_species_recognizer import _get_local_bird_ipc_client
+        
+        def _start_bird_service_async():
+            try:
+                client = _get_local_bird_ipc_client()
+                if client and client.ensure_service():
+                    print("Local bird species detection service started successfully")
+                else:
+                    print("Failed to start local bird species detection service")
+            except Exception as e:
+                print(f"Start bird service failed: {e}")
+        
+        # 在后台线程中启动服务
+        from threading import Thread
+        bird_service_thread = Thread(target=_start_bird_service_async, daemon=True, name="BirdServiceStarter")
+        bird_service_thread.start()
+    except Exception as e:
+        print(f"Start bird service thread failed: {e}")
 
     cm = ColorManager.instance()
     try:
