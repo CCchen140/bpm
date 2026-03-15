@@ -16,7 +16,7 @@ SolidCompression=yes
 DisableProgramGroupPage=yes
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面图标"; GroupDescription: "附加任务"; Flags: unchecked
+Name: "desktopicon"; Description: "创建桌面图标"; GroupDescription: "附加任务"; Flags: checkedonce
 
 [Files]
 Source: "{#MyAppDistDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

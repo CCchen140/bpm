@@ -170,7 +170,7 @@ python build/build.py --flavor gpu --delta-from "dist/栖图_V0.0.4_gpu" --delta
 
 ```bash
 # 1. 打包完整版并创建升级包
-python build/build.py --flavor gpu --delta-from "dist/栖图_V0.0.4_gpu" --delta
+python build/build.py --flavor gpu --delta-from "dist/栖图_V0.0.4_gpu_fr" --delta
 
 # 2. 使用 Inno Setup 编译生成的 ISS 脚本
 # 打开 Inno Setup → 打开 build/installer/update_V1.0.1_gpu_update1.iss
@@ -198,7 +198,7 @@ python build/build.py --flavor gpu --delta-from "dist/栖图_V0.0.4_gpu" --delta
 python build/build_delta.py --from "dist/栖图_V1.0.0_gpu"
 
 # 完整参数
-python build/build_delta.py --from "dist/栖图_V0.0.4_o1" --to "dist/栖图_V0.0.4_gpu" --version "0.0.4" --flavor gpu --update 1
+python build/build_delta.py --from "dist/栖图_V0.0.4_gpu_fr" --to "dist/栖图_V0.0.4_gpu" --version "0.0.4" --flavor gpu --update 1
 ```
 
 #### 差分升级文件夹结构

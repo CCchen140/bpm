@@ -1,8 +1,22 @@
 import os
+import re
 from datetime import datetime
+
+
+def _strip_timezone_for_display(s):
+    """去掉拍摄时间字符串末尾的时区（如 +08:00、-05:00、Z），仅用于显示"""
+    if not s or not isinstance(s, str):
+        return s
+    s = s.strip()
+    if not s:
+        return s
+    s = re.sub(r"\s*[+-]\d{2}:?\d{2}\s*$", "", s)
+    if s.upper().endswith("Z"):
+        s = s[:-1].strip()
+    return s
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
                              QMenu, QApplication, QHeaderView, QHBoxLayout, QPushButton)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QImageReader
 from utils.sql.data_base import BirdLibraryDB
 from utils.exif.exif_utils import ExifHandleWorker, EXIF_TAG
@@ -119,6 +133,7 @@ class FocusDistanceLoaderThread(QThread):
 
 class InfoPanel(QWidget):
     vertical_toggle_requested = pyqtSignal()
+    exif_loaded_for_cache = pyqtSignal(str, dict)  # path, exif_data，供页面级缓存回写
 
     def __init__(self, parent=None, show_extended_info=True):
         super().__init__(parent)
@@ -600,12 +615,11 @@ class InfoPanel(QWidget):
         except:
             return None
 
-    def _on_exif_loaded(self, request_id, image_path, exif_data):
-        """EXIF加载完成后的回调（在主线程执行）"""
-        # 检查是否是当前请求
-        if request_id != self._focus_distance_request_id:
+    def _apply_exif_to_ui(self, image_path, exif_data):
+        """将 EXIF 数据应用到界面（供 _on_exif_loaded 与缓存命中时 update_info 复用）。"""
+        if not exif_data:
             return
-        
+
         def _get_exif(keys, default="-"):
             for k in keys:
                 if k in exif_data and exif_data[k] is not None:
@@ -613,7 +627,7 @@ class InfoPanel(QWidget):
                     if v and v != "-":
                         return v
             return default
-        
+
         def _strip_suffix_unit(s: str, unit: str):
             if not s:
                 return s
@@ -625,8 +639,7 @@ class InfoPanel(QWidget):
             if low.endswith(u):
                 t = t[: len(t) - len(unit)].strip()
             return t
-        
-        # 更新尺寸和分辨率
+
         try:
             dimensions_disp = "-"
             img_size = _get_exif(["ImageSize"])
@@ -637,25 +650,18 @@ class InfoPanel(QWidget):
                 img_height = _get_exif(["ImageHeight", "ExifImageLength"])
                 if img_width != "-" and img_height != "-":
                     dimensions_disp = f"{img_width} × {img_height}"
-            if dimensions_disp != "-":
-                self.info_image_items['dimensions'].setText(1, dimensions_disp)
+            self.info_image_items['dimensions'].setText(1, dimensions_disp)
         except Exception:
             pass
-        
-        # 更新分辨率
         try:
             x_res = _get_exif(["XResolution"])
-            if x_res != "-":
-                self.info_image_items['resolution'].setText(1, f"{x_res} DPI")
+            self.info_image_items['resolution'].setText(1, f"{x_res} DPI" if x_res != "-" else "-")
         except Exception:
             pass
-        
-        # 更新EXIF信息
         try:
             camera_disp = _get_exif(["Model"])
             lens_disp = _get_exif(["LensModel", "Lens"])
             iso_disp = _get_exif(["ISO", "ISOSpeedRatings", "PhotographicSensitivity"])
-            
             fnumber = _get_exif(["FNumber", "Aperture"])
             aperture_disp = "-"
             if fnumber != "-":
@@ -664,24 +670,18 @@ class InfoPanel(QWidget):
                     aperture_disp = f"f/{f_val}" if f_val > 0 else "-"
                 except Exception:
                     aperture_disp = fnumber if fnumber.startswith("f/") else f"f/{fnumber}"
-            
             shutter_disp = _get_exif(["ExposureTime", "ShutterSpeed"])
             if shutter_disp != "-":
                 shutter_disp = shutter_disp.replace(" sec", "").replace("sec", "").strip() or "-"
-            
             focal_disp = _get_exif(["FocalLength"])
             if focal_disp != "-":
                 focal_disp = _strip_suffix_unit(str(focal_disp).replace(" ", ""), "mm") or "-"
-            
-            # 对焦距离
             focus_disp = _get_exif([
                 "FocusDistance", "SubjectDistance",
-                "FocusDistance2",
-                "FocusDistanceUpper", "FocusDistanceLower",
+                "FocusDistance2", "FocusDistanceUpper", "FocusDistanceLower",
             ])
             if focus_disp != "-":
                 focus_disp = _strip_suffix_unit(str(focus_disp).replace(" ", ""), "m") or "-"
-            
             self.info_exif_items['camera'].setText(1, camera_disp)
             self.info_exif_items['lens'].setText(1, lens_disp)
             self.info_exif_items['aperture'].setText(1, aperture_disp)
@@ -691,8 +691,6 @@ class InfoPanel(QWidget):
             self.info_exif_items['focus_distance'].setText(1, focus_disp)
         except Exception as e:
             print(f"[ERROR] info_panel update EXIF UI failed: {e}")
-        
-        # 更新GPS
         try:
             lat_raw = _get_exif(["GPSLatitude"])
             lng_raw = _get_exif(["GPSLongitude"])
@@ -702,32 +700,85 @@ class InfoPanel(QWidget):
                     self.info_exif_items['gps_lat'].setText(1, GeoInfoManager.instance().format_coordinate(lat_val))
                 except Exception:
                     self.info_exif_items['gps_lat'].setText(1, "-")
+            else:
+                self.info_exif_items['gps_lat'].setText(1, "-")
             if lng_raw != "-":
                 try:
                     lng_val = float(lng_raw)
                     self.info_exif_items['gps_lng'].setText(1, GeoInfoManager.instance().format_coordinate(lng_val))
                 except Exception:
                     self.info_exif_items['gps_lng'].setText(1, "-")
+            else:
+                self.info_exif_items['gps_lng'].setText(1, "-")
         except Exception as e:
             print(f"[ERROR] info_panel update GPS UI failed: {e}")
-        
-        # 更新拍摄时间
         try:
             exif_time_raw = _get_exif(["DateTimeOriginal", "CreateDate", "DateTime"])
             if exif_time_raw != "-":
-                s = str(exif_time_raw).strip()
+                s = _strip_timezone_for_display(str(exif_time_raw).strip())
                 try:
                     dt_obj = datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
                     dt_disp = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    dt_disp = s.replace(":", "-", 2) if len(s) >= 10 and s[4] == ":" and s[7] == ":" else s
+                    try:
+                        dt_obj = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+                        dt_disp = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        dt_disp = s.replace(":", "-", 2) if len(s) >= 10 and s[4] == ":" and s[7] == ":" else s
                 if dt_disp and dt_disp.strip():
-                    self.info_time_items['shot_time'].setText(1, dt_disp.strip())
+                    self.info_time_items['shot_time'].setText(1, _strip_timezone_for_display(dt_disp.strip()))
+            else:
+                self.info_time_items['shot_time'].setText(1, "-")
         except Exception as e:
             print(f"[ERROR] info_panel update time UI failed: {e}")
-    
-    def update_info(self, image_path, context=None):
-        """更新信息树内容（优化版：EXIF读取在后台线程）"""
+            self.info_time_items['shot_time'].setText(1, "-")
+
+    def _on_exif_loaded(self, request_id, image_path, exif_data):
+        """EXIF 加载完成后的回调（在主线程执行）；并回写缓存供下次命中使用。"""
+        if request_id != self._focus_distance_request_id:
+            return
+        self._apply_exif_to_ui(image_path, exif_data)
+        try:
+            self.exif_loaded_for_cache.emit(image_path, exif_data)
+        except Exception:
+            pass
+
+    def set_path_only(self, image_path):
+        """仅设置路径与文件名显示，不做任何 I/O；大小/时间/尺寸/EXIF 保留上一张内容，待新数据就绪后一次性更新，避免闪「-」。"""
+        if not image_path:
+            self._clear_info()
+            return
+        try:
+            p = str(image_path).replace("\r", "").strip()
+            if "路径:" in p:
+                p = p.split("路径:")[-1].strip()
+            if "原图片的路径" in p:
+                p = p.split("原图片的路径")[-1].strip()
+            low = p.lower()
+            if low.startswith("file:///"):
+                p = p[8:]
+                if len(p) >= 3 and p[0] == "/" and p[2] == ":":
+                    p = p[1:]
+            elif low.startswith("file://"):
+                p = p[7:]
+            p = p.strip().strip('"').strip("'").strip()
+            p = os.path.normpath(p)
+        except Exception:
+            p = image_path
+        image_path = p or image_path
+        self._current_image_path = image_path
+        try:
+            filename = os.path.basename(image_path) if image_path else "-"
+        except Exception:
+            filename = "-"
+        try:
+            self.info_basic_items['filename'].setText(1, filename)
+            self.info_basic_items['path'].setText(1, image_path or "-")
+        except Exception:
+            pass
+
+    def update_info(self, image_path, context=None, io_data=None, exif_data=None):
+        """更新信息树内容。io_data 由后台 worker 提供时可避免主线程做文件/DB I/O；exif_data 由缓存提供时不再启动 EXIF 线程。"""
         import time
         
         if not image_path:
@@ -766,6 +817,12 @@ class InfoPanel(QWidget):
         except Exception:
             pass
 
+        # 批量更新：禁用树重绘，避免每次 setText 都触发布局，减少延迟
+        try:
+            self.info_tree.setUpdatesEnabled(False)
+        except Exception:
+            pass
+
         focus_distance_value = "-"
         description_value = "-"
         shot_time_value = "-"
@@ -782,9 +839,13 @@ class InfoPanel(QWidget):
         record_area_ratio_raw = None
         t0 = time.time()
         try:
-            record = self.db.get_result_by_path(image_path, table_name="bird_results")
-            if not record:
-                record = self.db.get_result_by_path(image_path, table_name="import_cache")
+            # P1 优化：优先使用后台 worker 提供的 record，避免主线程数据库查询
+            if io_data is not None and isinstance(io_data.get("record"), dict):
+                record = io_data["record"]
+            else:
+                # 如果 io_data 中没有 record，跳过数据库查询，避免阻塞 UI
+                # 数据库查询应该在后台 worker 中完成
+                record = None
             if record:
                 v = record.get("focus_distance")
                 if v is not None and str(v).strip():
@@ -796,7 +857,7 @@ class InfoPanel(QWidget):
 
                 st = record.get("shot_time")
                 if st is not None and str(st).strip():
-                    shot_time_value = str(st).strip()
+                    shot_time_value = _strip_timezone_for_display(str(st).strip())
 
                 it = record.get("imported_at")
                 if it is not None and str(it).strip():
@@ -1000,10 +1061,11 @@ class InfoPanel(QWidget):
         except Exception as e:
             print(f"[ERROR] info_panel set path failed: {e}")
         
-        # 文件大小
+        # 文件大小（优先使用后台 worker 提供的 io_data，避免主线程 I/O）
+        # P1 优化：如果 io_data 中没有 file_size，显示 "-" 而不是在主线程查询
         try:
-            if image_path and os.path.exists(image_path):
-                file_size = os.path.getsize(image_path)
+            if io_data is not None and io_data.get("file_size") is not None:
+                file_size = int(io_data["file_size"])
                 if file_size < 1024:
                     size_str = f"{file_size} B"
                 elif file_size < 1024 * 1024:
@@ -1012,6 +1074,8 @@ class InfoPanel(QWidget):
                     size_str = f"{file_size / (1024 * 1024):.2f} MB"
                 self.info_basic_items['size'].setText(1, size_str)
             else:
+                # 如果 io_data 中没有 file_size，显示 "-"
+                # 文件大小应该在后台 worker 中计算
                 self.info_basic_items['size'].setText(1, "-")
         except Exception as e:
             print(f"[ERROR] info_panel get file size failed: {e}, path={image_path}")
@@ -1025,45 +1089,56 @@ class InfoPanel(QWidget):
             print(f"[ERROR] info_panel get file ext failed: {e}")
             self.info_basic_items['type'].setText(1, "-")
         
-        # 图片信息 - 先显示默认值，后台线程加载EXIF后更新
-        self.info_image_items['dimensions'].setText(1, "-")
-        self.info_image_items['resolution'].setText(1, "72 DPI")
+        # 图片信息 - 不预清为「-」，保留上一张的尺寸/分辨率直至 EXIF 加载完成，避免闪烁
         try:
             self.info_image_items['color_mode'].setText(1, "RGB")
         except Exception:
             pass
         
-        # 时间信息
+        # 时间信息（优先使用 io_data，避免主线程 os.path I/O）
+        # P1 优化：如果 io_data 中没有时间信息，显示 "-" 而不是在主线程查询
         try:
-            if image_path and os.path.exists(image_path):
-                create_time = datetime.fromtimestamp(os.path.getctime(image_path))
-                modify_time = datetime.fromtimestamp(os.path.getmtime(image_path))
-                access_time = datetime.fromtimestamp(os.path.getatime(image_path))
-                
-                if shot_time_value == "-" or not str(shot_time_value).strip():
-                    shot_time_value = create_time.strftime('%Y-%m-%d %H:%M:%S')
-                self.info_time_items['shot_time'].setText(1, str(shot_time_value))
+            create_time = None
+            modify_time = None
+            access_time = None
+            if io_data is not None:
+                try:
+                    ct = io_data.get("create_time")
+                    mt = io_data.get("modify_time")
+                    at = io_data.get("access_time")
+                    if ct is not None:
+                        create_time = datetime.fromtimestamp(float(ct))
+                    if mt is not None:
+                        modify_time = datetime.fromtimestamp(float(mt))
+                    if at is not None:
+                        access_time = datetime.fromtimestamp(float(at))
+                except Exception:
+                    pass
+            # 如果 io_data 中没有时间信息，保持为 None，后续会显示 "-"
+            # 文件时间应该在后台 worker 中计算
+            if create_time is not None:
+                # 拍摄时间：有库里的 shot_time 则立即显示；没有则保留上一张显示，等 EXIF 加载后 _on_exif_loaded 再更新或设为 "-"
+                if shot_time_value != "-" and str(shot_time_value).strip():
+                    self.info_time_items['shot_time'].setText(1, _strip_timezone_for_display(str(shot_time_value)))
                 self.info_time_items['import_time'].setText(1, str(import_time_value or "-"))
                 self.info_time_items['create_time'].setText(1, create_time.strftime('%Y-%m-%d %H:%M:%S'))
-                self.info_time_items['modify_time'].setText(1, modify_time.strftime('%Y-%m-%d %H:%M:%S'))
-                self.info_time_items['access_time'].setText(1, access_time.strftime('%Y-%m-%d %H:%M:%S'))
+                self.info_time_items['modify_time'].setText(1, modify_time.strftime('%Y-%m-%d %H:%M:%S') if modify_time else "-")
+                self.info_time_items['access_time'].setText(1, access_time.strftime('%Y-%m-%d %H:%M:%S') if access_time else "-")
             else:
-                self.info_time_items['shot_time'].setText(1, str(shot_time_value) if shot_time_value != "-" else "-")
+                self.info_time_items['shot_time'].setText(1, _strip_timezone_for_display(str(shot_time_value)) if shot_time_value != "-" else "-")
                 self.info_time_items['import_time'].setText(1, str(import_time_value or "-"))
                 self.info_time_items['create_time'].setText(1, "-")
                 self.info_time_items['modify_time'].setText(1, "-")
                 self.info_time_items['access_time'].setText(1, "-")
         except Exception as e:
             print(f"[ERROR] info_panel get file time failed: {e}, path={image_path}")
-            self.info_time_items['shot_time'].setText(1, str(shot_time_value) if shot_time_value != "-" else "-")
+            self.info_time_items['shot_time'].setText(1, _strip_timezone_for_display(str(shot_time_value)) if shot_time_value != "-" else "-")
             self.info_time_items['import_time'].setText(1, str(import_time_value or "-"))
             self.info_time_items['create_time'].setText(1, "-")
             self.info_time_items['modify_time'].setText(1, "-")
             self.info_time_items['access_time'].setText(1, "-")
         
-        # EXIF 信息 - 先显示默认值
-        for key in self.info_exif_items:
-            self.info_exif_items[key].setText(1, "-")
+        # EXIF 信息 - 不预清为「-」，保留上一张数据直至本图 EXIF 加载完成（_on_exif_loaded 会覆盖）
         
         # 设置位置和标签
         try:
@@ -1078,22 +1153,33 @@ class InfoPanel(QWidget):
             except Exception:
                 pass
         
-        # 启动后台线程加载EXIF信息
+        # 恢复重绘并延迟布局/EXIF，使 setText 完成后尽快返回，界面先刷新
         try:
-            thread = ExifLoaderThread(request_id, image_path, parent=self)
-            self._exif_loader_threads.add(thread)
-            thread.finished.connect(lambda t=thread: self._exif_loader_threads.discard(t))
-            thread.finished.connect(thread.deleteLater)
-            thread.exif_ready.connect(self._on_exif_loaded)
-            thread.start()
-        except Exception as e:
-            print(f"[ERROR] info_panel start ExifLoaderThread failed: {e}")
-        self._adjust_key_column_width()
-        try:
-            self.info_tree.doItemsLayout()
-            self.info_tree.viewport().update()
+            self.info_tree.setUpdatesEnabled(True)
         except Exception:
             pass
+
+        def _deferred_layout_and_exif():
+            try:
+                self._adjust_key_column_width()
+                self.info_tree.doItemsLayout()
+                self.info_tree.viewport().update()
+            except Exception:
+                pass
+            if exif_data is not None:
+                self._apply_exif_to_ui(image_path, exif_data)
+            else:
+                try:
+                    thread = ExifLoaderThread(request_id, image_path, parent=self)
+                    self._exif_loader_threads.add(thread)
+                    thread.finished.connect(lambda t=thread: self._exif_loader_threads.discard(t))
+                    thread.finished.connect(thread.deleteLater)
+                    thread.exif_ready.connect(self._on_exif_loaded)
+                    thread.start()
+                except Exception as e:
+                    print(f"[ERROR] info_panel start ExifLoaderThread failed: {e}")
+
+        QTimer.singleShot(0, _deferred_layout_and_exif)
 
     def update_folder_info(self, folder_name, stats):
         """更新文件夹统计信息"""

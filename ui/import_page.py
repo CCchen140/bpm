@@ -214,6 +214,11 @@ class ImportPage(BaseImageBrowserPage):
         self._preview_debounce_timer.setSingleShot(True)
         self._preview_debounce_timer.setInterval(60)
         self._preview_debounce_timer.timeout.connect(self._apply_pending_preview)
+        self._pending_info_path = None
+        self._info_debounce_timer = QTimer(self)
+        self._info_debounce_timer.setSingleShot(True)
+        self._info_debounce_timer.setInterval(50)
+        self._info_debounce_timer.timeout.connect(self._apply_pending_info)
         self._pending_detail_nav = None
         self._detail_debounce_timer = QTimer(self)
         self._detail_debounce_timer.setSingleShot(True)
@@ -379,8 +384,73 @@ class ImportPage(BaseImageBrowserPage):
 
     def shutdown(self):
         """页面关闭时的清理工作"""
+        # 停止所有定时器
+        timers = [
+            "_thumb_build_timer",
+            "_focus_progress_timer",
+            "_focus_db_poll_timer",
+            "_focus_threshold_debounce_timer",
+            "_startup_mask_timeout_timer",
+            "_update_timer",
+            "_mouse_busy_timer",
+            "_cache_warmup_timer",
+            "_fast_scroll_timer",
+            "_thumb_resize_timer",
+            "_preview_debounce_timer",
+            "_detail_debounce_timer",
+            "_big_preload_timer",
+            "_stash_save_timer",
+            "_visible_load_timer",
+            "_info_panel_timer",
+            "_focus_detect_print_timer",
+            "_focus_point_overlay_refresh_timer",
+        ]
+        for timer_name in timers:
+            try:
+                timer = getattr(self, timer_name, None)
+                if timer is not None and hasattr(timer, "isActive") and timer.isActive():
+                    timer.stop()
+            except Exception:
+                pass
+        
+        # 停止缩略图加载器
         if hasattr(self, "thumbnail_loader"):
-            self.thumbnail_loader.shutdown()
+            try:
+                self.thumbnail_loader.shutdown()
+            except Exception:
+                pass
+        
+        # 停止对焦检测任务
+        try:
+            if getattr(self, "_focus_detect_running", False):
+                self._focus_detect_running = False
+                ce = getattr(self, "_focus_detect_cancel_event", None)
+                if ce is not None and hasattr(ce, "set"):
+                    ce.set()
+        except Exception:
+            pass
+        
+        # 等待 Python 线程完成（最多2秒）
+        try:
+            import threading
+            import time
+            for i in range(20):  # 最多等待2秒
+                active_threads = [t for t in threading.enumerate() 
+                                  if t is not threading.current_thread() 
+                                  and not t.daemon
+                                  and t.name.startswith(("Focus", "Import"))]
+                if not active_threads:
+                    break
+                time.sleep(0.1)
+        except Exception:
+            pass
+        
+        # 等待后台线程完成（最多500ms）
+        try:
+            from PyQt6.QtCore import QThreadPool
+            QThreadPool.globalInstance().waitForDone(500)
+        except Exception:
+            pass
 
     def release_memory_caches(self):
         try:
@@ -1364,6 +1434,10 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
         self.info_panel = InfoPanel(show_extended_info=False)
+        try:
+            self.info_panel.exif_loaded_for_cache.connect(self._on_info_panel_exif_loaded_for_cache)
+        except Exception:
+            pass
         self.preview_info_splitter = QSplitter(Qt.Orientation.Vertical)
         self.preview_info_splitter.setHandleWidth(1)
         self.preview_info_splitter.setChildrenCollapsible(True)
@@ -2641,6 +2715,7 @@ class ImportPage(BaseImageBrowserPage):
 
     def on_thumbnail_clicked_proxy(self, index, modifiers):
         """处理缩略图点击"""
+        import time
         thumbnails = self.grid_view.thumbnails
         if index < len(thumbnails):
             thumb = thumbnails[index]
@@ -2649,6 +2724,8 @@ class ImportPage(BaseImageBrowserPage):
                     p = None
                     if isinstance(thumb.image_info, dict):
                         p = thumb.image_info.get("path") or thumb.image_info.get("file_path")
+                    self._last_clicked_path = p
+                    self._last_clicked_ts = time.monotonic()
                     self._update_info_panel(p)
                 except Exception:
                     pass
@@ -2660,7 +2737,12 @@ class ImportPage(BaseImageBrowserPage):
                 except Exception:
                     pass
                 try:
-                    self._preload_big_neighbors_grid(index)
+                    prev_idx = getattr(self, "_last_preview_index", None)
+                    direction = 0
+                    if prev_idx is not None and isinstance(prev_idx, int) and prev_idx != index:
+                        direction = 1 if index > prev_idx else -1
+                    self._last_preview_index = index
+                    self._preload_big_neighbors_grid(index, direction)
                 except Exception:
                     pass
                 try:
@@ -2672,15 +2754,23 @@ class ImportPage(BaseImageBrowserPage):
             img_info = self.image_files[index]
             if isinstance(img_info, dict):
                 try:
-                    self._update_info_panel(img_info.get("path") or img_info.get("file_path"))
+                    p = img_info.get("path") or img_info.get("file_path")
+                    self._last_clicked_path = p
+                    self._last_clicked_ts = time.monotonic()
+                    self._update_info_panel(p)
                 except Exception:
                     pass
                 try:
-                    self._schedule_preview(img_info.get("path") or img_info.get("file_path"))
+                    self._schedule_preview(p)
                 except Exception:
                     pass
                 try:
-                    self._preload_big_neighbors_grid(index)
+                    prev_idx = getattr(self, "_last_preview_index", None)
+                    direction = 0
+                    if prev_idx is not None and isinstance(prev_idx, int) and prev_idx != index:
+                        direction = 1 if index > prev_idx else -1
+                    self._last_preview_index = index
+                    self._preload_big_neighbors_grid(index, direction)
                 except Exception:
                     pass
                 try:
@@ -2977,6 +3067,20 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
+    def _get_initial_magnifier_lens_radius(self):
+        """本次会话内保存的放大镜半径优先，否则从 Settings 读取，保证 60～360。"""
+        r = getattr(self, "_last_magnifier_lens_radius", None)
+        if r is not None and 60 <= int(r) <= 360:
+            return int(r)
+        try:
+            r = SettingsManager.instance().get("image_detail/magnifier_lens_radius", 150)
+            r = int(r or 150)
+            if 60 <= r <= 360:
+                return r
+        except Exception:
+            pass
+        return None
+
     def show_detail_panel(self, index: int, compare_indices=None):
         try:
             self._detail_last_index = int(index)
@@ -3022,6 +3126,7 @@ class ImportPage(BaseImageBrowserPage):
                 show_stash_controls=True,
                 db_table_name="import_cache",
                 big_cache_context="import",
+                initial_magnifier_lens_radius=self._get_initial_magnifier_lens_radius(),
             )
             self.center_stack_layout.addWidget(self.detail_panel)
         except Exception as e:
@@ -3064,6 +3169,16 @@ class ImportPage(BaseImageBrowserPage):
             last_idx = None
         try:
             if hasattr(self, "detail_panel") and self.detail_panel:
+                try:
+                    get_views = getattr(self.detail_panel, "_get_active_views", None)
+                    views = list(get_views()) if callable(get_views) else []
+                    v = views[0] if views else getattr(self.detail_panel, "view", None)
+                    if v is not None:
+                        r = getattr(v, "lens_radius", None)
+                        if r is not None and 60 <= int(r) <= 360:
+                            self._last_magnifier_lens_radius = int(r)
+                except Exception:
+                    pass
                 self.detail_panel.hide()
                 self.detail_panel.setParent(None)
                 self.detail_panel.deleteLater()
@@ -3963,33 +4078,24 @@ class ImportPage(BaseImageBrowserPage):
         return base or "-"
 
     def _update_info_panel(self, image_path):
-        """更新信息面板 - 极速版本，避免任何阻塞操作"""
-        import time
-        import traceback
-        t_start = time.time()
-        
+        """更新信息面板 - P0 防抖：仅设待处理路径并启动 50ms 定时器，主线程不做 I/O。缓存命中时立即更新，不等待防抖。"""
         try:
             panel = getattr(self, "info_panel", None)
             if panel is None:
                 return
         except Exception:
             return
-
         try:
-            # 快速路径：直接使用传入的路径，不做复杂解析
             p1 = ""
             if image_path:
                 try:
                     p1 = str(image_path).strip()
-                    # 只处理最简单的file://前缀
                     if p1.lower().startswith("file:///"):
                         p1 = p1[8:]
                     elif p1.lower().startswith("file://"):
                         p1 = p1[7:]
                 except Exception:
                     p1 = ""
-            
-            # 如果传入的路径为空，尝试从grid_view获取（避免get_selected_files）
             if not p1:
                 try:
                     idx = int(getattr(self.grid_view, "last_selected_index", -1))
@@ -4000,41 +4106,172 @@ class ImportPage(BaseImageBrowserPage):
                             p1 = str(info.get("path") or info.get("file_path") or "").strip()
                 except Exception:
                     pass
-            
-            # 立即更新基本信息（不阻塞UI）
-            try:
-                panel.update_info(p1, None)
-            except Exception as e:
-                print(f"[ERROR] _update_info_panel panel.update_info failed: {e}")
-                traceback.print_exc()
-            
-            # 虚拟文件模式下，耗时计算放后台线程
-            try:
-                cur = str(getattr(self, "_current_folder_path", "") or "")
-            except Exception:
-                cur = ""
-            
-            if p1 and bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?")):
-                # 初始化缓存
-                if not hasattr(self, "_info_panel_cache"):
-                    self._info_panel_cache = {}
-                
-                cache_key = f"{p1}_{cur}"
+            if not p1:
+                self._pending_info_path = p1
+                if self._info_debounce_timer.isActive():
+                    self._info_debounce_timer.stop()
+                self._info_debounce_timer.start()
+                return
+            cur = str(getattr(self, "_current_folder_path", "") or "")
+            is_virtual = bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (
+                cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?"))
+            if hasattr(self, "_info_panel_cache") and self._info_panel_cache:
                 current_time = int(__import__('time').time())
-                
-                # 检查缓存（2秒内有效）
-                cached = self._info_panel_cache.get(cache_key)
-                if cached and (current_time - cached.get("time", 0)) < 2:
-                    ctx = cached.get("ctx")
-                    # 使用缓存数据更新
-                    try:
-                        panel.update_info(p1, ctx)
-                    except Exception:
-                        pass
+                if is_virtual:
+                    cache_key = f"{p1}_{cur}"
+                    cached = self._info_panel_cache.get(cache_key)
+                    if cached and (current_time - cached.get("time", 0)) < 30:
+                        try:
+                            panel.update_info(p1, cached.get("ctx"), io_data=cached.get("io_data"), exif_data=cached.get("exif_data"))
+                            return
+                        except Exception:
+                            pass
                 else:
-                    # 启动后台线程计算
-                    self._start_info_panel_update_worker(p1, cur, cache_key, current_time)
-            
+                    _cached = self._info_panel_cache.get(p1)
+                    if _cached and (current_time - _cached.get("time", 0)) < 30:
+                        try:
+                            panel.update_info(p1, None, io_data=_cached.get("io_data"), exif_data=_cached.get("exif_data"))
+                            return
+                        except Exception:
+                            pass
+            self._pending_info_path = p1
+            if self._info_debounce_timer.isActive():
+                self._info_debounce_timer.stop()
+            self._info_debounce_timer.start()
+        except Exception:
+            pass
+
+    def _on_info_panel_exif_loaded_for_cache(self, path: str, exif_data: dict):
+        """EXIF 加载完成后回写页面级缓存，下次命中时无需再拉 EXIF。"""
+        try:
+            if not path or not hasattr(self, "_info_panel_cache") or not exif_data:
+                return
+            for k in list(self._info_panel_cache):
+                if k == path or k.startswith(path + "_"):
+                    self._info_panel_cache[k]["exif_data"] = exif_data
+        except Exception:
+            pass
+
+    def _apply_pending_info(self):
+        """防抖到期：主线程仅设路径，文件/DB I/O 在后台 Worker 中执行，保证线程隔离。"""
+        p1 = getattr(self, "_pending_info_path", None)
+        try:
+            self._pending_info_path = None
+        except Exception:
+            pass
+        if not p1:
+            return
+        try:
+            panel = getattr(self, "info_panel", None)
+            if panel is None:
+                return
+        except Exception:
+            return
+        try:
+            panel.set_path_only(p1)
+        except Exception:
+            pass
+        try:
+            cur = str(getattr(self, "_current_folder_path", "") or "")
+        except Exception:
+            cur = ""
+        is_virtual = bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (
+            cur.startswith("virtual://focus_detect?") or cur.startswith("virtual://focus_detect_burst?"))
+        if is_virtual:
+            if not hasattr(self, "_info_panel_cache"):
+                self._info_panel_cache = {}
+            cache_key = f"{p1}_{cur}"
+            current_time = int(__import__('time').time())
+            cached = self._info_panel_cache.get(cache_key)
+            if cached and (current_time - cached.get("time", 0)) < 30:
+                try:
+                    from utils.log_manager import LogManager
+                    LogManager.instance().info(f"[InfoPanelCache] virtual hit path={p1[-80:] if len(p1) > 80 else p1}")
+                    panel.update_info(p1, cached.get("ctx"), io_data=cached.get("io_data"), exif_data=cached.get("exif_data"))
+                except Exception:
+                    pass
+                return
+            self._start_info_panel_update_worker(p1, cur, cache_key, current_time)
+            return
+        # P3 方案 8：非虚拟模式页面级缓存，同一会话内再次选中已查过的路径直接读缓存，避免重复 I/O
+        if not hasattr(self, "_info_panel_cache"):
+            self._info_panel_cache = {}
+        _current_time = int(__import__('time').time())
+        _cached = self._info_panel_cache.get(p1)
+        if _cached and (_current_time - _cached.get("time", 0)) < 30:
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().info(f"[InfoPanelCache] page hit path={p1[-80:] if len(p1) > 80 else p1}")
+                panel.update_info(p1, None, io_data=_cached.get("io_data"), exif_data=_cached.get("exif_data"))
+            except Exception:
+                pass
+            return
+        try:
+            from utils.log_manager import LogManager
+            LogManager.instance().info(f"[InfoPanelCache] page miss path={p1[-80:] if len(p1) > 80 else p1}")
+        except Exception:
+            pass
+        from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
+        import os
+
+        class InfoIOSignals(QObject):
+            finished = pyqtSignal(str, dict, object)
+
+        class InfoPanelIOWorker(QRunnable):
+            def __init__(self, parent, path: str, signals: InfoIOSignals):
+                super().__init__()
+                self.parent = parent
+                self.path = path
+                self.signals = signals
+
+            def run(self):
+                io_data = {}
+                try:
+                    if self.path and os.path.exists(self.path):
+                        io_data["file_size"] = os.path.getsize(self.path)
+                        io_data["create_time"] = os.path.getctime(self.path)
+                        io_data["modify_time"] = os.path.getmtime(self.path)
+                        io_data["access_time"] = os.path.getatime(self.path)
+                except Exception:
+                    pass
+                try:
+                    rec = None
+                    if hasattr(self.parent, "db"):
+                        rec = self.parent.db.get_result_by_path(self.path, table_name="bird_results")
+                    if not rec and hasattr(self.parent, "db"):
+                        rec = self.parent.db.get_result_by_path(self.path, table_name="import_cache")
+                    io_data["record"] = rec if isinstance(rec, dict) else None
+                except Exception:
+                    io_data["record"] = None
+                self.signals.finished.emit(self.path, io_data, None)
+
+        sigs = InfoIOSignals(self)
+        sigs.finished.connect(self._on_info_io_worker_finished)
+        worker = InfoPanelIOWorker(self, p1, sigs)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_info_io_worker_finished(self, path: str, io_data: dict, context):
+        """主线程回调：用后台 worker 的 io_data 更新 info_panel，并写入页面级缓存（P3）。"""
+        try:
+            if not hasattr(self, "_info_panel_cache"):
+                self._info_panel_cache = {}
+            _t = int(__import__('time').time())
+            self._info_panel_cache[path] = {"time": _t, "io_data": io_data or {}}
+            if len(self._info_panel_cache) > 100:
+                _sorted = sorted(self._info_panel_cache.keys(), key=lambda k: self._info_panel_cache[k].get("time", 0))
+                for _k in _sorted[: len(_sorted) - 100]:
+                    self._info_panel_cache.pop(_k, None)
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().info(f"[InfoPanelCache] written path={path[-80:] if len(path) > 80 else path} size={len(self._info_panel_cache)}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            panel = getattr(self, "info_panel", None)
+            if panel is not None:
+                panel.update_info(path, context, io_data=io_data)
         except Exception:
             pass
 
@@ -4063,29 +4300,28 @@ class ImportPage(BaseImageBrowserPage):
         self._info_panel_timer.start(100)  # 延迟100ms执行
     
     def _execute_info_panel_update(self):
-        """执行信息面板更新（防抖后）"""
+        """执行信息面板更新（防抖后）；同时只允许 1 个 worker 在跑，避免虚拟模式连续点击导致内存激增。"""
         if not hasattr(self, "_info_panel_pending") or not self._info_panel_pending:
             return
-        
+        if getattr(self, "_info_panel_worker_running", False):
+            return
         # 只处理最后一个待更新的
         items = list(self._info_panel_pending.items())
         self._info_panel_pending.clear()
-        
         if not items:
             return
-        
         # 获取最后一个（最新的）
         _, params = items[-1]
         p1 = params["p1"]
         cur = params["cur"]
         cache_key = params["cache_key"]
         current_time = params["current_time"]
-        
+        self._info_panel_worker_running = True
         # 使用线程池执行
         from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
         
         class WorkerSignals(QObject):
-            finished = pyqtSignal(str, dict, str, int)
+            finished = pyqtSignal(str, dict, str, int, object)
         
         class InfoPanelWorker(QRunnable):
             def __init__(self, parent, p1, cur, cache_key, current_time):
@@ -4098,11 +4334,28 @@ class ImportPage(BaseImageBrowserPage):
                 self.signals = WorkerSignals()
             
             def run(self):
+                import os
+                io_data = {}
                 try:
-                    ctx = self._compute_context()
-                    self.signals.finished.emit(self.p1, ctx, self.cache_key, self.current_time)
+                    if self.p1 and os.path.exists(self.p1):
+                        io_data["file_size"] = os.path.getsize(self.p1)
+                        io_data["create_time"] = os.path.getctime(self.p1)
+                        io_data["modify_time"] = os.path.getmtime(self.p1)
+                        io_data["access_time"] = os.path.getatime(self.p1)
                 except Exception:
                     pass
+                try:
+                    rec = None
+                    if hasattr(self.parent, "db"):
+                        rec = self.parent.db.get_result_by_path(self.p1, table_name="bird_results") or self.parent.db.get_result_by_path(self.p1, table_name="import_cache")
+                    io_data["record"] = rec if isinstance(rec, dict) else None
+                except Exception:
+                    io_data["record"] = None
+                try:
+                    ctx = self._compute_context()
+                    self.signals.finished.emit(self.p1, ctx, self.cache_key, self.current_time, io_data)
+                except Exception:
+                    self.signals.finished.emit(self.p1, None, self.cache_key, self.current_time, io_data)
             
             def _compute_context(self):
                 # 使用缩略图缓存快速获取信息
@@ -4169,31 +4422,58 @@ class ImportPage(BaseImageBrowserPage):
         
         # 创建并启动工作线程
         worker = InfoPanelWorker(self, p1, cur, cache_key, current_time)
-        worker.signals.finished.connect(self._on_info_panel_worker_finished)
+        worker.signals.finished.connect(self._on_info_panel_worker_finished_wrapper)
         QThreadPool.globalInstance().start(worker)
     
-    def _on_info_panel_worker_finished(self, p1: str, ctx: dict, cache_key: str, current_time: int):
-        """后台线程完成回调"""
-        # 更新缓存
-        if not hasattr(self, "_info_panel_cache"):
-            self._info_panel_cache = {}
-        
-        self._info_panel_cache[cache_key] = {"ctx": ctx, "time": current_time}
-        
-        # 清理过期缓存（保留最近100个）
-        if len(self._info_panel_cache) > 100:
-            sorted_keys = sorted(self._info_panel_cache.keys(), 
-                               key=lambda k: self._info_panel_cache[k].get("time", 0))
-            for old_key in sorted_keys[:-100]:
-                del self._info_panel_cache[old_key]
-        
-        # 更新UI
+    def _on_info_panel_worker_finished_wrapper(self, *args, **kwargs):
+        if len(args) >= 4:
+            self._on_info_panel_worker_finished(args[0], args[1], args[2], args[3], args[4] if len(args) > 4 else None)
+        else:
+            setattr(self, "_info_panel_worker_running", False)
+
+    def _on_info_panel_worker_finished(self, p1: str = None, ctx: dict = None, cache_key: str = None, current_time: int = None, io_data=None):
+        """后台线程完成回调；仅主线程更新 UI，io_data 由 worker 在后台计算，保证线程隔离。"""
+        # 参数保护：如果缺少必要参数，直接返回
+        if p1 is None or cache_key is None or current_time is None:
+            self._info_panel_worker_running = False
+            return
         try:
-            panel = getattr(self, "info_panel", None)
-            if panel is not None:
-                panel.update_info(p1, ctx)
-        except Exception:
-            pass
+            # 更新缓存
+            if not hasattr(self, "_info_panel_cache"):
+                self._info_panel_cache = {}
+            self._info_panel_cache[cache_key] = {"ctx": ctx, "time": current_time, "io_data": io_data or {}}
+            # 清理过期缓存（保留最近100个）
+            if len(self._info_panel_cache) > 100:
+                sorted_keys = sorted(self._info_panel_cache.keys(),
+                                     key=lambda k: self._info_panel_cache[k].get("time", 0))
+                for old_key in sorted_keys[:-100]:
+                    del self._info_panel_cache[old_key]
+            # 更新UI
+            try:
+                panel = getattr(self, "info_panel", None)
+                if panel is not None:
+                    panel.update_info(p1, ctx, io_data=io_data)
+            except Exception:
+                pass
+        except MemoryError:
+            try:
+                if hasattr(self, "_info_panel_cache") and self._info_panel_cache:
+                    self._info_panel_cache.clear()
+            except Exception:
+                pass
+        finally:
+            self._info_panel_worker_running = False
+            try:
+                if getattr(self, "_info_panel_pending", None) and len(self._info_panel_pending) > 0:
+                    from PyQt6.QtCore import QTimer
+                    if hasattr(self, "_info_panel_timer") and self._info_panel_timer is not None:
+                        self._info_panel_timer.stop()
+                    self._info_panel_timer = QTimer(self)
+                    self._info_panel_timer.setSingleShot(True)
+                    self._info_panel_timer.timeout.connect(lambda: self._execute_info_panel_update())
+                    self._info_panel_timer.start(100)
+            except Exception:
+                pass
 
     def clear_preview(self):
         self.current_preview_path = None
@@ -10732,20 +11012,57 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             want_gpu = False
 
+        # 获取检测线程数信息（直接使用用户设置的detect_threads）
+        proc_info = ""
+        try:
+            detect_threads = int(opts.get("detect_threads", 0) or 0)
+            if detect_threads > 0:
+                proc_info = f" | 检测线程: {detect_threads}"
+            else:
+                # 如果没有设置detect_threads，使用旧版逻辑计算
+                cpu_count = int(os.cpu_count() or 4)
+                cpu_count = max(4, cpu_count)
+                reserve_cpu = int(opts.get("reserve_cpu", 0) or 0)
+                if reserve_cpu <= 0:
+                    reserve_cpu = max(1, cpu_count - 4)
+                use_multiprocess = bool(opts.get("use_multiprocess", True))
+                if use_multiprocess:
+                    if want_gpu:
+                        # CUDA可用时默认GPU 100%，否则默认CPU 100%
+                        try:
+                            from utils.system.gpu_utils import is_torch_cuda_usable
+                            cuda_available = is_torch_cuda_usable()
+                        except Exception:
+                            cuda_available = False
+                        default_cpu_gpu_ratio = 0 if cuda_available else 100
+                        cpu_gpu_ratio = int(opts.get("cpu_gpu_ratio", default_cpu_gpu_ratio))
+                        ratio = cpu_gpu_ratio / 100.0
+                        available = max(1, cpu_count - reserve_cpu)
+                        from math import ceil
+                        proc_count = max(1, ceil(available * ratio))
+                        proc_info = f" | 检测线程: {proc_count}"
+                    else:
+                        available = max(1, cpu_count - reserve_cpu)
+                        proc_info = f" | 检测线程: {available}"
+                else:
+                    proc_info = " | 检测线程: 1（单线程）"
+        except Exception:
+            proc_info = ""
+
         if not want_gpu:
-            return "CPU"
+            return f"CPU{proc_info}"
 
         try:
             from utils.system.gpu_utils import is_torch_cuda_usable, get_torch_cuda_check_brief
 
             if bool(is_torch_cuda_usable()):
-                return "GPU"
+                return f"GPU{proc_info}"
             brief = str(get_torch_cuda_check_brief() or "").strip()
             if brief:
-                return f"CPU（GPU不可用：{brief}）"
+                return f"CPU（GPU不可用：{brief}）{proc_info}"
         except Exception:
             pass
-        return "CPU（GPU不可用）"
+        return f"CPU（GPU不可用）{proc_info}"
 
     def _refresh_focus_progress_ui(self):
         """
@@ -12481,8 +12798,12 @@ class ImportPage(BaseImageBrowserPage):
                     "burst_min_count",
                     "burst_fps",
                     "reserve_cpu",
+                    "gpu_batch_size",
+                    "postprocess_workers",
+                    "cpu_gpu_ratio",
                     "per_file_timeout_sec",
                     "progress_callback",
+                    "cancel_event",
                 }
                 try:
                     call_opts = {k: v for k, v in call_opts.items() if k in allowed}
@@ -15517,7 +15838,8 @@ class ImportPage(BaseImageBrowserPage):
         cell_w = max(1, int(cell_w))
         return max(1, int(viewport_w // cell_w))
 
-    def _preload_big_neighbors_grid(self, index: int):
+    def _preload_big_neighbors_grid(self, index: int, direction: int = 0):
+        """P2：按切换方向优先预加载，连续 D 时优先 index+1、+2，连续 A 时优先 index-1、-2"""
         try:
             i = int(index)
         except Exception:
@@ -15526,14 +15848,10 @@ class ImportPage(BaseImageBrowserPage):
             return
         cols = self._get_grid_nav_cols()
         cand = []
-        try:
-            if (i % cols) != 0:
-                cand.append(i - 1)
-        except Exception:
-            cand.append(i - 1)
-        cand.append(i + 1)
-        cand.append(i - cols)
-        cand.append(i + cols)
+        if direction >= 0:
+            cand.extend([i + 1, i + 2, i - 1, i - cols, i + cols])
+        else:
+            cand.extend([i - 1, i - 2, i + 1, i - cols, i + cols])
         paths = []
         for j in cand:
             if j is None:
@@ -17190,6 +17508,9 @@ class ImportPage(BaseImageBrowserPage):
             except Exception:
                 p = None
             if p and p != getattr(self, "current_preview_path", None):
+                import time
+                if time.monotonic() - getattr(self, "_last_clicked_ts", 0) < 0.05 and p == getattr(self, "_last_clicked_path", None):
+                    return
                 try:
                     self._update_info_panel(p)
                 except Exception:

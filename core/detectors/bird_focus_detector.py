@@ -670,6 +670,24 @@ class BirdFocusDetector:
             pass
         return img_small, float(scale_x), float(scale_y), int(orig_w), int(orig_h)
 
+    def preprocess_for_detection(self, image_path: str, af_focus_point=None) -> dict:
+        """
+        预处理阶段：加载图片并缩放，返回预处理结果字典。
+        这是流水线 Stage 1 的入口。
+        """
+        image_small, scale_x, scale_y, orig_w, orig_h = self.load_image_scaled_for_detection(image_path)
+        filename = os.path.basename(str(image_path)) if image_path else ""
+        return {
+            "image_small": image_small,
+            "scale_x": float(scale_x),
+            "scale_y": float(scale_y),
+            "orig_w": int(orig_w),
+            "orig_h": int(orig_h),
+            "image_path": str(image_path),
+            "filename": filename,
+            "af_focus_point": af_focus_point,
+        }
+
     def _run_model(self, source, **kwargs):
         used_device = str(getattr(self, "device", "cpu") or "cpu")
         fallback = False
@@ -733,6 +751,80 @@ class BirdFocusDetector:
                 except Exception:
                     pass
         return out
+
+    def _run_model_batch(self, sources: list, **kwargs):
+        """
+        批量 YOLO 推理，支持 OOM 自动降级。
+        返回与 sources 等长的结果列表；单张时每元素为单图 Results，多张时为 batch 中对应索引的结果。
+        """
+        if not sources:
+            LogManager.instance().debug("[FocusDetect] _run_model_batch: empty sources, return []")
+            return []
+        used_device = str(getattr(self, "device", "cpu") or "cpu")
+        try:
+            import torch
+            if used_device == "cuda" and not torch.cuda.is_available():
+                self.device = "cpu"
+                used_device = "cpu"
+                LogManager.instance().debug("[FocusDetect] _run_model_batch: cuda not available, use cpu")
+        except Exception:
+            self.device = "cpu"
+            used_device = "cpu"
+        batch_size = len(sources)
+        effective_batch = batch_size
+        t0 = time.perf_counter()
+        while effective_batch >= 1:
+            try:
+                batch_slice = sources[:effective_batch]
+                out = self.model(batch_slice, device=used_device, **kwargs)
+                elapsed = time.perf_counter() - t0
+                try:
+                    self._prof_model_calls = int(getattr(self, "_prof_model_calls", 0) or 0) + 1
+                    self._prof_model_s = float(getattr(self, "_prof_model_s", 0.0) or 0.0) + elapsed
+                    self._prof_model_max_s = max(float(getattr(self, "_prof_model_max_s", 0.0) or 0.0), elapsed)
+                except Exception:
+                    pass
+                LogManager.instance().debug(
+                    f"[FocusDetect] _run_model_batch: batch={effective_batch}/{batch_size} "
+                    f"device={used_device} elapsed_s={elapsed:.3f}"
+                )
+                if effective_batch < batch_size:
+                    rest = sources[effective_batch:]
+                    rest_out = self._run_model_batch(rest, **kwargs)
+                    if isinstance(out, list):
+                        return list(out) + list(rest_out)
+                    return [out] + list(rest_out)
+                if isinstance(out, list):
+                    return out
+                return [out]
+            except RuntimeError as e:
+                err_msg = str(e).lower()
+                if "out of memory" in err_msg or "cuda" in err_msg:
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    LogManager.instance().debug(
+                        f"[FocusDetect] _run_model_batch: OOM batch={effective_batch} err={err_msg[:80]}"
+                    )
+                    if effective_batch <= 1:
+                        self.device = "cpu"
+                        used_device = "cpu"
+                        LogManager.instance().debug("[FocusDetect] _run_model_batch: fallback to CPU per-image")
+                        results = []
+                        for src in sources:
+                            try:
+                                r = self.model(src, device="cpu", **kwargs)
+                                results.append(r)
+                            except Exception as e2:
+                                LogManager.instance().debug(f"[FocusDetect] _run_model_batch: cpu single failed {e2}")
+                                results.append(None)
+                        return results
+                    effective_batch = max(1, effective_batch // 2)
+                    continue
+                raise
+        return []
 
     def _resolve_eye_model_path(self) -> str:
         try:
@@ -1685,6 +1777,132 @@ class BirdFocusDetector:
         _set_stats("center_crop")
         _log_slow("center_crop")
         return results, masks_xy_list
+
+    def segment_bird_contours_batch(self, preprocessed_list: list, gpu_batch_size: int = 4) -> list:
+        """
+        批量分割鸟类轮廓。
+        对一批预处理结果做批量YOLO分割，这是流水线 Stage 2 的入口。
+        
+        参数:
+            preprocessed_list: preprocess_for_detection 返回的字典列表
+            gpu_batch_size: 批处理大小
+            
+        返回:
+            与输入列表对应的预处理结果列表，每个元素增加了 results 和 masks_xy_list 字段
+        """
+        if not preprocessed_list:
+            return []
+        
+        # 真正的批量处理版本
+        try:
+            conf0 = float(getattr(self, "initial_conf", 0.15) or 0.15)
+        except Exception:
+            conf0 = 0.15
+        conf0 = float(max(0.0, min(1.0, conf0)))
+        classes_arg = None
+        try:
+            classes_arg = self._get_bird_classes_for_model()
+        except Exception:
+            classes_arg = [14]
+        _kw0 = {"conf": conf0, "verbose": False, "retina_masks": True}
+        if classes_arg is not None:
+            _kw0["classes"] = classes_arg
+        _kw1 = {"conf": 0.05, "verbose": False}
+        if classes_arg is not None:
+            _kw1["classes"] = classes_arg
+
+        batch_size = max(1, int(gpu_batch_size) if gpu_batch_size else len(preprocessed_list))
+        batch_size = min(batch_size, len(preprocessed_list))
+
+        for i, item in enumerate(preprocessed_list):
+            item["results"] = None
+            item["masks_xy_list"] = []
+
+        pending_indices = list(range(len(preprocessed_list)))
+        images = [preprocessed_list[i]["image_small"] for i in pending_indices]
+        if not images:
+            return preprocessed_list
+
+        def run_batch(imgs, kw):
+            if not imgs:
+                return []
+            try:
+                return self._run_model_batch(imgs, **kw)
+            except Exception as e:
+                try:
+                    LogManager.instance().debug(f"[FocusDetect] segment_bird_contours_batch run_batch err={e}")
+                except Exception:
+                    pass
+                return []
+
+        # 第一轮：使用初始置信度批量推理
+        start = 0
+        batch_count = 0
+        total_infer_time = 0.0
+        while start < len(pending_indices):
+            batch_start_time = time.perf_counter()
+            end = min(start + batch_size, len(pending_indices))
+            batch_idx = pending_indices[start:end]
+            batch_imgs = [preprocessed_list[i]["image_small"] for i in batch_idx]
+            out_list = run_batch(batch_imgs, _kw0)
+            batch_end_time = time.perf_counter()
+            batch_infer_time = batch_end_time - batch_start_time
+            total_infer_time += batch_infer_time
+            batch_count += 1
+            for j, idx in enumerate(batch_idx):
+                if j < len(out_list) and out_list[j] is not None:
+                    res = out_list[j] if isinstance(out_list[j], list) else [out_list[j]]
+                    masks = self._extract_masks_xy_list_from_results(res)
+                    if masks:
+                        try:
+                            res[0]._masks_xy_list = masks
+                        except Exception:
+                            pass
+                        preprocessed_list[idx]["results"] = res
+                        preprocessed_list[idx]["masks_xy_list"] = masks
+            start = end
+
+        # 第二轮：对未检出的使用低置信度重试
+        still_pending = [i for i in range(len(preprocessed_list)) if not preprocessed_list[i]["masks_xy_list"]]
+        if still_pending:
+            low_conf_imgs = [preprocessed_list[i]["image_small"] for i in still_pending]
+            out_low = run_batch(low_conf_imgs, _kw1)
+            for j, idx in enumerate(still_pending):
+                if j < len(out_low) and out_low[j] is not None:
+                    res = out_low[j] if isinstance(out_low[j], list) else [out_low[j]]
+                    masks = self._extract_masks_xy_list_from_results(res)
+                    if masks:
+                        try:
+                            res[0]._masks_xy_list = masks
+                        except Exception:
+                            pass
+                        preprocessed_list[idx]["results"] = res
+                        preprocessed_list[idx]["masks_xy_list"] = masks
+
+        # 第三轮：仍未检出的逐张使用 center crop 重试
+        still_pending = [i for i in range(len(preprocessed_list)) if not preprocessed_list[i]["masks_xy_list"]]
+        for idx in still_pending:
+            item = preprocessed_list[idx]
+            res, masks = self.segment_bird_contours(
+                item["image_small"],
+                item["filename"],
+                focus_point=item.get("af_focus_point"),
+                image_path=item.get("image_path"),
+            )
+            item["results"] = res
+            item["masks_xy_list"] = masks or []
+
+        try:
+            avg_batch_time = total_infer_time / batch_count if batch_count > 0 else 0.0
+            LogManager.instance().debug(
+                f"[FocusDetect] segment_bird_contours_batch n={len(preprocessed_list)} "
+                f"batch_size={batch_size} batch_count={batch_count} "
+                f"total_infer_s={total_infer_time:.3f} avg_batch_s={avg_batch_time:.3f} "
+                f"still_pending_after_batch={len(still_pending)}"
+            )
+        except Exception:
+            pass
+        return preprocessed_list
 
     def score_birds(self, image: np.ndarray, results, masks_xy_list, filename: str):
         """

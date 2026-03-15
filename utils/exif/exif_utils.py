@@ -144,10 +144,7 @@ def _subprocess_no_console_kwargs() -> dict:
             creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
         except Exception:
             creationflags |= 0x08000000
-        try:
-            creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
-        except Exception:
-            creationflags |= 0x00000008
+        # 不设置 DETACHED_PROCESS，与 CREATE_NO_WINDOW 同时使用可能导致控制台闪烁
         try:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW

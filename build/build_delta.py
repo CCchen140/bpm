@@ -384,13 +384,18 @@ def write_iss_script(
     
     files_content = '\n'.join(files_section) if files_section else '; 没有需要打包的文件'
     
+    # 确保版本号没有 V 前缀，避免重复
+    iss_app_version = str(app_version or "").strip()
+    if iss_app_version.upper().startswith('V'):
+        iss_app_version = iss_app_version[1:]
+    
     # 生成完整的 ISS 内容 - 使用字符串拼接避免转义问题
     lines = []
     lines.append('; 增量升级包安装脚本')
     lines.append('; 由 build_delta.py 自动生成')
     lines.append('')
     lines.append('#define MyAppName "栖图"')
-    lines.append('#define MyAppVersion "' + app_version + '"')
+    lines.append('#define MyAppVersion "' + iss_app_version + '"')
     lines.append('#define MyAppPublisher "cCc"')
     lines.append('#define MyAppExeName "栖图.exe"')
     lines.append('#define MyAppId "74F28464-C26A-47D9-AE73-22E79631B472"')
@@ -511,7 +516,7 @@ def write_iss_script(
     lines.append('end;')
     lines.append('')
     lines.append('[Tasks]')
-    lines.append('Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "其他任务:"; Flags: unchecked')
+    lines.append('Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "其他任务:"; Flags: checkedonce')
     lines.append('')
     lines.append('[Dirs]')
     lines.append('Name: "{app}"; Permissions: users-full')
@@ -677,7 +682,11 @@ def main():
     
     # 生成 iss 脚本
     print("\\n生成安装脚本...")
-    iss_output = os.path.join(root, "build", "installer", f"update_V{app_version}_{app_flavor or 'none'}_update{args.update_num}.iss")
+    # 确保版本号没有 V 前缀，避免重复
+    iss_version = str(app_version or "").strip()
+    if iss_version.upper().startswith('V'):
+        iss_version = iss_version[1:]
+    iss_output = os.path.join(root, "build", "installer", f"update_V{iss_version}_{app_flavor or 'none'}_update{args.update_num}.iss")
     
     iss_path = write_iss_script(
         iss_output,
@@ -768,7 +777,11 @@ def main():
     print(f"\n下一步:")
     print(f"  1. 使用 Inno Setup 打开: {iss_path}")
     print(f"  2. 点击 Build -> Compile 编译安装包")
-    print(f"  3. 输出文件: build/installer/栖图_V{app_version}_{app_flavor or 'none'}_update{args.update_num}.exe")
+    # 确保版本号没有 V 前缀，避免重复
+    display_version = str(app_version or "").strip()
+    if display_version.upper().startswith('V'):
+        display_version = display_version[1:]
+    print(f"  3. 输出文件: build/installer/栖图_V{display_version}_{app_flavor or 'none'}_update{args.update_num}.exe")
     print("=" * 80)
     
     return 0

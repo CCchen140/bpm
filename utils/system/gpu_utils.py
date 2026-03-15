@@ -663,6 +663,111 @@ def is_opencv_cuda_usable() -> bool:
         return False
 
 
+def _gpu_utils_debug(msg: str) -> None:
+    """Debug log for GPU utils; no-op if LogManager unavailable."""
+    try:
+        from utils.log_manager import LogManager
+        LogManager.instance().debug(f"[GPUUtils] {msg}")
+    except Exception:
+        pass
+
+
+def get_gpu_vram_info() -> dict:
+    """
+    获取当前 GPU 显存信息。无 CUDA 时返回 available=False，不抛错。
+
+    返回: {
+        "total_mb": int,
+        "free_mb": int,
+        "used_mb": int,
+        "device_name": str,
+        "available": bool,
+        "error": str,
+    }
+    """
+    result = {
+        "total_mb": 0,
+        "free_mb": 0,
+        "used_mb": 0,
+        "device_name": "",
+        "available": False,
+        "error": "",
+    }
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            result["error"] = "CUDA not available"
+            _gpu_utils_debug(f"get_gpu_vram_info: {result['error']}")
+            return result
+        dev = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(dev)
+        total_bytes = int(getattr(props, "total_memory", 0) or 0)
+        result["total_mb"] = total_bytes // (1024 * 1024)
+        result["device_name"] = str(getattr(props, "name", "") or "")
+        try:
+            free_bytes, total_alloc = torch.cuda.mem_get_info(dev)
+            result["free_mb"] = int(free_bytes) // (1024 * 1024)
+            result["used_mb"] = result["total_mb"] - result["free_mb"]
+        except Exception:
+            try:
+                result["used_mb"] = int(torch.cuda.memory_allocated(dev)) // (1024 * 1024)
+                result["free_mb"] = max(0, result["total_mb"] - result["used_mb"])
+            except Exception:
+                result["free_mb"] = 0
+        result["available"] = True
+        _gpu_utils_debug(
+            f"get_gpu_vram_info: total_mb={result['total_mb']} free_mb={result['free_mb']} "
+            f"used_mb={result['used_mb']} device={result['device_name'][:32]}"
+        )
+        return result
+    except ImportError:
+        result["error"] = "PyTorch not installed"
+        _gpu_utils_debug(f"get_gpu_vram_info: {result['error']}")
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        _gpu_utils_debug(f"get_gpu_vram_info: error={e}")
+        return result
+
+
+def recommend_gpu_batch_size(
+    model_size: str,
+    target_size: int,
+    vram_info: dict | None = None,
+) -> int:
+    """
+    根据显存与模型规模推荐 GPU batch size。
+    无 GPU 或 vram_info["available"] 为 False 时返回 1。
+    """
+    if vram_info is None:
+        vram_info = get_gpu_vram_info()
+    if not vram_info.get("available", False):
+        _gpu_utils_debug("recommend_gpu_batch_size: no GPU, return 1")
+        return 1
+    free_mb = int(vram_info.get("free_mb", 0) or 0)
+    reserve_mb = 500
+    available_mb = max(0, free_mb - reserve_mb)
+    model_lower = str(model_size or "x").strip().lower()
+    base_mb = {"n": 200, "s": 300, "m": 500, "l": 700, "x": 900}.get(model_lower, 900)
+    per_image_mb = {"n": 50, "s": 80, "m": 120, "l": 180, "x": 250}.get(model_lower, 250)
+    try:
+        ts = int(target_size or 640)
+    except Exception:
+        ts = 640
+    scale = (ts / 640.0) ** 2
+    per_image_mb = int(per_image_mb * scale)
+    if available_mb <= base_mb:
+        _gpu_utils_debug(f"recommend_gpu_batch_size: available_mb={available_mb} <= base_mb={base_mb}, return 1")
+        return 1
+    batch = (available_mb - base_mb) // max(1, per_image_mb)
+    batch = max(1, min(16, batch))
+    _gpu_utils_debug(
+        f"recommend_gpu_batch_size: model={model_lower} target_size={ts} "
+        f"free_mb={free_mb} -> batch={batch}"
+    )
+    return batch
+
+
 class GPUScaler:
     _checked = False
     _available = False
@@ -754,4 +859,60 @@ class GPUScaler:
             out_bpl = int(out.strides[0])
             return QImage(out.data, new_w, new_h, out_bpl, QImage.Format.Format_RGB888).copy()
         except Exception:
+            return None
+
+    @classmethod
+    def scale_numpy(
+        cls,
+        arr: np.ndarray,
+        target_w: int,
+        target_h: int,
+        interpolation=None,
+        keep_aspect: bool = True,
+    ) -> np.ndarray | None:
+        """
+        直接对 numpy BGR 数组做 GPU 缩放，省去 QImage 转换。
+        CUDA/OpenCL 路径: upload → resize → download（3 步）。
+        不可用或异常时返回 None，调用方需 fallback 到 cv2.resize。
+        """
+        if arr is None or not hasattr(arr, "shape") or arr.size == 0:
+            return None
+        try:
+            if bool(getattr(cls, "_suspended", False)):
+                return None
+        except Exception:
+            return None
+        if not cls.is_available():
+            return None
+        try:
+            h, w = int(arr.shape[0]), int(arr.shape[1])
+            if w <= 0 or h <= 0:
+                return None
+            if keep_aspect:
+                scale = min(float(target_w) / w, float(target_h) / h)
+                new_w = max(1, int(round(w * scale)))
+                new_h = max(1, int(round(h * scale)))
+            else:
+                new_w = max(1, int(target_w))
+                new_h = max(1, int(target_h))
+            if new_w == w and new_h == h:
+                return arr.copy()
+            interp = interpolation if interpolation is not None else cv2.INTER_LINEAR
+            if cls._backend == "cuda":
+                gpu_mat = cv2.cuda_GpuMat()
+                gpu_mat.upload(arr)
+                resized = cv2.cuda.resize(gpu_mat, (new_w, new_h), interpolation=interp)
+                out = resized.download()
+            elif cls._backend == "opencl":
+                umat = cv2.UMat(arr)
+                resized = cv2.resize(umat, (new_w, new_h), interpolation=interp)
+                out = resized.get()
+            else:
+                return None
+            if out is None:
+                return None
+            _gpu_utils_debug(f"scale_numpy: {w}x{h} -> {new_w}x{new_h} backend={cls._backend}")
+            return np.ascontiguousarray(out)
+        except Exception as e:
+            _gpu_utils_debug(f"scale_numpy: error={e}")
             return None

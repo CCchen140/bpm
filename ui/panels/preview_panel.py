@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QSlider,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QRect, QEvent
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QRect, QEvent, QRunnable, QThreadPool, QObject
 from PyQt6.QtGui import QPixmap, QImage, QColor, QPainter, QRadialGradient, QBrush, QIcon, QImageReader
 from ui.utils.icon_loader import qta
 import os
@@ -22,6 +22,105 @@ from ui.widgets.rating_filter_widget import StarRatingWidget
 from ui.utils.color_manager import ColorManager
 from cache.big_image_cache_manager import BigImageCacheManager
 import json
+
+
+def _decode_image_to_qimage_off_main_thread(image_path: str, max_long_edge: int = 1600) -> "QImage | None":
+    """在非主线程中解码图片为 QImage，供 PreviewLoadWorker 调用。仅做 I/O 与解码，不触碰任何 Qt 控件。"""
+    if not image_path or not os.path.exists(image_path):
+        return None
+    ext = ""
+    try:
+        ext = os.path.splitext(str(image_path))[1].lower()
+    except Exception:
+        pass
+    qimage = None
+    if ext and ext not in set([str(x).lower() for x in (raw_exts or [])]):
+        try:
+            from utils.system.stderr_suppressor import suppress_stderr_fd
+            with suppress_stderr_fd():
+                reader = QImageReader(image_path)
+                reader.setAutoTransform(True)
+            try:
+                size = reader.size()
+            except Exception:
+                size = None
+            max_edge = max(800, min(2048, max(1600, max_long_edge)))
+            if size is not None and size.isValid():
+                try:
+                    w, h = int(size.width()), int(size.height())
+                    if w > 0 and h > 0:
+                        long_edge = max(w, h)
+                        if long_edge > max_edge:
+                            if w >= h:
+                                tw, th = int(max_edge), max(1, int(h * (max_edge / max(1, w))))
+                            else:
+                                th, tw = int(max_edge), max(1, int(w * (max_edge / max(1, h))))
+                            reader.setScaledSize(QSize(tw, th))
+                except Exception:
+                    pass
+            with suppress_stderr_fd():
+                qimage = reader.read()
+        except Exception:
+            qimage = None
+    if qimage is None or qimage.isNull():
+        try:
+            cv_img = load_image(image_path)
+            if cv_img is not None:
+                cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                height, width, channel = cv_img.shape
+                bytes_per_line = 3 * width
+                qimage = QImage(cv_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        except Exception:
+            qimage = None
+    if qimage is None or qimage.isNull():
+        try:
+            qimage = QImage(image_path)
+        except Exception:
+            return None
+    return qimage if (qimage is not None and not qimage.isNull()) else None
+
+
+class _PreviewLoadSignals(QObject):
+    """仅用于跨线程信号，保证 finished 在主线程槽中执行。"""
+    finished = pyqtSignal(str, object, int, object)  # path, QImage, generation, error_msg
+
+
+class PreviewLoadWorker(QRunnable):
+    """后台解码预览图，不触碰 UI；解码完成后通过信号将 QImage 传回主线程，由主线程更新 UI。"""
+
+    def __init__(self, image_path: str, generation: int, cache: "BigImageCacheManager", signals: _PreviewLoadSignals):
+        super().__init__()
+        self.image_path = image_path
+        self.generation = generation
+        self._cache = cache
+        self._signals = signals
+        self._max_long_edge = 1600
+
+    def set_max_long_edge(self, value: int):
+        self._max_long_edge = max(800, min(2048, value))
+
+    def run(self):
+        import os
+        # P1 优化：在后台线程检查文件是否存在，避免主线程阻塞
+        if not self.image_path or not os.path.exists(self.image_path):
+            self._signals.finished.emit(self.image_path, None, self.generation, "文件不存在")
+            return
+        try:
+            qimg = _decode_image_to_qimage_off_main_thread(self.image_path, self._max_long_edge)
+        except Exception:
+            qimg = None
+        if qimg is None or qimg.isNull():
+            self._signals.finished.emit(self.image_path, None, self.generation, "解码失败")
+            return
+        try:
+            self._cache.put(self.image_path, qimg)
+        except Exception:
+            pass
+        try:
+            self._signals.finished.emit(self.image_path, qimg.copy(), self.generation, None)
+        except Exception:
+            self._signals.finished.emit(self.image_path, None, self.generation, "信号发送失败")
+
 
 class PreviewPanel(QWidget):
     """图片预览面板"""
@@ -54,6 +153,9 @@ class PreviewPanel(QWidget):
         self._panning = False
         self._last_pan_pos = None
         self._vert_collapsed = False
+        self._preview_load_gen = 0
+        self._preview_load_signals = _PreviewLoadSignals(self)
+        self._preview_load_signals.finished.connect(self._on_preview_load_finished)
         
         # 色标颜色映射 (与 ImageThumbnail 保持一致)
         self.LABEL_COLORS = {
@@ -86,7 +188,7 @@ class PreviewPanel(QWidget):
             k = ""
         if k in ("focus_detect_ui/show_subject_rect", "focus_detect_ui/show_focus_point"):
             try:
-                self.update_image_size()
+                self._mark_image_dirty()
             except Exception:
                 pass
         
@@ -254,7 +356,7 @@ class PreviewPanel(QWidget):
         except Exception:
             pass
         try:
-            self.update_image_size()
+            self._mark_image_dirty()
         except Exception:
             pass
 
@@ -266,7 +368,7 @@ class PreviewPanel(QWidget):
             self._set_zoom_percent(100)
         except Exception:
             try:
-                self.update_image_size()
+                self._mark_image_dirty()
             except Exception:
                 pass
 
@@ -506,7 +608,7 @@ class PreviewPanel(QWidget):
         """)
         try:
             if self.current_original_pixmap is not None:
-                QTimer.singleShot(0, self.update_image_size)
+                self._mark_image_dirty()
         except Exception:
             pass
 
@@ -555,28 +657,11 @@ class PreviewPanel(QWidget):
     def load_image(self, image_path):
         """加载并在预览区显示图片"""
         self.current_image_path = image_path
-        
+
         if not image_path:
             # 清空显示，不显示"图片不存在"，保持空白或显示之前的统计信息(如果没被清空的话)
             # 但这里我们清空它，以便 clear_preview 能正常工作
-            self.image_label.setText("") 
-            self.image_label.setPixmap(QPixmap())
-            self.current_original_pixmap = None
-            self._overlay_bbox = None
-            self._overlay_focus_point = None
-            self._overlay_orig_size = None
-            self.bottom_widget.hide()
-            try:
-                self.zoom_out_btn.setEnabled(False)
-                self.zoom_in_btn.setEnabled(False)
-                self.zoom_slider.setEnabled(False)
-                self.zoom_reset_btn.setEnabled(False)
-            except Exception:
-                pass
-            return
-
-        if not os.path.exists(image_path):
-            self.image_label.setText("图片不存在")
+            self.image_label.setText("")
             self.image_label.setPixmap(QPixmap())
             self.current_original_pixmap = None
             self._overlay_bbox = None
@@ -593,12 +678,6 @@ class PreviewPanel(QWidget):
             return
 
         try:
-            try:
-                self.current_original_pixmap = None
-                self.image_label.setPixmap(QPixmap())
-            except Exception:
-                pass
-
             cached = None
             try:
                 cached = self._big_cache.get(image_path)
@@ -608,7 +687,7 @@ class PreviewPanel(QWidget):
                 pixmap = QPixmap.fromImage(cached)
                 if not pixmap.isNull():
                     self.current_original_pixmap = pixmap
-                    self.update_image_size()
+                    self._mark_image_dirty()
                     self.image_label.setText("")
                     if self.is_expanded:
                         self.bottom_widget.show()
@@ -620,101 +699,28 @@ class PreviewPanel(QWidget):
                     except Exception:
                         pass
                     return
-            ext = ""
+            # P0 优化：缓存未命中时在后台解码；不清空当前画面，保留旧图直至新图就绪后直接切换，避免闪烁
+            # P1 优化：将 os.path.exists 检查也移到后台线程，避免主线程阻塞
+            self._preview_load_gen += 1
+            self.current_image_path = image_path
+            self._overlay_bbox = None
+            self._overlay_focus_point = None
+            self._overlay_orig_size = None
+            max_edge = 1600
             try:
-                ext = os.path.splitext(str(image_path))[1].lower()
-            except Exception:
-                ext = ""
-
-            pixmap = None
-            qimage = None
-            if ext and ext not in set([str(x).lower() for x in (raw_exts or [])]):
-                try:
-                    from utils.system.stderr_suppressor import suppress_stderr_fd
-
-                    with suppress_stderr_fd():
-                        reader = QImageReader(image_path)
-                        reader.setAutoTransform(True)
-                    try:
-                        size = reader.size()
-                    except Exception:
-                        size = None
-
-                    try:
-                        panel_size = self.size()
-                        margins = self.main_layout.contentsMargins()
-                        bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
-                        top_height = self.top_widget.height()
-                        available_width = panel_size.width() - margins.left() - margins.right() - 4
-                        available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
-                        max_edge = int(max(800, min(2048, max(available_width, available_height))))
-                    except Exception:
-                        max_edge = 1600
-
-                    if size is not None and size.isValid():
-                        try:
-                            w = int(size.width())
-                            h = int(size.height())
-                        except Exception:
-                            w = 0
-                            h = 0
-                        if w > 0 and h > 0:
-                            long_edge = max(w, h)
-                            if long_edge > max_edge:
-                                if w >= h:
-                                    tw = int(max_edge)
-                                    th = max(1, int(h * (tw / max(1, w))))
-                                else:
-                                    th = int(max_edge)
-                                    tw = max(1, int(w * (th / max(1, h))))
-                                reader.setScaledSize(QSize(tw, th))
-
-                    with suppress_stderr_fd():
-                        qimage = reader.read()
-                    if qimage is not None and not qimage.isNull():
-                        pixmap = QPixmap.fromImage(qimage)
-                except Exception:
-                    pixmap = None
-                    qimage = None
-
-            if pixmap is None or pixmap.isNull():
-                cv_img = load_image(image_path)
-                if cv_img is not None:
-                    cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-                    height, width, channel = cv_img.shape
-                    bytes_per_line = 3 * width
-                    qimage = QImage(cv_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
-                    pixmap = QPixmap.fromImage(qimage)
-                else:
-                    pixmap = QPixmap(image_path)
-
-            if pixmap.isNull():
-                self.image_label.setText("无法加载图片")
-                self.image_label.setPixmap(QPixmap())
-                self.current_original_pixmap = None
-                self.bottom_widget.hide()
-                return
-            try:
-                if qimage is None:
-                    qimage = pixmap.toImage()
-                if qimage is not None and not qimage.isNull():
-                    self._big_cache.put(image_path, qimage)
+                panel_size = self.size()
+                margins = self.main_layout.contentsMargins()
+                bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+                top_height = self.top_widget.height()
+                available_width = panel_size.width() - margins.left() - margins.right() - 4
+                available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
+                max_edge = int(max(800, min(2048, max(available_width, available_height))))
             except Exception:
                 pass
-            
-            self.current_original_pixmap = pixmap
-            self.update_image_size()
-            self.image_label.setText("")
-            
-            if self.is_expanded:
-                self.bottom_widget.show()
-            try:
-                self.zoom_out_btn.setEnabled(True)
-                self.zoom_in_btn.setEnabled(True)
-                self.zoom_slider.setEnabled(True)
-                self.zoom_reset_btn.setEnabled(True)
-            except Exception:
-                pass
+            worker = PreviewLoadWorker(image_path, self._preview_load_gen, self._big_cache, self._preview_load_signals)
+            worker.set_max_long_edge(max_edge)
+            QThreadPool.globalInstance().start(worker)
+            return
             
         except Exception as e:
             try:
@@ -737,13 +743,65 @@ class PreviewPanel(QWidget):
             except Exception:
                 pass
 
+    def _on_preview_load_finished(self, path: str, qimage, generation: int, error_msg=None):
+        """仅在主线程执行：校验请求未过期后更新 UI，保证线程隔离。"""
+        if path != getattr(self, "current_image_path", None):
+            return
+        if generation != getattr(self, "_preview_load_gen", 0):
+            return
+        try:
+            self.image_label.setToolTip("")
+        except Exception:
+            pass
+        if qimage is None or qimage.isNull():
+            # P1 优化：显示具体的错误信息
+            display_msg = "无法加载图片"
+            if error_msg == "文件不存在":
+                display_msg = "图片不存在"
+            self.image_label.setText(display_msg)
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            self.bottom_widget.hide()
+            try:
+                self.zoom_out_btn.setEnabled(False)
+                self.zoom_in_btn.setEnabled(False)
+                self.zoom_slider.setEnabled(False)
+                self.zoom_reset_btn.setEnabled(False)
+            except Exception:
+                pass
+            return
+        try:
+            pixmap = QPixmap.fromImage(qimage)
+        except Exception:
+            self.image_label.setText("无法加载图片")
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            return
+        if pixmap.isNull():
+            self.image_label.setText("无法加载图片")
+            self.image_label.setPixmap(QPixmap())
+            self.current_original_pixmap = None
+            return
+        self.current_original_pixmap = pixmap
+        self.image_label.setText("")
+        self._mark_image_dirty()
+        if self.is_expanded:
+            self.bottom_widget.show()
+        try:
+            self.zoom_out_btn.setEnabled(True)
+            self.zoom_in_btn.setEnabled(True)
+            self.zoom_slider.setEnabled(True)
+            self.zoom_reset_btn.setEnabled(True)
+        except Exception:
+            pass
+
     def set_overlays(self, bbox=None, focus_point=None, eye_coordinates=None, orig_size=None):
         self._overlay_bbox = bbox
         self._overlay_focus_point = focus_point
         self._overlay_eye_coordinates = eye_coordinates
         self._overlay_orig_size = orig_size
         try:
-            self.update_image_size()
+            self._mark_image_dirty()
         except Exception:
             pass
 
@@ -787,6 +845,17 @@ class PreviewPanel(QWidget):
         """
         self.image_label.setText(html)
         self.image_label.show()
+
+    def _mark_image_dirty(self):
+        """P2：合并同一事件循环内多次 update_image_size，只执行一次"""
+        if getattr(self, "_image_dirty", False):
+            return
+        self._image_dirty = True
+        QTimer.singleShot(0, self._flush_image_update)
+
+    def _flush_image_update(self):
+        self._image_dirty = False
+        self.update_image_size()
 
     def update_image_size(self):
         """根据面板大小调整图片显示"""
@@ -1478,4 +1547,4 @@ class PreviewPanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.update_image_size()
+        self._mark_image_dirty()

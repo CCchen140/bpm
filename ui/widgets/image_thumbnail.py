@@ -1120,7 +1120,14 @@ class ImageThumbnail(QWidget):
         self.update()
 
     def set_selected(self, selected):
+        # P1 优化：避免重复更新和减少重绘
+        if getattr(self, 'selected', None) == selected:
+            return
         self.selected = selected
+        # 如果父容器正在批量更新，跳过单独 update，由父容器统一刷新
+        parent = getattr(self, 'parent', lambda: None)()
+        if parent is not None and getattr(parent, '_batch_selecting', False):
+            return
         self.update()
 
     def resizeEvent(self, event):

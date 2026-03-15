@@ -339,7 +339,7 @@ class InfoPage(QWidget):
         header_layout.addWidget(self._title_label)
         
         # 版本徽章
-        version_str = AppInfoManager.instance().get_app_version()
+        version_str = AppInfoManager.instance().get_full_version()
         self._version_badge = QLabel(f"  {version_str}  ")
         self._version_badge.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self._version_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -511,6 +511,31 @@ class InfoPage(QWidget):
 
         contact_layout.addWidget(bili_row)
 
+        # 软件官网
+        website_row = QWidget()
+        website_layout = QHBoxLayout(website_row)
+        website_layout.setContentsMargins(0, 0, 0, 0)
+        website_layout.setSpacing(15)
+
+        self._website_icon = QLabel()
+        self._website_icon.setFixedSize(24, 24)
+
+        self._website_label = QLabel("软件官网")
+        self._website_label.setFont(QFont("Segoe UI", 11))
+
+        website_url = "https://qitu-photo.top"
+        self._website_value = QLabel(f'<a href="{website_url}">{website_url}</a>')
+        self._website_value.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._website_value.setOpenExternalLinks(True)
+        self._website_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        website_layout.addWidget(self._website_icon)
+        website_layout.addWidget(self._website_label)
+        website_layout.addStretch()
+        website_layout.addWidget(self._website_value)
+
+        contact_layout.addWidget(website_row)
+
         self._bili_tip = QLabel("如有bug或者任何建议，请使用以下方法联系我，后续会优先在QQ群内放出测试版")
         self._bili_tip.setWordWrap(True)
         self._bili_tip.setFont(QFont("Segoe UI", 9))
@@ -659,6 +684,21 @@ class InfoPage(QWidget):
             """)
         if hasattr(self, "_bili_tip"):
             self._bili_tip.setStyleSheet(f"color: {secondary_text};")
+        # 软件官网图标
+        if hasattr(self, "_website_icon"):
+            self._website_icon.setPixmap(qta.icon('mdi6.web', color=accent_color).pixmap(24, 24))
+        if hasattr(self, "_website_label"):
+            self._website_label.setStyleSheet(f"color: {secondary_text};")
+        if hasattr(self, "_website_value"):
+            self._website_value.setStyleSheet(f"""
+                QLabel {{
+                    color: {primary_text};
+                }}
+                QLabel a {{
+                    color: {primary_text};
+                    text-decoration: underline;
+                }}
+            """)
 
     def copy_id(self):
         clipboard = QApplication.clipboard()

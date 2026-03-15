@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QSplitter,
     QScrollArea,
+    QSlider,
 )
 from ui.utils.icon_loader import qta
 
@@ -426,7 +427,7 @@ class FocusDetectDialog(BasePopupDialog):
         except Exception:
             pass
         try:
-            self.folder_list.itemChanged.connect(lambda _it: (self._update_folder_selection_label(), self._apply_folder_filter()))
+            self.folder_list.itemChanged.connect(lambda _it: (self._update_folder_selection_label(), self._apply_folder_filter(), self._update_detect_threads()))
         except Exception:
             pass
         folder_layout.addWidget(self.folder_list, 1)
@@ -626,11 +627,25 @@ class FocusDetectDialog(BasePopupDialog):
         self.burst_fps_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
         form.addRow("连拍频率(FPS):", self.burst_fps_spin)
 
-        self.reserve_cpu_spin = QSpinBox()
-        self.reserve_cpu_spin.setRange(0, 128)
-        self.reserve_cpu_spin.setValue(4)
-        self.reserve_cpu_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
-        form.addRow("最低CPU保留核心数:", self.reserve_cpu_spin)
+        # 检测CPU核心数，计算检测线程数
+        try:
+            cpu_count = int(os.cpu_count() or 4)
+        except Exception:
+            cpu_count = 4
+        cpu_count = max(4, cpu_count)
+        # 默认检测线程数：全部CPU核心数减4
+        default_threads = max(1, cpu_count - 4)
+        
+        self.detect_threads_spin = QSpinBox()
+        self.detect_threads_spin.setRange(1, cpu_count)
+        self.detect_threads_spin.setValue(default_threads)
+        self.detect_threads_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
+        self.detect_threads_label = QLabel(f"自动")
+        self.detect_threads_label.setStyleSheet(f"color: {text_color}; font-size: 11px;")
+        threads_row = QHBoxLayout()
+        threads_row.addWidget(self.detect_threads_spin)
+        threads_row.addWidget(self.detect_threads_label, 1)
+        form.addRow("检测线程数:", threads_row)
 
         params_layout.addLayout(form)
 
@@ -1320,7 +1335,23 @@ class FocusDetectDialog(BasePopupDialog):
         self.target_size_spin.setValue(int(self.settings_manager.get("focus_detect/target_size", 640)))
         self.burst_min_count_spin.setValue(int(self.settings_manager.get("focus_detect/burst_min_count", 10)))
         self.burst_fps_spin.setValue(int(self.settings_manager.get("focus_detect/burst_fps", 20)))
-        self.reserve_cpu_spin.setValue(int(self.settings_manager.get("focus_detect/reserve_cpu", 4)))
+        # 计算默认检测线程数（全部CPU核心数减4）
+        try:
+            cpu_count = int(os.cpu_count() or 4)
+        except Exception:
+            cpu_count = 4
+        cpu_count = max(4, cpu_count)
+        default_threads = max(1, cpu_count - 4)
+        # 检测线程数设置（兼容旧版reserve_cpu设置）
+        threads_value = int(self.settings_manager.get("focus_detect/detect_threads", 0))
+        if threads_value <= 0:
+            # 尝试读取旧版设置
+            old_reserve = int(self.settings_manager.get("focus_detect/reserve_cpu", 0))
+            if old_reserve > 0:
+                threads_value = max(1, cpu_count - old_reserve)
+            else:
+                threads_value = default_threads
+        self.detect_threads_spin.setValue(threads_value)
         try:
             action = str(self.settings_manager.get("focus_detect/post_action", "none") or "none").strip().lower()
         except Exception:
@@ -1375,7 +1406,183 @@ class FocusDetectDialog(BasePopupDialog):
             self._update_finish_action_ui()
         except Exception:
             pass
+        try:
+            self._init_gpu_controls()
+        except Exception:
+            pass
         self._loading_settings = False
+
+    def _calc_detect_threads(self, use_gpu: bool = False, task_count: int = 0) -> int:
+        """计算推荐的检测线程数
+        
+        参数:
+            use_gpu: 是否使用GPU
+            task_count: 任务数量
+            
+        返回:
+            推荐的检测线程数
+        """
+        try:
+            cpu_count = int(os.cpu_count() or 4)
+        except Exception:
+            cpu_count = 4
+        cpu_count = max(4, cpu_count)
+        
+        # 根据任务数量计算推荐的线程数
+        # 线性增长模式：GPU模式每8个文件1个线程，CPU模式每4个文件1个线程
+        if task_count > 0:
+            if use_gpu:
+                # GPU模式：每8个文件增加1个线程
+                recommended = max(1, (task_count + 7) // 8)
+                # GPU模式上限可以更高
+                recommended = min(recommended, 16)
+            else:
+                # CPU模式：每4个文件增加1个线程
+                recommended = max(1, (task_count + 3) // 4)
+                # CPU模式上限为CPU核心数-4
+                recommended = min(recommended, max(1, cpu_count - 4))
+            
+            # 确保不超过CPU核心数
+            return min(recommended, cpu_count)
+        
+        # 没有任务数信息时，使用默认计算
+        if not use_gpu:
+            # 纯CPU模式：使用全部-4
+            threads = max(1, cpu_count - 4)
+        else:
+            # GPU模式：使用大部分核心
+            threads = max(1, cpu_count - 2)
+        
+        return min(threads, cpu_count)
+
+    def _on_use_gpu_toggled(self, checked: bool):
+        try:
+            enabled = bool(checked)
+            
+            # 根据GPU开关状态更新推荐的检测线程数
+            if hasattr(self, "detect_threads_spin") and self.detect_threads_spin:
+                # 获取当前选中的文件总数
+                task_count = self._get_selected_image_count()
+                recommended = self._calc_detect_threads(use_gpu=enabled, task_count=task_count)
+                self.detect_threads_spin.setValue(recommended)
+                # 更新标签显示
+                mode = "GPU" if enabled else "CPU"
+                self.detect_threads_label.setText(f"{mode}模式推荐 ({task_count}个文件)")
+        except Exception:
+            pass
+
+    def _update_detect_threads(self):
+        """根据当前选中的文件数量更新检测线程数"""
+        try:
+            if not hasattr(self, "detect_threads_spin") or not self.detect_threads_spin:
+                return
+            
+            # 获取当前是否使用GPU
+            use_gpu = False
+            if hasattr(self, "_option_items") and self._option_items:
+                use_gpu_cb = self._option_items.get("use_gpu")
+                if use_gpu_cb and use_gpu_cb.isChecked():
+                    use_gpu = True
+            
+            # 获取选中的文件数量
+            task_count = self._get_selected_image_count()
+            
+            # 计算推荐的线程数
+            recommended = self._calc_detect_threads(use_gpu=use_gpu, task_count=task_count)
+            
+            # 更新控件值和标签
+            self.detect_threads_spin.setValue(recommended)
+            mode = "GPU" if use_gpu else "CPU"
+            self.detect_threads_label.setText(f"{mode}模式推荐 ({task_count}个文件)")
+        except Exception:
+            pass
+
+    def _get_selected_image_count(self) -> int:
+        """获取当前选中的文件总数"""
+        try:
+            selected_folders = self._collect_selected_folders()
+            if not selected_folders:
+                return 0
+            total = 0
+            for folder in selected_folders:
+                count = int(self._folder_image_counts.get(folder, 0) or 0)
+                if count > 0:
+                    total += count
+            return total
+        except Exception:
+            return 0
+
+    def _init_gpu_controls(self):
+        # 先设置为默认状态（CPU模式），避免卡顿
+        self._cuda_checking = True
+        try:
+            use_gpu_cb = (self._option_items or {}).get("use_gpu")
+            if use_gpu_cb is not None:
+                # 暂时禁用GPU选项，等待检测完成
+                use_gpu_cb.setEnabled(False)
+                use_gpu_cb.setToolTip("正在检测CUDA环境...")
+        except Exception:
+            pass
+        try:
+            self.gpu_batch_size_spin.setEnabled(False)
+            self.gpu_recommend_label.setText("检测中...")
+        except Exception:
+            pass
+        
+        # 在后台线程中执行CUDA检测
+        from threading import Thread
+        def _check_cuda_async():
+            cuda_available = False
+            try:
+                from utils.system.gpu_utils import is_torch_cuda_usable
+                cuda_available = bool(is_torch_cuda_usable())
+            except Exception:
+                cuda_available = False
+            
+            # 在主线程中更新UI
+            try:
+                from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    self, "_on_cuda_check_finished",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(bool, cuda_available)
+                )
+            except Exception:
+                # 如果invokeMethod失败，直接调用
+                try:
+                    self._on_cuda_check_finished(cuda_available)
+                except Exception:
+                    pass
+        
+        Thread(target=_check_cuda_async, daemon=True, name="CUDACheck").start()
+    
+    def _on_cuda_check_finished(self, cuda_available: bool):
+        """CUDA检测完成后的回调"""
+        self._cuda_checking = False
+        try:
+            from utils.log_manager import LogManager
+            LogManager.instance().debug(f"[FocusDetectDialog] _on_cuda_check_finished cuda_available={cuda_available}")
+        except Exception:
+            pass
+        
+        if not cuda_available:
+            try:
+                use_gpu_cb = (self._option_items or {}).get("use_gpu")
+                if use_gpu_cb is not None:
+                    use_gpu_cb.setChecked(False)
+                    use_gpu_cb.setEnabled(False)
+                    use_gpu_cb.setToolTip("未检测到可用的CUDA环境")
+            except Exception:
+                pass
+        else:
+            try:
+                use_gpu_cb = (self._option_items or {}).get("use_gpu")
+                if use_gpu_cb is not None:
+                    use_gpu_cb.setEnabled(True)
+                    use_gpu_cb.setToolTip("")
+            except Exception:
+                pass
+            self._on_use_gpu_toggled(bool((self._option_items or {}).get("use_gpu") and (self._option_items or {}).get("use_gpu").isChecked()))
 
     def _queue_settings_sync(self):
         if getattr(self, "_loading_settings", False):
@@ -1435,7 +1642,13 @@ class FocusDetectDialog(BasePopupDialog):
         except Exception:
             pass
         try:
-            self.reserve_cpu_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/reserve_cpu", int(v)))
+            self.detect_threads_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/detect_threads", int(v)))
+        except Exception:
+            pass
+        try:
+            use_gpu_cb = (self._option_items or {}).get("use_gpu")
+            if use_gpu_cb is not None:
+                use_gpu_cb.toggled.connect(self._on_use_gpu_toggled)
         except Exception:
             pass
         try:
@@ -1568,7 +1781,8 @@ class FocusDetectDialog(BasePopupDialog):
             "target_size": int(self.target_size_spin.value()),
             "burst_min_count": int(self.burst_min_count_spin.value()),
             "burst_fps": int(self.burst_fps_spin.value()),
-            "reserve_cpu": int(self.reserve_cpu_spin.value()),
+            "detect_threads": int(self.detect_threads_spin.value()),
+            "reserve_cpu": max(1, int(os.cpu_count() or 4) - int(self.detect_threads_spin.value())),  # 兼容旧版
             "post_action": self._get_post_action(),
             "post_dir": str(self.post_dir_label.text() or "").strip(),
             "finish_action": str(self.finish_action_combo.currentData() if hasattr(self, "finish_action_combo") else "none" or "none"),

@@ -66,10 +66,7 @@ def _subprocess_no_console_kwargs() -> dict:
             creationflags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
         except Exception:
             creationflags |= 0x08000000
-        try:
-            creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
-        except Exception:
-            creationflags |= 0x00000008
+        # 不设置 DETACHED_PROCESS，与 CREATE_NO_WINDOW 同时使用可能导致控制台闪烁
         try:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -1171,6 +1168,12 @@ def get_gpu_detail_metrics(timeout_s: float = 1.2) -> dict:
         if value is None:
             continue
         detail[key] = _clamp_percent(value)
+    # 调试日志
+    try:
+        from utils.log_manager import LogManager
+        LogManager.instance().debug(f"[GPUDetail] source={engine_source} engines={engines} detail={detail}")
+    except Exception:
+        pass
     if mem_detail:
         for key, value in mem_detail.items():
             if detail.get(key) is None:
@@ -1193,7 +1196,7 @@ def get_gpu_detail_metrics(timeout_s: float = 1.2) -> dict:
         except Exception:
             pass
     detail["engine_source"] = str(engine_source or "")
-    detail["detail_available"] = any(detail.get(k) is not None for k in ("compute", "decode", "encode", "copy", "3d"))
+    detail["detail_available"] = any(detail.get(k) is not None for k in ("compute", "3d"))
     try:
         detail["vendor"] = str(detail.get("vendor") or _guess_gpu_vendor(str(detail.get("name") or "")) or "")
     except Exception:

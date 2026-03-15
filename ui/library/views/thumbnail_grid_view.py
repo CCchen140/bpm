@@ -302,6 +302,12 @@ class ThumbnailGridView(QWidget):
             delta = ("row", 1)
         if delta is None:
             return False
+        import time
+        now = time.monotonic()
+        last = getattr(self, "_last_nav_ts", 0.0)
+        if now - last < 0.08:
+            return True
+        self._last_nav_ts = now
         cur = self._get_nav_current_index()
         if cur is None:
             cur = 0
@@ -702,22 +708,36 @@ class ThumbnailGridView(QWidget):
         # 但是，现在没有 Controller。
         # 所以我先照搬原逻辑，之后再拆分到 SelectionController。
         
-        if modifiers & Qt.KeyboardModifier.ShiftModifier and self.last_selected_index >= 0:
-            start = min(self.last_selected_index, index)
-            end = max(self.last_selected_index, index)
-            for i, thumb in enumerate(self.thumbnails):
-                if start <= i <= end:
-                    thumb.set_selected(True)
-                elif not (modifiers & Qt.KeyboardModifier.ControlModifier):
-                    thumb.set_selected(False)
-        elif modifiers & Qt.KeyboardModifier.ControlModifier:
-            self.thumbnails[index].set_selected(not self.thumbnails[index].selected)
-            self.last_selected_index = index
-        else:
-            for i, thumb in enumerate(self.thumbnails):
-                thumb.set_selected(i == index)
-            self.last_selected_index = index
-            
+        # P1 优化：批量更新选择状态，减少重绘次数
+        self._batch_selecting = True
+        try:
+            if modifiers & Qt.KeyboardModifier.ShiftModifier and self.last_selected_index >= 0:
+                start = min(self.last_selected_index, index)
+                end = max(self.last_selected_index, index)
+                for i, thumb in enumerate(self.thumbnails):
+                    if start <= i <= end:
+                        thumb.set_selected(True)
+                    elif not (modifiers & Qt.KeyboardModifier.ControlModifier):
+                        thumb.set_selected(False)
+            elif modifiers & Qt.KeyboardModifier.ControlModifier:
+                self.thumbnails[index].set_selected(not self.thumbnails[index].selected)
+                self.last_selected_index = index
+            else:
+                # 普通点击：只更新之前选中的和新选中的，而不是全部
+                prev_selected = getattr(self, 'last_selected_index', -1)
+                if 0 <= prev_selected < len(self.thumbnails) and prev_selected != index:
+                    self.thumbnails[prev_selected].set_selected(False)
+                self.thumbnails[index].set_selected(True)
+                self.last_selected_index = index
+        finally:
+            self._batch_selecting = False
+            # 批量更新完成后统一刷新可见区域
+            try:
+                if hasattr(self, 'thumbnails_container'):
+                    self.thumbnails_container.update()
+            except Exception:
+                pass
+
         self.selectionChanged.emit(self.get_selected_count())
         try:
             if hasattr(self, "scroll_area") and self.scroll_area:

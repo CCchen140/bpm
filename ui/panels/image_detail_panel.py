@@ -10,8 +10,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QGraphicsView, QGraphicsScene, 
                              QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsItem, QFrame, QScrollArea, QSizePolicy,
                              QToolButton, QGraphicsOpacityEffect, QStackedWidget, QSplitter, QApplication, QMenu, QListView, QStyle, QTextBrowser)
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QTimer, QThread, QEvent, QRectF, QObject
-from PyQt6.QtGui import QPixmap, QImage, QIcon, QColor, QPainter, QAction, QTransform, QPainterPath, QBrush, QPen, QRadialGradient, QImageReader, QShortcut
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QPointF, QTimer, QThread, QEvent, QRectF, QObject, QRect
+from PyQt6.QtGui import QPixmap, QImage, QIcon, QColor, QPainter, QAction, QTransform, QPainterPath, QBrush, QPen, QRadialGradient, QImageReader, QShortcut, QCursor
 from ui.utils.icon_loader import qta
 
 from utils.file.file import load_image, load_raw_full, raw_exts
@@ -144,6 +144,7 @@ class MagnifierGraphicsView(QGraphicsView):
         if int(getattr(self, "lens_radius", 150) or 150) == int(r):
             return
         self.lens_radius = int(r)
+        self.lens_radius_changed.emit(int(self.lens_radius))
         self.viewport().update()
 
     def toggle_magnifier(self, enabled):
@@ -674,6 +675,14 @@ class ImageAllInfoOverlay(QWidget):
         layout.addWidget(self.container)
 
     def set_html(self, html: str):
+        # 检查对象是否已被删除
+        try:
+            if not self.scroll_area or not self.content:
+                return
+        except RuntimeError:
+            # C++ 对象已被删除
+            return
+        
         try:
             t = str(html or "").strip()
         except Exception:
@@ -688,9 +697,13 @@ class ImageAllInfoOverlay(QWidget):
             return
         
         # 保存当前滚动位置（使用 QScrollArea 的滚动条）
-        scrollbar = self.scroll_area.verticalScrollBar()
-        old_value = scrollbar.value() if scrollbar else 0
-        old_max = scrollbar.maximum() if scrollbar else 0
+        try:
+            scrollbar = self.scroll_area.verticalScrollBar()
+            old_value = scrollbar.value() if scrollbar else 0
+            old_max = scrollbar.maximum() if scrollbar else 0
+        except RuntimeError:
+            # C++ 对象已被删除
+            return
         
         try:
             self.content.setHtml(t)
@@ -978,7 +991,7 @@ class ImageDetailPanel(QWidget):
     stash_toggle_requested = pyqtSignal(str)
     _all_info_html_ready = pyqtSignal(str)  # 后台线程 EXIF 数据准备就绪
 
-    def __init__(self, image_list, current_index=0, parent=None, compare_indices=None, cache_manager=None, show_action_overlay: bool = True, show_import_to_library_button: bool = False, show_stash_controls: bool = False, db_table_name: str = "bird_results", big_cache_context: str = "library"):
+    def __init__(self, image_list, current_index=0, parent=None, compare_indices=None, cache_manager=None, show_action_overlay: bool = True, show_import_to_library_button: bool = False, show_stash_controls: bool = False, db_table_name: str = "bird_results", big_cache_context: str = "library", initial_magnifier_lens_radius=None):
         super().__init__(parent)
         try:
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1049,6 +1062,7 @@ class ImageDetailPanel(QWidget):
         # 已移除从设置中读取 zoom_scale 的逻辑，强制默认 1.0
         self.zoom_scale = 1.0
         self._big_cache_context = str(big_cache_context or "library")
+        self.initial_magnifier_lens_radius = initial_magnifier_lens_radius
         self.big_image_cache = BigImageCacheManager.instance(self._big_cache_context)
         self._detail_decode_max_edge = 2560
         if self._big_cache_context.strip().lower() == "import":
@@ -1066,6 +1080,9 @@ class ImageDetailPanel(QWidget):
         self._deferred_load_timer.setSingleShot(True)
         self._deferred_load_timer.timeout.connect(self._flush_deferred_big_image_load)
         self._deferred_load_index = None
+        self._viewport_resize_reload_timer = QTimer(self)
+        self._viewport_resize_reload_timer.setSingleShot(True)
+        self._viewport_resize_reload_timer.timeout.connect(self._reload_at_viewport_resolution)
         self._auto_nav_timer = QTimer(self)
         self._auto_nav_timer.setSingleShot(True)
         self._auto_nav_timer.timeout.connect(self._auto_nav_on_timeout)
@@ -1270,26 +1287,42 @@ class ImageDetailPanel(QWidget):
         return uuid_val
 
     def _get_record_for_path(self, path: str):
-        if self._db_table_name == "import_cache":
+        """获取数据库记录，带重试机制避免对焦检测后数据库忙导致崩溃"""
+        import time
+        last_error = None
+        for attempt in range(3):
             try:
-                return self.db.get_result_by_path(path, table_name="import_cache")
-            except Exception:
-                return None
-        # 首先尝试通过路径直接获取记录（与 info_panel 保持一致）
-        try:
-            record = self.db.get_result_by_path(path, table_name=self._db_table_name)
-            if isinstance(record, dict) and record:
-                return record
-        except Exception:
-            pass
-        # 如果路径查找失败，尝试通过 UUID 获取
-        uuid_val = self._ensure_uuid_for_path(path)
-        if not uuid_val:
-            return None
-        try:
-            return self.db.get_result_by_uuid(uuid_val, table_name=self._db_table_name)
-        except Exception:
-            return None
+                if self._db_table_name == "import_cache":
+                    try:
+                        return self.db.get_result_by_path(path, table_name="import_cache")
+                    except Exception:
+                        return None
+                # 首先尝试通过路径直接获取记录（与 info_panel 保持一致）
+                try:
+                    record = self.db.get_result_by_path(path, table_name=self._db_table_name)
+                    if isinstance(record, dict) and record:
+                        return record
+                except Exception as e:
+                    last_error = e
+                    pass
+                # 如果路径查找失败，尝试通过 UUID 获取
+                uuid_val = self._ensure_uuid_for_path(path)
+                if not uuid_val:
+                    return None
+                try:
+                    return self.db.get_result_by_uuid(uuid_val, table_name=self._db_table_name)
+                except Exception as e:
+                    last_error = e
+                    return None
+            except Exception as e:
+                last_error = e
+                # 如果可能是数据库忙，等待后重试
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                break
+        # 所有重试都失败，返回 None
+        return None
 
     def _prefetch_compare_subject_state(self):
         if not self.compare_mode:
@@ -2024,7 +2057,15 @@ class ImageDetailPanel(QWidget):
                                 self._all_info_html_ready.disconnect()
                             except Exception:
                                 pass
-                            self._all_info_html_ready.connect(lambda html: all_overlay.set_html(html))
+                            def _safe_set_html(html):
+                                try:
+                                    overlay = getattr(self, "all_info_overlay_main", None)
+                                    if overlay is not None:
+                                        overlay.set_html(html)
+                                except RuntimeError:
+                                    # C++ 对象已被删除
+                                    pass
+                            self._all_info_html_ready.connect(_safe_set_html)
                             
                             # 启动后台线程
                             import threading
@@ -2096,7 +2137,13 @@ class ImageDetailPanel(QWidget):
                                     parts.append(f"<div><span style='color:{label_color};'>{_esc(k)}</span>：<span style='color:{value_color};'>{_esc(v)}</span></div>")
 
                             html = "<div style='line-height: 1.45;'>" + "".join(parts) + "</div>" if parts else ""
-                            all_overlay.set_html(html)
+                            try:
+                                all_overlay = getattr(self, "all_info_overlay_main", None)
+                                if all_overlay is not None:
+                                    all_overlay.set_html(html)
+                            except RuntimeError:
+                                # C++ 对象已被删除
+                                pass
 
                         try:
                             if bool(getattr(self, "_all_info_collapsed", False)):
@@ -2648,11 +2695,72 @@ class ImageDetailPanel(QWidget):
         self.main_layout.addWidget(self.center_stack, 1) # 占用主要空间
 
         try:
-            self._apply_saved_magnifier_lens_radius()
+            r = getattr(self, "initial_magnifier_lens_radius", None)
+            if r is not None and 60 <= int(r) <= 360:
+                ri = int(r)
+                for v in self._get_active_views():
+                    try:
+                        v.set_lens_radius(ri)
+                    except Exception:
+                        pass
+                try:
+                    sm = SettingsManager.instance()
+                    if sm is not None:
+                        sm.set("image_detail/magnifier_lens_radius", ri)
+                        sm.sync()
+                except Exception:
+                    pass
+            else:
+                self._apply_saved_magnifier_lens_radius()
         except Exception:
             pass
         try:
             self._apply_saved_magnification_factor()
+        except Exception:
+            pass
+        # 放大镜模式下，在信息浮层和左右按钮上移动鼠标时也更新放大镜位置（含浮层内子控件，并统一隐藏光标）
+        try:
+            roots = []
+            for w in (self.btn_prev, self.btn_next, self.info_overlay_main, self.all_info_overlay_main, self.all_info_expand_btn, getattr(self, "info_overlay_stack_main", None)):
+                if w is not None:
+                    roots.append(w)
+            for name in ("overlay_main", "info_overlay_left", "info_overlay_right", "overlay_left", "overlay_right"):
+                w = getattr(self, name, None)
+                if w is not None:
+                    roots.append(w)
+            self._magnifier_passthrough_widgets = set(roots)
+            for w in roots:
+                try:
+                    for child in w.findChildren(QWidget):
+                        self._magnifier_passthrough_widgets.add(child)
+                except Exception:
+                    pass
+            for w in self._magnifier_passthrough_widgets:
+                w.installEventFilter(self)
+            # 放大镜开关时同步穿透控件的光标（开=隐藏，关=恢复）
+            def _sync_passthrough_cursor(enabled):
+                try:
+                    passthrough = getattr(self, "_magnifier_passthrough_widgets", set())
+                    for w in passthrough:
+                        try:
+                            if enabled:
+                                w.setCursor(Qt.CursorShape.BlankCursor)
+                            else:
+                                w.unsetCursor()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            self._magnifier_passthrough_sync_cursor = _sync_passthrough_cursor
+            try:
+                self.view.magnifier_toggled.connect(_sync_passthrough_cursor)
+            except Exception:
+                pass
+            try:
+                self.view_left.magnifier_toggled.connect(_sync_passthrough_cursor)
+                self.view_right.magnifier_toggled.connect(_sync_passthrough_cursor)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2743,6 +2851,9 @@ class ImageDetailPanel(QWidget):
 
         def sync_scroll(source, target):
             if self._is_syncing_scroll:
+                return
+            # 对比模式下缩放后短暂忽略同步，避免延迟触发的 valueChanged 把一侧滚动覆盖到另一侧导致"都回中心"
+            if getattr(self, "_zoom_compare_ignore_sync", False):
                 return
 
             # 获取上次的值
@@ -2841,7 +2952,10 @@ class ImageDetailPanel(QWidget):
             pass
 
     def _apply_saved_magnifier_lens_radius(self):
-        sm = getattr(self, "_settings_manager", None)
+        try:
+            sm = SettingsManager.instance()
+        except Exception:
+            sm = getattr(self, "_settings_manager", None)
         if sm is None:
             return
         try:
@@ -2859,7 +2973,10 @@ class ImageDetailPanel(QWidget):
                 pass
 
     def _on_magnifier_lens_radius_changed(self, radius: int):
-        sm = getattr(self, "_settings_manager", None)
+        try:
+            sm = SettingsManager.instance()
+        except Exception:
+            sm = getattr(self, "_settings_manager", None)
         if sm is None:
             return
         try:
@@ -2877,21 +2994,26 @@ class ImageDetailPanel(QWidget):
             pass
 
     def _on_magnification_changed(self, factor: float):
-        """保存放大镜放大倍率到设置"""
+        """保存放大镜放大倍率到设置，并动态提高放大部分解码分辨率"""
         sm = getattr(self, "_settings_manager", None)
-        if sm is None:
-            return
+        if sm is not None:
+            try:
+                f = float(factor)
+            except Exception:
+                return
+            if f < 1.1:
+                f = 1.1
+            if f > 8.0:
+                f = 8.0
+            try:
+                sm.set("image_detail/magnification_factor", float(f))
+                sm.sync()
+            except Exception:
+                pass
         try:
-            f = float(factor)
-        except Exception:
-            return
-        if f < 1.1:
-            f = 1.1
-        if f > 8.0:
-            f = 8.0
-        try:
-            sm.set("image_detail/magnification_factor", float(f))
-            sm.sync()
+            self._update_decode_max_edge_by_viewport()
+            self._viewport_resize_reload_timer.stop()
+            self._viewport_resize_reload_timer.start(400)
         except Exception:
             pass
 
@@ -2914,7 +3036,39 @@ class ImageDetailPanel(QWidget):
             except Exception:
                 pass
 
+    def _forward_magnifier_pos_from_global(self, global_pos):
+        """放大镜模式下，鼠标在浮层/按钮上移动时把位置转发给当前视图，使放大镜继续跟随。"""
+        try:
+            gp = global_pos
+            if hasattr(gp, "toPoint"):
+                gp = gp.toPoint()
+            for v in self._get_active_views():
+                if not getattr(v, "magnifier_enabled", False):
+                    continue
+                vp = v.viewport()
+                r = vp.rect()
+                tl = vp.mapToGlobal(r.topLeft())
+                br = vp.mapToGlobal(r.bottomRight())
+                if QRect(tl, br).contains(gp):
+                    v.set_magnifier_pos(v.mapFromGlobal(gp))
+                    vp.update()
+                    break
+        except Exception:
+            pass
+
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseMove:
+            passthrough = getattr(self, "_magnifier_passthrough_widgets", set())
+            if obj in passthrough:
+                try:
+                    pos = event.globalPosition() if hasattr(event, "globalPosition") else getattr(event, "globalPos", lambda: None)()
+                    if pos is not None:
+                        self._forward_magnifier_pos_from_global(pos)
+                    # 保持放大镜模式下光标隐藏，避免移到浮层/按钮时出现箭头
+                    if any(getattr(v, "magnifier_enabled", False) for v in self._get_active_views()):
+                        obj.setCursor(Qt.CursorShape.BlankCursor)
+                except Exception:
+                    pass
         if event.type() == QEvent.Type.KeyPress:
             if obj == self.view or obj == self.view_left or obj == self.view_right or obj == self.view.viewport() or obj == self.view_left.viewport() or obj == self.view_right.viewport():
                 # 转发给自己的 keyPressEvent 处理
@@ -2948,7 +3102,11 @@ class ImageDetailPanel(QWidget):
                     self._update_overlay_pos(self.view_left.viewport(), self.info_overlay_left, is_info=True)
                 if hasattr(self, "stash_icon_left") and self.stash_icon_left:
                     self._update_stash_icon_pos(self.view_left.viewport(), self.stash_icon_left, self.info_overlay_left)
-                    
+                try:
+                    self._viewport_resize_reload_timer.stop()
+                    self._viewport_resize_reload_timer.start(250)
+                except Exception:
+                    pass
             elif obj == self.view_right or obj == self.view_right.viewport():
                 if hasattr(self, 'overlay_right') and self.overlay_right:
                     self._update_overlay_pos(self.view_right.viewport(), self.overlay_right, is_info=False)
@@ -2956,7 +3114,12 @@ class ImageDetailPanel(QWidget):
                     self._update_overlay_pos(self.view_right.viewport(), self.info_overlay_right, is_info=True)
                 if hasattr(self, "stash_icon_right") and self.stash_icon_right:
                     self._update_stash_icon_pos(self.view_right.viewport(), self.stash_icon_right, self.info_overlay_right)
-                
+                try:
+                    self._viewport_resize_reload_timer.stop()
+                    self._viewport_resize_reload_timer.start(250)
+                except Exception:
+                    pass
+
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
@@ -2969,15 +3132,26 @@ class ImageDetailPanel(QWidget):
             QTimer.singleShot(0, self._update_main_info_stack_layout)
         except Exception:
             pass
-        
+        # 每次显示时恢复保存的放大镜本体大小与倍率（延迟执行，避免被其它初始化覆盖）
+        # 若本次是由页面传入的 initial_magnifier_lens_radius 已应用，则不再用 Settings 覆盖
+        try:
+            if getattr(self, "initial_magnifier_lens_radius", None) is None:
+                QTimer.singleShot(80, self._apply_saved_magnifier_lens_radius)
+            QTimer.singleShot(80, self._apply_saved_magnification_factor)
+        except Exception:
+            pass
+
         # [修复] 确保面板显示时图片适应窗口
-        # 这解决了"即使以100%退出，下次进入还是偏小"的问题
-        # 因为在图片加载时面板可能还不可见(size不对)，导致fit计算错误
         # 只有在showEvent且layout完成(timer=0)后，才能获取正确的viewport尺寸进行fit
         try:
             if hasattr(self, 'pixmap_item') and self.pixmap_item.pixmap() and not self.pixmap_item.pixmap().isNull():
                 self.zoom_scale = 1.0
                 QTimer.singleShot(0, self.fit_image_to_view)
+        except Exception:
+            pass
+        # 根据当前窗口视口更新最大解码分辨率并重新加载，使图片按窗口做最大分辨率缩放
+        try:
+            QTimer.singleShot(50, self._reload_at_viewport_resolution)
         except Exception:
             pass
 
@@ -3804,42 +3978,53 @@ class ImageDetailPanel(QWidget):
         # 根据窗口大小动态调整解码分辨率
         self._update_decode_max_edge_by_viewport()
 
-    def _update_decode_max_edge_by_viewport(self):
-        """根据视口大小动态调整解码分辨率，以显示最大分辨率的图片"""
+    def _reload_at_viewport_resolution(self):
+        """根据当前视口更新最大解码边长并重新加载当前图，使大图按窗口做最大分辨率缩放"""
         try:
-            # 获取当前激活的视图
+            self._update_decode_max_edge_by_viewport()
+            self._is_resolution_reload = True
+            self.load_current_image()
+        except Exception:
+            pass
+
+    def _update_decode_max_edge_by_viewport(self):
+        """根据视口、整体缩放与放大镜倍率动态调整解码分辨率，放大时提高放大部分分辨率"""
+        try:
             views = self._get_active_views()
             if not views:
                 return
-            
-            # 获取最大视口尺寸
             max_viewport_size = 0
             for v in views:
+                if v is None:
+                    continue
                 try:
                     vw = int(v.viewport().width() or 0)
                     vh = int(v.viewport().height() or 0)
                     max_viewport_size = max(max_viewport_size, vw, vh)
                 except Exception:
                     pass
-            
             if max_viewport_size <= 0:
                 return
-            
-            # 考虑缩放因子，预留一些余量
-            # 使用 2x 视口大小作为解码目标，以支持 200% 缩放
-            target_edge = int(max_viewport_size * 2)
-            
-            # 限制最小和最大值
+            zoom_scale = float(getattr(self, "zoom_scale", 1.0) or 1.0)
+            magnifier_active = any(getattr(v, "magnifier_enabled", False) for v in views)
+            max_magnification = 1.0
+            if magnifier_active:
+                for v in views:
+                    try:
+                        f = float(getattr(v, "magnification_factor", 1.0) or 1.0)
+                        max_magnification = max(max_magnification, f)
+                    except Exception:
+                        pass
+            effective_zoom = max(1.0, zoom_scale, max_magnification)
+            target_edge = int(max_viewport_size * 2 * effective_zoom)
             min_edge = 1600
-            max_edge = 4096  # 最大解码分辨率
-            
+            max_edge = 8192
             new_max_edge = max(min_edge, min(target_edge, max_edge))
-            
-            # 只有当变化超过 20% 时才更新，避免频繁调整
             current_edge = int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)
+            if current_edge <= 0:
+                current_edge = 2560
             if abs(new_max_edge - current_edge) / current_edge > 0.2:
                 self._detail_decode_max_edge = new_max_edge
-                # 更新缓存管理器的设置
                 try:
                     if hasattr(self, "big_image_cache") and self.big_image_cache:
                         self.big_image_cache.set_max_long_edge_override(new_max_edge)
@@ -3981,7 +4166,6 @@ class ImageDetailPanel(QWidget):
         html_content = str(getattr(all_overlay, "_html", "") or "").strip()
         try:
             if not html_content:
-                print(f"[DEBUG] all_overlay hiding due to empty html")
                 all_overlay.hide()
                 return
             all_overlay.show()
@@ -4796,7 +4980,7 @@ class ImageDetailPanel(QWidget):
         self._is_zoomed_to_bird = False
         if not self.image_list or self.current_index < 0 or self.current_index >= len(self.image_list):
             return
-            
+        self._update_decode_max_edge_by_viewport()
         img_info = self.image_list[self.current_index]
         path = img_info['path']
         
@@ -5098,44 +5282,128 @@ class ImageDetailPanel(QWidget):
                     self.big_image_cache.put(path, qimg)
             except Exception:
                 pass
+            # 分辨率重载时在改 pixmap 前保存视口中心（按相对位置），避免重载后跳回图片中心
+            _saved_center_ratio = None
+            _compare_saved_left_ratio = None
+            _compare_saved_right_ratio = None
+            if getattr(self, "_is_resolution_reload", False) and not self.compare_mode and self.view and self.pixmap_item.pixmap() and not self.pixmap_item.pixmap().isNull():
+                try:
+                    view = self.view
+                    vp = view.viewport()
+                    if vp and vp.width() > 0 and vp.height() > 0:
+                        pt = view.mapToScene(vp.width() // 2, vp.height() // 2)
+                        old_rect = self.scene.sceneRect()
+                        if old_rect.width() > 0 and old_rect.height() > 0:
+                            _saved_center_ratio = ((pt.x() - old_rect.left()) / old_rect.width(), (pt.y() - old_rect.top()) / old_rect.height())
+                except Exception:
+                    pass
+            if getattr(self, "_is_resolution_reload", False) and self.compare_mode:
+                try:
+                    for view, sc in [(self.view_left, self.scene_left), (self.view_right, self.scene_right)]:
+                        vp = view.viewport()
+                        if vp and vp.width() > 0 and vp.height() > 0:
+                            center_vp = vp.rect().center()
+                            center_in_view = vp.mapTo(view, center_vp)
+                            pt = view.mapToScene(center_in_view)
+                            rect = sc.sceneRect()
+                            if rect.width() > 0 and rect.height() > 0:
+                                r = ((pt.x() - rect.left()) / rect.width(), (pt.y() - rect.top()) / rect.height())
+                                if view is self.view_left:
+                                    _compare_saved_left_ratio = r
+                                else:
+                                    _compare_saved_right_ratio = r
+                except Exception:
+                    pass
             pixmap = QPixmap.fromImage(qimg)
             
             # 始终更新主视图 item (确保切换回单图模式时内容正确)
-            self.pixmap_item.setPixmap(pixmap)
-            self.pixmap_item.setPos(0, 0)
-            self.scene.setSceneRect(self.pixmap_item.boundingRect())
+            # 添加对象存在性检查，避免关闭窗口后回调导致崩溃
+            try:
+                if hasattr(self, 'pixmap_item') and self.pixmap_item is not None:
+                    self.pixmap_item.setPixmap(pixmap)
+                    self.pixmap_item.setPos(0, 0)
+                if hasattr(self, 'scene') and self.scene is not None:
+                    if hasattr(self, 'pixmap_item') and self.pixmap_item is not None:
+                        self.scene.setSceneRect(self.pixmap_item.boundingRect())
+            except RuntimeError:
+                # C++ 对象已被删除
+                return
+            except Exception:
+                pass
             
             if self.compare_mode:
                 # 对比模式：更新右侧视图
-                self.pixmap_item_right.setPixmap(pixmap)
-                self.pixmap_item_right.setPos(0, 0)
-                self._clear_subject_rect_side("right")
-                self._clear_focus_point_side("right")
-                self._fit_view(self.view_right, self.pixmap_item_right)
+                # 添加对象存在性检查
+                try:
+                    if hasattr(self, 'pixmap_item_right') and self.pixmap_item_right is not None:
+                        self.pixmap_item_right.setPixmap(pixmap)
+                        self.pixmap_item_right.setPos(0, 0)
+                        self.scene_right.setSceneRect(self.pixmap_item_right.boundingRect())
+                    self._clear_subject_rect_side("right")
+                    self._clear_focus_point_side("right")
+                except RuntimeError:
+                    # C++ 对象已被删除
+                    return
+                except Exception:
+                    pass
+                # 分辨率重载时保留左右各自小窗口中心，不拉回图片中心
+                if getattr(self, "_is_resolution_reload", False) and (_compare_saved_left_ratio is not None or _compare_saved_right_ratio is not None):
+                    self._is_resolution_reload = False
+                    self._is_syncing_scroll = True
+                    try:
+                        zoom_scale = float(self.zoom_scale or 1.0)
+                        for view, item, saved_ratio in [
+                            (self.view_left, self.pixmap_item_left, _compare_saved_left_ratio),
+                            (self.view_right, self.pixmap_item_right, _compare_saved_right_ratio),
+                        ]:
+                            if not item.pixmap() or item.pixmap().isNull():
+                                continue
+                            sc = view.scene()
+                            sc.setSceneRect(item.boundingRect())
+                            view.resetTransform()
+                            view_rect = view.viewport().rect()
+                            scene_rect = item.boundingRect()
+                            if scene_rect.width() > 0 and scene_rect.height() > 0:
+                                factor_w = view_rect.width() / scene_rect.width()
+                                factor_h = view_rect.height() / scene_rect.height()
+                                scale_fit = min(factor_w, factor_h)
+                                view.scale(scale_fit, scale_fit)
+                                view.scale(zoom_scale, zoom_scale)
+                            if saved_ratio is not None:
+                                new_rect = sc.sceneRect()
+                                if new_rect.width() > 0 and new_rect.height() > 0:
+                                    cx = new_rect.left() + saved_ratio[0] * new_rect.width()
+                                    cy = new_rect.top() + saved_ratio[1] * new_rect.height()
+                                    view.centerOn(QPointF(cx, cy))
+                            if hasattr(view, "horizontalScrollBar"):
+                                view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
+                                view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+                    finally:
+                        self._is_syncing_scroll = False
+                else:
+                    if hasattr(self, 'view_right') and self.view_right is not None and hasattr(self, 'pixmap_item_right') and self.pixmap_item_right is not None:
+                        self._fit_view(self.view_right, self.pixmap_item_right)
+                    if self.pixmap_item_left.pixmap() and not self.pixmap_item_left.pixmap().isNull():
+                        self._fit_view(self.view_left, self.pixmap_item_left)
+                    try:
+                        for view in self._get_active_views():
+                            view.scale(float(self.zoom_scale), float(self.zoom_scale))
+                            if hasattr(view, "horizontalScrollBar"):
+                                view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
+                                view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+                    except Exception:
+                        pass
                 try:
                     QTimer.singleShot(0, self._refresh_subject_rect_overlay)
                     QTimer.singleShot(0, self._refresh_focus_point_overlay)
                 except Exception:
                     pass
-                
+
                 self._update_overlay_data(path, self.overlay_right, self.info_overlay_right)
-                
+
                 # 延迟强制更新位置，确保布局完成后位置正确
                 QTimer.singleShot(50, lambda: self._update_overlay_pos(self.view_right.viewport(), self.overlay_right, is_info=False))
                 QTimer.singleShot(50, lambda: self._update_overlay_pos(self.view_right.viewport(), self.info_overlay_right, is_info=True))
-                
-                # 当右侧图片切换时，左侧图片也恢复一开始的位置和缩放
-                if self.pixmap_item_left.pixmap() and not self.pixmap_item_left.pixmap().isNull():
-                    self._fit_view(self.view_left, self.pixmap_item_left)
-                try:
-                    # 保持当前的缩放比例，不重置
-                    for view in self._get_active_views():
-                        view.scale(float(self.zoom_scale), float(self.zoom_scale))
-                        if hasattr(view, "horizontalScrollBar"):
-                            view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
-                            view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
-                except Exception:
-                    pass
                 try:
                     self.update_zoom_label()
                 except Exception:
@@ -5147,10 +5415,40 @@ class ImageDetailPanel(QWidget):
                     pass
             else:
                 # 单图模式：更新主视图
-                self.rotation_angle = 0
-                self._clear_subject_rect()
-                # 保持当前的缩放比例，不重置
-                self._apply_zoom_scale()
+                # 添加对象存在性检查
+                try:
+                    self.rotation_angle = 0
+                    self._clear_subject_rect()
+                    if getattr(self, "_is_resolution_reload", False) and _saved_center_ratio is not None:
+                        self._is_resolution_reload = False
+                        try:
+                            view = self.view
+                            new_rect = self.scene.sceneRect()
+                            if new_rect.width() > 0 and new_rect.height() > 0:
+                                rx, ry = _saved_center_ratio[0], _saved_center_ratio[1]
+                                scene_center = QPointF(new_rect.left() + rx * new_rect.width(), new_rect.top() + ry * new_rect.height())
+                                old_anchor = view.transformationAnchor()
+                                view.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+                                self._fit_view(view, self.pixmap_item)
+                                view.scale(float(self.zoom_scale), float(self.zoom_scale))
+                                view.centerOn(scene_center)
+                                view.setTransformationAnchor(old_anchor)
+                                if hasattr(view, "horizontalScrollBar"):
+                                    view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
+                                    view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+                            else:
+                                self._apply_zoom_scale()
+                        except Exception:
+                            self._apply_zoom_scale()
+                    elif getattr(self, "_is_resolution_reload", False):
+                        self._is_resolution_reload = False
+                        self._apply_zoom_scale()
+                    else:
+                        self._apply_zoom_scale()
+                except RuntimeError:
+                    return
+                except Exception:
+                    pass
                 try:
                     QTimer.singleShot(0, self._refresh_subject_rect_overlay)
                     QTimer.singleShot(0, self._refresh_focus_point_overlay)
@@ -5158,16 +5456,32 @@ class ImageDetailPanel(QWidget):
                     pass
                 
                 # 更新主 Overlay
-                self._update_overlay_data(path, self.overlay_main, self.info_overlay_main)
+                try:
+                    if hasattr(self, '_update_overlay_data'):
+                        self._update_overlay_data(path, getattr(self, 'overlay_main', None), getattr(self, 'info_overlay_main', None))
+                except RuntimeError:
+                    return
+                except Exception:
+                    pass
                 # 强制置顶并延迟更新位置
                 try:
                     if hasattr(self, "overlay_main") and self.overlay_main:
                         self.overlay_main.raise_()
                 except Exception:
                     pass
-                self.info_overlay_main.raise_()
-                QTimer.singleShot(50, lambda: self._update_overlay_pos(self.view.viewport(), self.overlay_main, is_info=False))
-                QTimer.singleShot(50, self._update_main_info_stack_layout)
+                try:
+                    if hasattr(self, 'info_overlay_main') and self.info_overlay_main is not None:
+                        self.info_overlay_main.raise_()
+                except RuntimeError:
+                    return
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'view') and self.view is not None and hasattr(self, 'overlay_main'):
+                        QTimer.singleShot(50, lambda: self._update_overlay_pos(self.view.viewport(), self.overlay_main, is_info=False))
+                    QTimer.singleShot(50, self._update_main_info_stack_layout)
+                except Exception:
+                    pass
             
             # 更新收藏状态
             self.update_fav_rating_status()
@@ -5353,6 +5667,68 @@ class ImageDetailPanel(QWidget):
             if not self._schedule_deferred_big_image_load(int(self.current_index), delay_ms=140):
                 self.load_current_image()
 
+    def _get_viewport_scene_center(self, view) -> QPointF:
+        """获取当前视口几何中心对应的场景点，使用 2x2 邻域平均避免整数中心带来的左上偏置。"""
+        vp = getattr(view, "viewport", lambda: None)()
+        if vp is None:
+            return QPointF(0, 0)
+        try:
+            w = max(1, int(vp.width() or 0))
+            h = max(1, int(vp.height() or 0))
+            x0 = max(0, (w - 1) // 2)
+            y0 = max(0, (h - 1) // 2)
+            x1 = min(w - 1, x0 + 1)
+            y1 = min(h - 1, y0 + 1)
+            pts = [
+                view.mapToScene(x0, y0),
+                view.mapToScene(x1, y0),
+                view.mapToScene(x0, y1),
+                view.mapToScene(x1, y1),
+            ]
+            sx = sum(float(p.x()) for p in pts) / float(len(pts))
+            sy = sum(float(p.y()) for p in pts) / float(len(pts))
+            return QPointF(sx, sy)
+        except Exception:
+            return QPointF(0, 0)
+
+    def _scale_views_keep_visible_centers(self, views, ratio: float, compare_mode: bool = False):
+        """让每个视图都围绕自己当前显示中心缩放。compare_mode 为 True 时用 translate 精确对齐 viewport 中心，否则用 centerOn。"""
+        centers = []
+        for view in views:
+            try:
+                centers.append(self._get_viewport_scene_center(view))
+            except Exception:
+                centers.append(QPointF(0, 0))
+        for view, scene_center in zip(views, centers):
+            old_anchor = view.transformationAnchor()
+            try:
+                view.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+                view.scale(float(ratio), float(ratio))
+                # 仅对比模式：centerOn 以 view 控件中心为基准会偏，用 translate 把目标点精确挪到 viewport 中心
+                if compare_mode:
+                    vp = view.viewport()
+                    if vp is not None:
+                        pos_in_view = view.mapFromScene(scene_center)
+                        vp_center_in_view = vp.mapTo(view, vp.rect().center())
+                        dx = float(vp_center_in_view.x()) - float(pos_in_view.x())
+                        dy = float(vp_center_in_view.y()) - float(pos_in_view.y())
+                        view.translate(dx, dy)
+                    else:
+                        view.centerOn(scene_center)
+                else:
+                    view.centerOn(scene_center)
+            finally:
+                try:
+                    view.setTransformationAnchor(old_anchor)
+                except Exception:
+                    pass
+            try:
+                if hasattr(view, "horizontalScrollBar"):
+                    view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
+                    view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+            except Exception:
+                pass
+
     def zoom_in(self):
         try:
             self._auto_nav_pause_if_needed()
@@ -5371,15 +5747,23 @@ class ImageDetailPanel(QWidget):
                 ratio = float(new_zoom) / float(old_zoom) if float(old_zoom) > 0 else 1.0
             except Exception:
                 ratio = 1.0
-            for view in self._get_active_views():
-                view.scale(float(ratio), float(ratio))
-                # 缩放后更新 last_value
-                if hasattr(view, "horizontalScrollBar"):
-                    view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
-                    view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+            compare = getattr(self, "compare_mode", False)
+            if compare:
+                for v in self._get_active_views():
+                    for sb in (v.horizontalScrollBar(), v.verticalScrollBar()):
+                        if sb is not None:
+                            sb.blockSignals(True)
+            views = list(self._get_active_views())
+            try:
+                self._scale_views_keep_visible_centers(views, ratio, compare_mode=compare)
+            finally:
+                if compare:
+                    for v in views:
+                        for sb in (v.horizontalScrollBar(), v.verticalScrollBar()):
+                            if sb is not None:
+                                sb.blockSignals(False)
             self.zoom_scale = float(new_zoom)
             self.update_zoom_label()
-            # 刷新鸟眼框位置
             try:
                 QTimer.singleShot(0, self._refresh_eye_rect_overlay)
             except Exception:
@@ -5390,8 +5774,28 @@ class ImageDetailPanel(QWidget):
                     self._settings_manager.sync()
             except Exception:
                 pass
+            try:
+                # 对比模式下，缩放后延迟触发的分辨率重载会重新套一遍 fit/center，
+                # 容易把当前显示中心拉偏；这里保留单图模式重载，对比模式直接跳过。
+                if not compare:
+                    self._update_decode_max_edge_by_viewport()
+                    self._viewport_resize_reload_timer.stop()
+                    self._viewport_resize_reload_timer.start(400)
+                else:
+                    self._viewport_resize_reload_timer.stop()
+            except Exception:
+                pass
+            if compare:
+                self._zoom_compare_ignore_sync = True
+                QTimer.singleShot(250, self._clear_zoom_compare_ignore_sync)
         finally:
             self._is_syncing_scroll = False
+
+    def _clear_zoom_compare_ignore_sync(self):
+        try:
+            self._zoom_compare_ignore_sync = False
+        except Exception:
+            pass
 
     def zoom_out(self):
         try:
@@ -5411,15 +5815,23 @@ class ImageDetailPanel(QWidget):
                 ratio = float(new_zoom) / float(old_zoom) if float(old_zoom) > 0 else 1.0
             except Exception:
                 ratio = 1.0
-            for view in self._get_active_views():
-                view.scale(float(ratio), float(ratio))
-                # 缩放后更新 last_value
-                if hasattr(view, "horizontalScrollBar"):
-                    view.horizontalScrollBar().setProperty("last_value", view.horizontalScrollBar().value())
-                    view.verticalScrollBar().setProperty("last_value", view.verticalScrollBar().value())
+            compare = getattr(self, "compare_mode", False)
+            if compare:
+                for v in self._get_active_views():
+                    for sb in (v.horizontalScrollBar(), v.verticalScrollBar()):
+                        if sb is not None:
+                            sb.blockSignals(True)
+            views = list(self._get_active_views())
+            try:
+                self._scale_views_keep_visible_centers(views, ratio, compare_mode=compare)
+            finally:
+                if compare:
+                    for v in views:
+                        for sb in (v.horizontalScrollBar(), v.verticalScrollBar()):
+                            if sb is not None:
+                                sb.blockSignals(False)
             self.zoom_scale = float(new_zoom)
             self.update_zoom_label()
-            # 刷新鸟眼框位置
             try:
                 QTimer.singleShot(0, self._refresh_eye_rect_overlay)
             except Exception:
@@ -5430,6 +5842,18 @@ class ImageDetailPanel(QWidget):
                     self._settings_manager.sync()
             except Exception:
                 pass
+            try:
+                if not compare:
+                    self._update_decode_max_edge_by_viewport()
+                    self._viewport_resize_reload_timer.stop()
+                    self._viewport_resize_reload_timer.start(400)
+                else:
+                    self._viewport_resize_reload_timer.stop()
+            except Exception:
+                pass
+            if compare:
+                self._zoom_compare_ignore_sync = True
+                QTimer.singleShot(250, self._clear_zoom_compare_ignore_sync)
         finally:
             self._is_syncing_scroll = False
         
@@ -5463,18 +5887,50 @@ class ImageDetailPanel(QWidget):
         views = self._get_active_views()
         if not views:
             return
-            
+
         current_state = views[0].magnifier_enabled
         new_state = not current_state
-        
+
         # 统一倍率：使用第一个视图的倍率作为基准
         base_factor = views[0].magnification_factor
-        
+
         for view in views:
             view.toggle_magnifier(new_state)
             # 开启时强制同步倍率
             if new_state:
                 view.set_magnification(base_factor)
+        # 对比模式下放大镜打开时，立即用当前鼠标位置更新左右视图（使用同一视口相对坐标，避免右侧因坐标在视口外不绘制）
+        if new_state and len(views) >= 2:
+            try:
+                gp = QCursor.pos()
+                if hasattr(gp, "toPoint"):
+                    gp = gp.toPoint()
+                ref_pos = None
+                for v in views:
+                    if not getattr(v, "magnifier_enabled", False):
+                        continue
+                    vp = v.viewport()
+                    p = v.mapFromGlobal(gp)
+                    if vp and vp.rect().contains(p):
+                        ref_pos = p
+                        break
+                if ref_pos is None:
+                    for v in views:
+                        if getattr(v, "magnifier_enabled", False):
+                            vp = v.viewport()
+                            p = v.mapFromGlobal(gp)
+                            if vp:
+                                x = max(0, min(p.x(), vp.width() - 1))
+                                y = max(0, min(p.y(), vp.height() - 1))
+                                ref_pos = QPoint(int(x), int(y))
+                                break
+                if ref_pos is not None:
+                    for v in views:
+                        if getattr(v, "magnifier_enabled", False):
+                            v.set_magnifier_pos(ref_pos)
+                            v.viewport().update()
+            except Exception:
+                pass
 
     def _get_active_views(self):
         if self.compare_mode:

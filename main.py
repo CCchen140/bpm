@@ -3,6 +3,7 @@ import multiprocessing as mp
 from threading import Thread
 import time
 import os
+import json
 import traceback
 from datetime import datetime
 
@@ -87,44 +88,17 @@ def check_single_instance():
         # 如果检查失败，允许启动（避免阻止正常启动）
         return True
 
-def check_process_count():
-    """检查当前进程数量，防止无限启动"""
-    try:
-        import psutil
-        
-        current_pid = os.getpid()
-        current_name = "栖图.exe" if sys.platform == "win32" else "栖图"
-        
-        count = 0
-        pids = []
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                if proc.info['name'] == current_name and proc.info['pid'] != current_pid:
-                    count += 1
-                    pids.append(proc.info['pid'])
-            except Exception:
-                pass
-        
-        # 如果已有 2 个或更多实例在运行，阻止启动（更严格）
-        if count >= 2:
-            print(f"Too many instances running ({count}). Exiting.")
-            _write_crash_log(f"进程数量过多 ({count})，退出启动\n已有进程 PID: {pids}")
-            return False
-        
-        return True
-    except Exception as e:
-        print(f"Process count check failed: {e}")
-        _write_crash_log(f"进程数量检查失败: {e}\n{traceback.format_exc()}")
-        # 如果检查失败，允许启动
-        return True
-
 def setup_exception_hook():
     """设置全局异常钩子，记录崩溃信息"""
     def exception_hook(exc_type, exc_value, exc_tb):
         try:
             error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
-            print(f"CRASH: {error_msg}")
-            _write_crash_log(f"程序崩溃:\n{error_msg}")
+            if exc_type is MemoryError:
+                print(f"Memory low: {exc_value}")
+                _write_crash_log(f"内存不足:\n{error_msg}")
+            else:
+                print(f"CRASH: {error_msg}")
+                _write_crash_log(f"程序崩溃:\n{error_msg}")
         except Exception:
             pass
         # 调用原始异常处理
@@ -215,10 +189,6 @@ if __name__ == "__main__":
     if not is_bird_ipc_service and not check_single_instance():
         sys.exit(1)
     
-    # 检查进程数量（本地识别服务子进程跳过此检查）
-    if not is_bird_ipc_service and not check_process_count():
-        sys.exit(1)
-    
     # 本地识别服务子进程
     if is_bird_ipc_service:
         try:
@@ -263,22 +233,107 @@ if __name__ == "__main__":
     print("Setting OpenGL context sharing...")
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
-    try:
-        from utils.log_manager import LogManager
+    print("Creating QApplication...")
+    app = QApplication(sys.argv)
 
+    # P1：立即显示加载框，将 LogManager/Migration/ColorManager 等放在其后，改善感知速度
+    # 尝试从设置中读取主题配置，使加载窗口初始颜色与主题一致
+    _theme_name = "default"
+    try:
+        from utils.paths import PathManager
+        _pm = PathManager.instance()
+        _setting_path = _pm.get_settings_path()
+        if os.path.exists(_setting_path):
+            with open(_setting_path, "r", encoding="utf-8") as _f:
+                _setting_data = json.load(_f)
+                _theme_name = str(_setting_data.get("general/theme", "default")).lower()
+    except Exception:
+        _theme_name = "default"
+    
+    # 根据主题设置初始颜色
+    if _theme_name in ["dark", "black_orange"]:
+        _bg_top, _bg_bottom, _text_color = "#1E242B", "#0F1419", "#E6EEF5"
+    elif _theme_name == "summer_beach":
+        _bg_top, _bg_bottom, _text_color = "#B7D0DB", "#FFF3D6", "#3A2A1A"
+    elif _theme_name == "sakura":
+        _bg_top, _bg_bottom, _text_color = "#D4B9C7", "#FFF5F8", "#3A2430"
+    elif _theme_name == "neon":
+        _bg_top, _bg_bottom, _text_color = "#2B2450", "#EEF2FF", "#1E1B3A"
+    elif _theme_name == "cyberpunk":
+        _bg_top, _bg_bottom, _text_color = "#2B2340", "#F6EEFF", "#2A163C"
+    elif _theme_name == "ocean":
+        _bg_top, _bg_bottom, _text_color = "#9CC9D6", "#E6F7F3", "#0E2F2A"
+    elif _theme_name == "oriental":
+        _bg_top, _bg_bottom, _text_color = "#A4B2A6", "#F6F1E7", "#3B2D1C"
+    elif _theme_name == "meteor":
+        _bg_top, _bg_bottom, _text_color = "#8AA1BA", "#ECF2FF", "#1D2C4A"
+    elif _theme_name == "tech":
+        _bg_top, _bg_bottom, _text_color = "#8BAAC0", "#E8F4F8", "#1A2E3B"
+    elif _theme_name == "mint_breeze":
+        _bg_top, _bg_bottom, _text_color = "#A8D5C7", "#E8F7F4", "#1E3A3A"
+    elif _theme_name == "morning_mist":
+        _bg_top, _bg_bottom, _text_color = "#8AA6C2", "#F2F7FD", "#223449"
+    else:
+        # 默认浅色主题
+        _bg_top, _bg_bottom, _text_color = "#E3F2FD", "#FFFFFF", "#2C3E50"
+    
+    loading_dialog = None
+    try:
+        loading_dialog = QDialog()
+        loading_dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        loading_dialog.setModal(False)
+        loading_dialog.setFixedSize(560, 360)
+        dialog_layout = QVBoxLayout(loading_dialog)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
+        bg_top, bg_bottom, text_color = _bg_top, _bg_bottom, _text_color
+        gradient = QLinearGradient(0, 0, 0, loading_dialog.height())
+        gradient.setColorAt(0.0, QColor(bg_top))
+        gradient.setColorAt(1.0, QColor(bg_bottom))
+        palette = loading_dialog.palette()
+        palette.setBrush(QPalette.ColorRole.Window, QBrush(gradient))
+        loading_dialog.setAutoFillBackground(True)
+        loading_dialog.setPalette(palette)
+        content = QFrame(loading_dialog)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(40, 40, 40, 30)
+        content_layout.setSpacing(0)
+        icon_label = QLabel(content)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        loading_dialog._icon_label = icon_label
+        content_layout.addStretch()
+        content_layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        content_layout.addStretch()
+        loading_label = QLabel("正在加载中", content)
+        loading_label.setStyleSheet(f"QLabel {{ color: {text_color}; font-size: 14px; background: transparent; }}")
+        content_layout.addWidget(loading_label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        dialog_layout.addWidget(content)
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            x = geo.left() + int((geo.width() - loading_dialog.width()) / 2)
+            y = geo.top() + int((geo.height() - loading_dialog.height()) / 2)
+            loading_dialog.move(x, y)
+        loading_dialog.show()
+        loading_dialog.raise_()
+        loading_dialog.activateWindow()
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Create loading dialog failed: {e}")
+        loading_dialog = None
+
+    try:
         print("Starting LogManager...")
+        from utils.log_manager import LogManager
         LogManager.instance().start()
-        print("install_print_hook")
-        # LogManager.instance().install_print_hook()
         from utils.system.app_info_manager import AppInfoManager
-        print("AppInfoManager started")
         AppInfoManager.instance().log_startup_info()
-        print("LogManager started")
     except Exception as e:
         print(f"Logger init failed: {e}")
-
     try:
-        print("Setting logging rules...")
         QLoggingCategory.setFilterRules("\n".join([
             "qt.imageformats.tiff.debug=false",
             "qt.imageformats.tiff.info=false",
@@ -287,10 +342,6 @@ if __name__ == "__main__":
         ]))
     except Exception as e:
         print(f"Set logging rules failed: {e}")
-    
-    print("Creating QApplication...")
-    app = QApplication(sys.argv)
-
     try:
         print("Checking for data migration...")
         from utils.migration import MigrationManager
@@ -340,78 +391,31 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Get icon color failed: {e}")
         icon_color = "#2196F3"
-    
     print("Loading app icon...")
     app_icon = get_app_icon(icon_color)
-    loading_dialog = None
-    try:
-        print("Creating loading dialog...")
-        loading_dialog = QDialog()
-        loading_dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
-        loading_dialog.setModal(False)
-        loading_dialog.setFixedSize(560, 360)
-        dialog_layout = QVBoxLayout(loading_dialog)
-        dialog_layout.setContentsMargins(0, 0, 0, 0)
-        dialog_layout.setSpacing(0)
-        bg_top = cm.get("theme.sidebar", "#E3F2FD")
-        bg_bottom = "#FFFFFF"
-        text_color = cm.get("theme.primary", "#2C3E50")
-        icon_color = cm.get("theme.primary", "#2196F3")
-        gradient = QLinearGradient(0, 0, 0, loading_dialog.height())
-        gradient.setColorAt(0.0, QColor(bg_top))
-        gradient.setColorAt(1.0, QColor(bg_bottom))
-        palette = loading_dialog.palette()
-        palette.setBrush(QPalette.ColorRole.Window, QBrush(gradient))
-        loading_dialog.setAutoFillBackground(True)
-        loading_dialog.setPalette(palette)
-        content = QFrame(loading_dialog)
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(40, 40, 40, 30)
-        content_layout.setSpacing(0)
-        icon_label = QLabel(content)
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    # 用主题与图标更新已显示的加载框
+    if loading_dialog:
         try:
-            if app_icon:
+            bg_top = cm.get("theme.sidebar", "#E3F2FD")
+            bg_bottom = "#FFFFFF"
+            text_color = cm.get("theme.primary", "#2C3E50")
+            gradient = QLinearGradient(0, 0, 0, loading_dialog.height())
+            gradient.setColorAt(0.0, QColor(bg_top))
+            gradient.setColorAt(1.0, QColor(bg_bottom))
+            palette = loading_dialog.palette()
+            palette.setBrush(QPalette.ColorRole.Window, QBrush(gradient))
+            loading_dialog.setPalette(palette)
+            il = getattr(loading_dialog, "_icon_label", None)
+            if il and app_icon:
                 pixmap = app_icon.pixmap(120, 120)
                 if pixmap is not None and not pixmap.isNull():
-                    icon_label.setPixmap(pixmap)
-        except Exception as e:
-            print(f"Set loading icon failed: {e}")
-        content_layout.addStretch()
-        content_layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignHCenter)
-        content_layout.addStretch()
-        loading_label = QLabel("正在加载中", content)
-        loading_label.setStyleSheet(f"""
-            QLabel {{
-                color: {text_color};
-                font-size: 14px;
-                background: transparent;
-            }}
-        """)
-        content_layout.addWidget(loading_label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        dialog_layout.addWidget(content)
-        screen = QGuiApplication.primaryScreen()
-        if screen:
-            geo = screen.availableGeometry()
-            x = geo.left() + int((geo.width() - loading_dialog.width()) / 2)
-            y = geo.top() + int((geo.height() - loading_dialog.height()) / 2)
-            loading_dialog.move(x, y)
-        try:
+                    il.setPixmap(pixmap)
             if app_icon:
                 loading_dialog.setWindowIcon(app_icon)
-        except Exception as e:
-            print(f"Set dialog icon failed: {e}")
-        loading_dialog.show()
-        loading_dialog.raise_()
-        loading_dialog.activateWindow()
-        try:
             app.processEvents()
         except Exception as e:
-            print(f"Process events failed: {e}")
-        print("Loading dialog shown")
-    except Exception as e:
-        print(f"Create loading dialog failed: {e}")
-        loading_dialog = None
+            print(f"Update loading dialog failed: {e}")
 
     from utils.sql.data_base import get_default_db_path
     from utils.setting.settings_manager import SettingsManager

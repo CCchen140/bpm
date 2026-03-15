@@ -43,7 +43,7 @@ WizardStyle=modern
 Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "D:\code\BirdPictureManager\dist\栖图_V0.0.1\{#MyAppExeName}"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs createallsubdirs

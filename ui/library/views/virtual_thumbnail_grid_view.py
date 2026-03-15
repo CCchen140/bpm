@@ -1168,6 +1168,12 @@ class VirtualThumbnailGridView(QWidget):
             delta = ("row", 1)
         if delta is None:
             return False
+        import time
+        now = time.monotonic()
+        last = getattr(self, "_last_nav_ts", 0.0)
+        if now - last < 0.08:
+            return True
+        self._last_nav_ts = now
         cur = -1
         try:
             ci = self.list_view.currentIndex()
@@ -1232,9 +1238,15 @@ class VirtualThumbnailGridView(QWidget):
             pass
         def _post():
             try:
-                self.refresh_visible_thumbnails(extra_rows=1)
+                old_mi = self._model.index(int(cur), 0)
+                new_mi = self._model.index(int(nxt), 0)
+                self._model.dataChanged.emit(old_mi, old_mi)
+                self._model.dataChanged.emit(new_mi, new_mi)
             except Exception:
-                pass
+                try:
+                    self.refresh_visible_thumbnails(extra_rows=1)
+                except Exception:
+                    pass
             try:
                 self.itemClicked.emit(int(nxt), Qt.KeyboardModifier.NoModifier)
             except Exception:

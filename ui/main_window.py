@@ -1785,9 +1785,6 @@ class MainWindow(QMainWindow):
         else:
             # NVIDIA/Intel 显示详细引擎信息
             rows.append(("CUDA/Compute", self._format_percent_text(data.get("compute"))))
-            rows.append(("Video Decode", self._format_percent_text(data.get("decode"))))
-            rows.append(("Video Encode", self._format_percent_text(data.get("encode"))))
-            rows.append(("Copy", self._format_percent_text(data.get("copy"))))
             rows.append(("3D", self._format_percent_text(data.get("3d"))))
         
         mem_used = data.get("memory_used_mb")
@@ -2094,6 +2091,18 @@ class MainWindow(QMainWindow):
             if imp is not None and hasattr(imp, "shutdown"):
                 imp.shutdown()
         except Exception:
+            pass
+        
+        # 关闭本地识别服务 IPC 进程
+        try:
+            from core.recognizer.bird_species_recognizer import _get_local_bird_ipc_client
+            ipc_client = _get_local_bird_ipc_client()
+            if ipc_client is not None and hasattr(ipc_client, "shutdown"):
+                print("[BirdIPC] 正在关闭本地识别服务...")
+                ipc_client.shutdown()
+                print("[BirdIPC] 本地识别服务已关闭")
+        except Exception as e:
+            print(f"[BirdIPC] 关闭本地识别服务失败: {e}")
             pass
 
         # 保存窗口状态

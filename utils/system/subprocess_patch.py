@@ -68,10 +68,7 @@ def patch_subprocess_no_console():
                             cf |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
                         except Exception:
                             cf |= 0x08000000
-                        try:
-                            cf |= int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
-                        except Exception:
-                            cf |= 0x00000008
+                        # 不设置 DETACHED_PROCESS，与 CREATE_NO_WINDOW 同时使用可能导致控制台闪烁
                         kwargs["creationflags"] = int(cf)
                         if "startupinfo" not in kwargs:
                             try:

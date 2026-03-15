@@ -254,6 +254,64 @@ def _resolve_valid_yolo_seg_model_path(model: str) -> str:
     raise RuntimeError(f"YOLO 分割模型文件不可用：{hint}。请将正确的 {filename} 放到 models/ 目录后重试。")
 
 
+_HYBRID_TASK_QUEUE = None
+_HYBRID_RESULT_QUEUE = None
+_HYBRID_AF_MAP = None
+
+
+def _hybrid_cpu_worker_init(
+    task_queue,
+    result_queue,
+    af_map: dict,
+    model_path: str,
+    target_size: int,
+    multi_check: bool,
+    exp_frame_check: bool,
+    initial_conf: float,
+    enable_eye_detect: bool,
+):
+    """混合模式 CPU worker 初始化：保存队列与对焦点映射，并初始化 detector。"""
+    global _HYBRID_TASK_QUEUE, _HYBRID_RESULT_QUEUE, _HYBRID_AF_MAP
+    _HYBRID_TASK_QUEUE = task_queue
+    _HYBRID_RESULT_QUEUE = result_queue
+    _HYBRID_AF_MAP = af_map or {}
+    _focus_detect_worker_init(
+        model_path,
+        target_size,
+        False,
+        multi_check,
+        exp_frame_check,
+        initial_conf,
+        enable_eye_detect,
+    )
+
+
+def _hybrid_cpu_worker_loop(_ignored):
+    """从共享任务队列取 path，逐张检测并写入 result_queue，遇到 None 退出。"""
+    while True:
+        try:
+            path = _HYBRID_TASK_QUEUE.get(timeout=1.0)
+        except Exception:
+            continue
+        if path is None:
+            break
+        try:
+            nk = os.path.normcase(os.path.normpath(str(path)))
+        except Exception:
+            nk = str(path)
+        af = _HYBRID_AF_MAP.get(str(nk)) if nk else None
+        try:
+            r = _focus_detect_one_path(str(path), af)
+        except Exception as e:
+            r = {"path": str(path), "_error": str(e)}
+        if not isinstance(r, dict):
+            r = {"path": str(path), "_error": "invalid_result"}
+        r["path"] = str(path)
+        try:
+            _HYBRID_RESULT_QUEUE.put((str(path), r))
+        except Exception:
+            pass
+
 _FOCUS_DETECTOR_WORKER_INSTANCE = None
 _FOCUS_DETECT_EYE_ENABLED = False
 _FOCUS_DETECTOR_WORKER_FALLBACK = False
@@ -654,7 +712,7 @@ def detect_focus_batch_for_import(
     target_size: int = 640,
     burst_min_count: int = 10,
     burst_fps: int = 20,
-    reserve_cpu: int = 4,
+    reserve_cpu: int = 0,  # 0表示使用动态计算
     per_file_timeout_sec: int = 240,
     progress_callback: Callable[[str, int, int, float], None] | None = None,
     cancel_event: object | None = None,
@@ -677,8 +735,19 @@ def detect_focus_batch_for_import(
     
     if effective_use_gpu and (not _is_focus_cuda_usable()):
         effective_use_gpu = False
+        focus_trace("detect_focus_batch_for_import: cuda not usable, effective_use_gpu=False")
 
     model_path = _resolve_valid_yolo_seg_model_path(model)
+
+    # 获取任务数量
+    task_count = len(paths)
+    
+    # 获取显存信息（用于GPU模式下的worker计算）
+    vram_info = None
+    focus_trace(
+        f"detect_focus_batch_for_import: task_count={task_count} "
+        f"use_gpu={bool(effective_use_gpu)} use_multiprocess={bool(use_multiprocess)}"
+    )
 
     if not bool(use_multiprocess):
         try:
@@ -1076,29 +1145,60 @@ def detect_focus_batch_for_import(
         enable_af_point_detect = bool(enable_af_point_detect)
     except Exception:
         enable_af_point_detect = True
+    # 计算进程数量（提前计算，用于并行初始化）
+    try:
+        cpu_count = int(os.cpu_count() or 4)
+    except Exception:
+        cpu_count = 4
+    try:
+        reserve = int(reserve_cpu or 0)
+    except Exception:
+        reserve = 0
+    proc = max(1, cpu_count - max(0, reserve))
+    if proc == 1:
+        use_multiprocess = False
+
+    # 如果需要多进程，在读取对焦点的同时异步初始化进程池
+    pool_init_future = None
+    if use_multiprocess:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            executor = ThreadPoolExecutor(max_workers=1)
+            def _init_pool():
+                return _create_no_window_pool(
+                    processes=proc,
+                    initializer=_focus_detect_worker_init,
+                    initargs=(
+                        model_path,
+                        int(target_size or 640),
+                        bool(effective_use_gpu),
+                        bool(multi_check),
+                        bool(exp_frame_check),
+                        float(initial_conf or 0.15),
+                        bool(enable_eye_detect),
+                    ),
+                )
+            pool_init_future = executor.submit(_init_pool)
+        except Exception as e:
+            focus_trace(f"stage=focus.async_pool_init err={e}")
+            pool_init_future = None
+
     if bool(enable_af_point_detect):
+        _af_start_ts = time.time()
         try:
             if callable(progress_callback):
-                progress_callback("读取对焦点", 0, int(len(paths)), float(time.time()))
+                progress_callback("读取对焦点", 0, int(len(paths)), float(_af_start_ts))
         except Exception:
             pass
         try:
             from utils.exif.camera_af_point import get_camera_af_center_points
 
-            try:
-                cpu_count = int(os.cpu_count() or 4)
-            except Exception:
-                cpu_count = 4
-            try:
-                reserve = int(reserve_cpu or 0)
-            except Exception:
-                reserve = 0
             max_workers = max(1, int(cpu_count - max(0, reserve)))
 
             def _af_progress(done: int, total: int):
                 try:
                     if callable(progress_callback):
-                        progress_callback("读取对焦点", int(done), int(total), float(time.time()))
+                        progress_callback("读取对焦点", int(done), int(total), float(_af_start_ts))
                 except Exception:
                     pass
 
@@ -1129,50 +1229,56 @@ def detect_focus_batch_for_import(
             )
         except Exception:
             pass
-    # 对焦点检测完成后，显示初始化进度
-    try:
-        if callable(progress_callback):
-            progress_callback("初始化对焦检测", 0, int(len(paths)), float(time.time()))
-    except Exception:
-        pass
-    # 计算进程数量
-    try:
-        cpu_count = int(os.cpu_count() or 4)
-    except Exception:
-        cpu_count = 4
-    try:
-        reserve = int(reserve_cpu or 0)
-    except Exception:
-        reserve = 0
-    proc = max(1, cpu_count - max(0, reserve))
-    # GPU检测时使用单进程，避免多进程竞争GPU资源导致初始化变慢
-    # if bool(effective_use_gpu):
-    #     proc = 1
-    # 当只需要单进程时，直接使用非多进程路径，避免进程创建开销
-    if proc == 1:
-        use_multiprocess = False
-    
+
+    # 对焦点检测完成后，检查进程池初始化状态
+    if use_multiprocess and pool_init_future is not None:
+        # 检查进程池是否已完成初始化
+        if not pool_init_future.done():
+            # 进程池还在初始化中，显示等待提示
+            _init_start_ts = time.time()
+            try:
+                if callable(progress_callback):
+                    progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_start_ts))
+            except Exception:
+                pass
+
     # 记录最终的检测配置（使用info级别确保能被看到）
     try:
         LogManager.instance().info(f"[FocusDetect] stage=init.config gpu={bool(effective_use_gpu)} mp={bool(use_multiprocess)} proc={proc}")
     except Exception:
         pass
-        
+
     if use_multiprocess:
         _t_pool0 = time.perf_counter()
-        pool = _create_no_window_pool(
-            processes=proc,
-            initializer=_focus_detect_worker_init,
-            initargs=(
-                model_path,
-                int(target_size or 640),
-                bool(effective_use_gpu),
-                bool(multi_check),
-                bool(exp_frame_check),
-                float(initial_conf or 0.15),
-                bool(enable_eye_detect),
-            ),
-        )
+        # 如果之前已经异步初始化进程池，等待结果
+        if pool_init_future is not None:
+            try:
+                pool = pool_init_future.result(timeout=60)  # 最多等待60秒
+                try:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
+            except Exception as e:
+                focus_trace(f"stage=focus.pool_init_future err={e}, fallback to sync init")
+                pool = None
+        else:
+            pool = None
+
+        # 如果异步初始化失败或未进行，同步创建进程池
+        if pool is None:
+            pool = _create_no_window_pool(
+                processes=proc,
+                initializer=_focus_detect_worker_init,
+                initargs=(
+                    model_path,
+                    int(target_size or 640),
+                    bool(effective_use_gpu),
+                    bool(multi_check),
+                    bool(exp_frame_check),
+                    float(initial_conf or 0.15),
+                    bool(enable_eye_detect),
+                ),
+            )
         _t_pool1 = time.perf_counter()
         
         # 定义进程池清理函数，确保在任何情况下都能清理进程池
@@ -1404,6 +1510,20 @@ def detect_focus_batch_for_import(
                         except Exception:
                             pass
 
+                    # 检查是否已取消，避免在退出时创建新进程
+                    if cancel_event is not None and hasattr(cancel_event, "is_set") and bool(cancel_event.is_set()):
+                        # 标记剩余任务为取消
+                        try:
+                            for p0, _ar0 in inflight:
+                                r = {"path": str(p0), "_error": "cancelled"}
+                                results_by_path[str(p0)] = r
+                                _record_result(str(p0), r)
+                                _error_count += 1
+                                done += 1
+                        except Exception:
+                            pass
+                        break
+
                     try:
                         rest = [p for p, _ in inflight if str(p) != str(timed_out_path)]
                     except Exception:
@@ -1446,7 +1566,7 @@ def detect_focus_batch_for_import(
         finally:
             # 使用统一的清理函数确保进程池被正确清理
             _cleanup_pool()
-    else:
+    elif not skip_single_thread:
         _focus_detect_worker_init(
             model_path,
             int(target_size or 640),

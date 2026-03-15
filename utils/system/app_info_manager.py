@@ -5,6 +5,7 @@ from utils.log_manager import LogManager
 
 APP_NAME = "栖图"
 APP_VERSION = "V0.0.4"
+APP_UPDATE = "update1"  # 升级版本号，例如 "update1"，空字符串表示非升级版本
 
 class AppInfoManager:
     """
@@ -25,6 +26,16 @@ class AppInfoManager:
         return APP_NAME
 
     def get_app_version(self):
+        return APP_VERSION
+
+    def get_app_update(self):
+        """获取升级版本号，空字符串表示非升级版本"""
+        return APP_UPDATE
+
+    def get_full_version(self):
+        """获取完整版本号，包含升级版本号（如果有）"""
+        if APP_UPDATE:
+            return f"{APP_VERSION}_{APP_UPDATE}"
         return APP_VERSION
 
     def get_device_info(self):
