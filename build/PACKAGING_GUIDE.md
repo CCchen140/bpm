@@ -201,7 +201,141 @@ python build/build_delta.py --from "dist/栖图_V1.0.0_gpu"
 python build/build_delta.py --from "dist/栖图_V0.0.4_gpu_fr" --to "dist/栖图_V0.0.4_gpu" --version "0.0.4" --flavor gpu --update 1
 ```
 
-#### 差分升级文件夹结构
+### GitHub 自动升级包（zip 格式）
+
+从 V0.0.5 开始，支持生成 zip 格式的升级包，用于 GitHub Releases 自动升级系统。
+
+#### 生成 zip 升级包
+
+```bash
+# 生成 zip 压缩包（GitHub 发布用）
+python build/build_delta.py --from "dist/栖图_V0.0.4" --output-zip
+
+# 生成 zip 并自动更新 update_manifest.json
+python build/build_delta.py --from "dist/栖图_V0.0.4" --output-zip --update-manifest
+
+# 指定 manifest 文件路径
+python build/build_delta.py --from "dist/栖图_V0.0.4" --output-zip --update-manifest --manifest-path "dist/update_manifest.json"
+```
+
+#### zip 升级包内容
+
+生成的 zip 文件包含：
+
+```
+栖图_V0.0.5_update1.zip
+├── build_flavor.txt          # 构建类型标记 (cpu/gpu)
+├── _delete_files.txt         # 需要删除的文件列表
+├── 栖图.exe                   # 新增/修改的文件
+├── ui/dialogs/xxx.py         # 新增/修改的文件
+└── ... (其他差异文件)
+```
+
+#### update_manifest.json 结构
+
+自动生成的 manifest 文件格式：
+
+```json
+{
+  "latest_version": "0.0.5_update1",
+  "release_date": "2026-03-15",
+  "releases": {
+    "0.0.4": {
+      "base_version": "0.0.4",
+      "updates": {
+        "1": {
+          "version": "0.0.4_update1",
+          "package": "栖图_V0.0.4_update1.zip",
+          "hash": "sha256:abc123...",
+          "size": 10485760
+        }
+      }
+    },
+    "0.0.5": {
+      "base_version": "0.0.5",
+      "cross_upgrade": {
+        "from_base": "0.0.4",
+        "package": "栖图_V0.0.5.zip",
+        "hash": "sha256:def456...",
+        "size": 52428800
+      },
+      "updates": {
+        "1": {
+          "version": "0.0.5_update1",
+          "package": "栖图_V0.0.5_update1.zip",
+          "hash": "sha256:ghi789...",
+          "size": 10240000
+        }
+      }
+    }
+  }
+}
+```
+
+#### 升级包类型说明
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| **同版本 update** | 同一基础版本内的增量更新 | V0.0.4 → V0.0.4_update1 |
+| **跨版本升级** | 从旧大版本升级到新版本 | V0.0.4 → V0.0.5 |
+
+#### GitHub 发布流程
+
+1. **打包新版本**
+   ```bash
+   # 1. 打包完整版
+   python build/build.py
+   
+   # 2. 生成 zip 升级包并更新 manifest
+   python build/build_delta.py --from "dist/栖图_V0.0.4" --output-zip --update-manifest
+   ```
+
+2. **上传到 GitHub Releases**
+   - 上传 `栖图_V0.0.5.exe`（完整安装包）
+   - 上传 `栖图_V0.0.5.zip`（跨版本升级包，如果有）
+   - 上传 `栖图_V0.0.5_update1.zip`（同版本增量包）
+   - 上传 `update_manifest.json`（版本清单）
+
+3. **配置自动更新**
+   - 在 `update/update_config.py` 中设置 GitHub 仓库信息
+   - 软件启动时会自动检查 GitHub 上的最新版本
+
+#### 测试升级包（不执行实际替换）
+
+在发布前，可以使用测试模式验证升级包是否能正确下载和解压：
+
+```bash
+# 手动测试升级流程（不执行文件替换）
+python update/update_launcher.py --plan "C:\Users\xxx\AppData\Local\栖图\cache\update\update_plan.json" --test
+```
+
+测试模式特点：
+- **下载**：正常下载所有升级包到缓存目录
+- **解压**：正常解压 zip 文件
+- **跳过**：不执行实际的文件替换操作
+- **保留**：不清理临时文件，方便检查
+- **不启动**：不会启动主程序
+
+测试完成后，可以检查缓存目录中的文件：
+```
+%LOCALAPPDATA%\栖图\cache\update\
+├── 栖图_V0.0.5.zip              # 下载的升级包
+├── 栖图_V0.0.5_update1.zip      # 下载的升级包
+└── update_plan.json             # 升级计划
+```
+
+#### 升级包验证清单
+
+发布前请确认：
+
+- [ ] zip 文件可以正常解压
+- [ ] `_delete_files.txt` 包含正确的删除列表
+- [ ] `build_flavor.txt` 标记正确（cpu/gpu）
+- [ ] `update_manifest.json` 中的 hash 和 size 正确
+- [ ] 测试模式可以正常下载所有升级包
+- [ ] 升级包大小合理（不应超过完整包）
+ 
+ #### 差分升级文件夹结构
 
 ```
 dist/栖图_V1.0.1_gpu_update1/

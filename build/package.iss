@@ -5,7 +5,7 @@
 #define MyAppName "栖图"
 #define MyAppVersion "0.0.1"
 #define MyAppPublisher "cCc"
-#define MyAppExeName "栖图.exe"
+#define MyAppExeName "qitu.exe"
 #define MyAppAssocName MyAppName + "文件"
 #define MyAppAssocExt ".myp"
 #define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt
@@ -46,8 +46,8 @@ Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-Source: "D:\code\BirdPictureManager\dist\栖图_V0.0.1\{#MyAppExeName}"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "D:\code\BirdPictureManager\dist\栖图_V0.0.1\*"; DestDir: "{app}\iconengines"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\code\BirdPictureManager\dist\qitu_V0.0.1\{#MyAppExeName}"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\code\BirdPictureManager\dist\qitu_V0.0.1\*"; DestDir: "{app}\iconengines"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 注意：不要在任何共享系统文件上使用 "Flags: ignoreversion" 
 
 [Registry]

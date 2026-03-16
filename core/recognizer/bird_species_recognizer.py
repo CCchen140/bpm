@@ -551,9 +551,15 @@ def run_local_bird_ipc_service():
         svc.start()
         print("[BirdIPC] 本地识别服务已停止")
     except Exception as e:
-        print(f"[BirdIPC] 本地识别服务异常: {e}")
-        import traceback
-        traceback.print_exc()
+        # 使用安全的方式打印异常信息，避免在打包环境下stderr无效导致OSError
+        try:
+            print(f"[BirdIPC] 本地识别服务异常: {e}")
+            import traceback
+            # 将traceback输出到字符串，避免直接写入可能已关闭的stderr
+            tb_str = traceback.format_exc()
+            print(f"[BirdIPC] 异常详情: {tb_str}")
+        except Exception:
+            pass
         raise
 
 
@@ -1032,14 +1038,21 @@ class _LocalBirdIPCService:
         except Exception:
             lon = None
         start = time.time()
-        preds = self._model.predict(
-            image_path=image_path,
-            top_k=k,
-            region_code=region_code,
-            lat=lat,
-            lon=lon,
-            apply_region_filter=apply_region_filter
-        )
+        try:
+            preds = self._model.predict(
+                image_path=image_path,
+                top_k=k,
+                region_code=region_code,
+                lat=lat,
+                lon=lon,
+                apply_region_filter=apply_region_filter
+            )
+        except BirdRecognitionError as e:
+            # 捕获图片识别相关的错误（如不支持的格式、文件损坏等），返回友好的错误信息
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            # 捕获其他未知异常，返回通用错误信息
+            return {"success": False, "error": f"识别过程中发生错误: {e}"}
         elapsed = time.time() - start
         preds = [p for p in preds if isinstance(p, dict) and float(p.get("confidence") or 0.0) >= mc]
         return {"success": True, "predictions": preds, "inference_time_ms": float(round(elapsed * 1000.0, 2))}

@@ -1,0 +1,31 @@
+{
+  "latest_version": "0.0.5_test",
+  "release_date": "2026-03-16",
+  "changelog": "## 测试版本 V0.0.5_test\n- 用于测试升级链路\n- 升级包内容为空，仅验证下载和安装流程\n- 测试完成后请关闭链路测试模式",
+  "force_update": false,
+  "min_supported_version": "0.0.1",
+  "releases": {
+    "0.0.4": {
+      "base_version": "0.0.4",
+      "cross_upgrade": {},
+      "updates": {
+        "1": {
+          "version": "0.0.4_update1",
+          "package": "qitu_V0.0.4_update1.zip",
+          "size": 10240000,
+          "hash": "sha256:abc123..."
+        }
+      }
+    },
+    "0.0.5": {
+      "base_version": "0.0.5",
+      "cross_upgrade": {
+        "from_base": "0.0.4",
+        "package": "qitu_V0.0.5_test.zip",
+        "size": 1024,
+        "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "updates": {}
+    }
+  }
+}

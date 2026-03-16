@@ -23,6 +23,7 @@ from ui.utils.color_manager import ColorManager
 from ui.widgets.themed_color_dialog import ThemedColorDialog
 from ui.utils.icon_loader import qta
 from utils.log_manager import LogManager
+from ui.update_settings_page import UpdateSettingsPage
 
 class ModernSpinBox(QWidget):
     """自定义现代风格 SpinBox，两侧为加减按钮，中间为数值"""
@@ -265,7 +266,12 @@ class SettingsPage(QWidget):
         self.shortcut_tab = QWidget()
         self.init_shortcut_tab()
         self.tabs.addTab(self.shortcut_tab, "快捷键设置")
-        
+
+        # Tab 4: Update Management - 延迟创建
+        self.update_tab = None
+        self.tabs.addTab(QWidget(), "升级管理")  # 先添加占位页面
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         main_layout.addWidget(self.tabs)
         
         # 底部按钮栏
@@ -296,6 +302,17 @@ class SettingsPage(QWidget):
         self._save_btn = save_btn
         
         main_layout.addLayout(bottom_layout)
+
+    def _on_tab_changed(self, index: int):
+        """标签页切换事件 - 延迟创建升级管理页面"""
+        # 升级管理页面是第4个标签（索引3）
+        if index == 3 and self.update_tab is None:
+            # 延迟创建升级管理页面
+            self.update_tab = UpdateSettingsPage()
+            # 替换占位页面
+            self.tabs.removeTab(3)
+            self.tabs.insertTab(3, self.update_tab, "升级管理")
+            self.tabs.setCurrentIndex(3)
 
     def _change_user_data_path(self):
         from utils.paths import PathManager

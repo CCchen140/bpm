@@ -1,7 +1,7 @@
 #define MyAppName "栖图"
 #define MyAppVersion "V0.0.1"
-#define MyAppDistDir "..\\dist\\栖图_V0.0.1"
-#define MyAppExeName "栖图.exe"
+#define MyAppDistDir "..\\dist\\qitu_V0.0.1"
+#define MyAppExeName "qitu.exe"
 
 [Setup]
 AppId={{8E9B4F2B-2A8D-4E2E-9D2A-8F3A2CE3D5F7}

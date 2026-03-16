@@ -682,7 +682,7 @@ class ImageAllInfoOverlay(QWidget):
         except RuntimeError:
             # C++ 对象已被删除
             return
-        
+
         try:
             t = str(html or "").strip()
         except Exception:
@@ -692,10 +692,16 @@ class ImageAllInfoOverlay(QWidget):
             try:
                 self.content.setHtml("")
             except Exception:
-                self.content.setText("")
-            self.hide()
+                try:
+                    self.content.setText("")
+                except RuntimeError:
+                    pass
+            try:
+                self.hide()
+            except RuntimeError:
+                pass
             return
-        
+
         # 保存当前滚动位置（使用 QScrollArea 的滚动条）
         try:
             scrollbar = self.scroll_area.verticalScrollBar()
@@ -704,17 +710,27 @@ class ImageAllInfoOverlay(QWidget):
         except RuntimeError:
             # C++ 对象已被删除
             return
-        
+
         try:
             self.content.setHtml(t)
         except Exception:
-            self.content.setText(t)
-        
-        self.show()
-        self.adjustSize()
-        
+            try:
+                self.content.setText(t)
+            except RuntimeError:
+                return
+
+        try:
+            self.show()
+            self.adjustSize()
+        except RuntimeError:
+            # C++ 对象已被删除
+            return
+
         # 发射信号通知 HTML 加载完成
-        self.html_loaded.emit()
+        try:
+            self.html_loaded.emit()
+        except RuntimeError:
+            pass
 
     def _apply_theme_styles(self):
         cm = ColorManager.instance()

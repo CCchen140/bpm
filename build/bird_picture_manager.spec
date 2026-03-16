@@ -97,15 +97,13 @@ flavor_suffix = ""
 if suffix and suffix.lower() in ("cpu", "gpu"):
     flavor_suffix = suffix.lower()
 
-# 构建 dist 目录名称：栖图_Vx.x.x_gpu 或 栖图_Vx.x.x_cpu
-dist_name = "栖图"
+# 构建 dist 目录名称：qitu_Vx.x.x
+dist_name = "qitu"
 if v_token:
     dist_name = f"{dist_name}_V{v_token}"
-if flavor_suffix:
-    dist_name = f"{dist_name}_{flavor_suffix}"
 
-# exe 名称保持为中文名
-exe_name = "栖图"
+# exe 名称使用英文
+exe_name = "qitu"
 
 icon_path = os.path.join(BUILD_DIR, "ph.bird-fill.ico")
 if not os.path.exists(icon_path):

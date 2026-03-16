@@ -542,6 +542,30 @@ class InfoPage(QWidget):
         contact_layout.addWidget(self._bili_tip)
         card_layout.addWidget(contact_group)
         
+        # 延迟加载图片，先创建空的图片条
+        self._about_image_strip = AboutImageStrip([], self._card)
+        self._about_image_strip.set_target_height(120)
+        self._about_image_strip.set_click_handler(self._open_about_image_preview)
+        card_layout.addSpacing(16)
+        card_layout.addWidget(self._about_image_strip)
+        
+        # 标记图片是否已加载
+        self._images_loaded = False
+
+        # 将卡片添加到主布局
+        main_layout.addWidget(self._card)
+
+        self._apply_theme_styles()
+        try:
+            ColorManager.instance().register_listener(self._apply_theme_styles)
+        except Exception:
+            pass
+    
+    def _load_about_images(self):
+        """延迟加载关于页面图片"""
+        if self._images_loaded:
+            return
+        
         keys = ["1.png", "2.jpg", "3.jpg", "5.png"]
         pixmaps = []
         for k in keys:
@@ -553,20 +577,36 @@ class InfoPage(QWidget):
             except Exception:
                 pm = QPixmap()
             pixmaps.append(pm)
+        
+        # 重新创建 AboutImageStrip 以正确初始化 labels
+        from PyQt6.QtWidgets import QHBoxLayout
+        
+        # 保存父布局和当前设置
+        parent_layout = self._about_image_strip.parent().layout()
+        target_height = self._about_image_strip._target_height
+        click_handler = self._about_image_strip._labels[0].clicked if self._about_image_strip._labels else None
+        
+        # 删除旧的图片条
+        self._about_image_strip.setParent(None)
+        self._about_image_strip.deleteLater()
+        
+        # 创建新的图片条
         self._about_image_strip = AboutImageStrip(pixmaps, self._card)
-        self._about_image_strip.set_target_height(120)
+        self._about_image_strip.set_target_height(target_height)
         self._about_image_strip.set_click_handler(self._open_about_image_preview)
-        card_layout.addSpacing(16)
-        card_layout.addWidget(self._about_image_strip)
-
-        # 将卡片添加到主布局
-        main_layout.addWidget(self._card)
-
-        self._apply_theme_styles()
-        try:
-            ColorManager.instance().register_listener(self._apply_theme_styles)
-        except Exception:
-            pass
+        
+        # 添加到布局
+        parent_layout.addSpacing(16)
+        parent_layout.addWidget(self._about_image_strip)
+        
+        self._images_loaded = True
+    
+    def showEvent(self, event):
+        """显示事件 - 延迟加载图片"""
+        super().showEvent(event)
+        # 使用 QTimer 延迟加载图片，避免阻塞UI
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self._load_about_images)
 
     def _open_about_image_preview(self, idx: int):
         try:

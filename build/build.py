@@ -554,10 +554,10 @@ def main():
   python build/build.py
   
   # 增量升级包打包（旧方式，修改 iss 文件）
-  python build/build.py --delta-from "dist/栖图_V1.0.0_gpu" --from-version "V1.0.0"
+  python build/build.py --delta-from "dist/qitu_V1.0.0" --from-version "V1.0.0"
   
   # 使用 build_delta 创建升级包（推荐）
-  python build/build.py --delta-from "dist/栖图_V1.0.0_gpu" --delta
+  python build/build.py --delta-from "dist/qitu_V1.0.0" --delta
   
   # CPU/GPU 版本打包
   python build/build.py --flavor cpu
@@ -587,8 +587,9 @@ def main():
 
     suffix = str(args.suffix or "").strip()
     flavor = str(getattr(args, "flavor", "") or "").strip().lower()
-    if flavor and not suffix:
-        suffix = flavor
+    # 如果没有指定flavor，默认使用gpu
+    if not flavor:
+        flavor = "gpu"
     try:
         _validate_torch_flavor(flavor)
     except Exception:
@@ -612,6 +613,7 @@ def main():
     env = os.environ.copy()
     env["BPM_PROJECT_ROOT"] = root
     env["BPM_BUILD_DIR"] = os.path.join(root, "build")
+    env["BPM_BUILD_FLAVOR"] = flavor
     if suffix:
         env["BPM_NAME_SUFFIX"] = suffix
     else:
@@ -659,19 +661,12 @@ def main():
     
     suffix_token = str(suffix or "").strip()
 
-    # 确定 cpu/gpu 后缀
-    flavor_suffix = ""
-    if flavor:
-        flavor_suffix = flavor.lower()
-    elif suffix_token and suffix_token.lower() in ("cpu", "gpu"):
-        flavor_suffix = suffix_token.lower()
-    
-    # 构建 dist 目录名称：栖图_Vx.x.x_gpu 或 栖图_Vx.x.x_cpu
-    dist_name = "栖图"
+    # 构建 dist 目录名称：qitu_Vx.x.x
+    dist_name = "qitu"
     if v_token:
         dist_name = f"{dist_name}_V{v_token}"
-    if flavor_suffix:
-        dist_name = f"{dist_name}_{flavor_suffix}"
+    if suffix_token:
+        dist_name = f"{dist_name}_{suffix_token}"
     
     # 保存原始 app_name 用于后续（如需要）
     original_app_name = app_name
@@ -703,7 +698,7 @@ def main():
         except Exception:
             pass
         try:
-            _write_build_flavor_marker(dist_dir, flavor or "cpu")
+            _write_build_flavor_marker(dist_dir, flavor)
         except Exception:
             pass
         delta_from = str(getattr(args, "delta_from", "") or "").strip()
@@ -740,7 +735,7 @@ def main():
                             "--from", delta_from_abs,
                             "--to", dist_dir,
                             "--version", app_version,
-                            "--flavor", flavor_suffix if flavor_suffix else ""
+                            "--flavor", flavor
                         ]
                         
                         print(f"[升级包] 执行: {' '.join(delta_cmd)}")

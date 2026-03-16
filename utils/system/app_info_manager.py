@@ -5,7 +5,7 @@ from utils.log_manager import LogManager
 
 APP_NAME = "栖图"
 APP_VERSION = "V0.0.4"
-APP_UPDATE = "update1"  # 升级版本号，例如 "update1"，空字符串表示非升级版本
+APP_UPDATE = ""  # 升级版本号，例如 "update1"，空字符串表示非升级版本
 
 class AppInfoManager:
     """

@@ -1,0 +1,13 @@
+{
+  "timestamp": 1773674780.8948646,
+  "mirror_order": [
+    {
+      "url": "https://github.com/CCchen140/qitupage/releases/latest/download/update_manifest.json",
+      "desc": "github-direct"
+    },
+    {
+      "url": "https://githubfast.com/CCchen140/qitupage/releases/download/latest/update_manifest.json",
+      "desc": "githubfast"
+    }
+  ]
+}

@@ -198,16 +198,26 @@ if __name__ == "__main__":
                 print(f"[BirdIPC] torch 导入成功: {torch.__version__}")
             except Exception as e:
                 print(f"[BirdIPC] torch 导入失败: {e}")
-                import traceback
-                traceback.print_exc()
+                # 使用安全的方式打印异常信息，避免在打包环境下stderr无效导致OSError
+                try:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    print(f"[BirdIPC] torch导入异常详情: {tb_str}")
+                except Exception:
+                    pass
             from core.recognizer.bird_species_recognizer import run_local_bird_ipc_service
             run_local_bird_ipc_service()
             print("[BirdIPC] 本地识别服务子进程正常退出")
             sys.exit(0)
         except Exception as e:
             print(f"[BirdIPC] 本地识别服务子进程异常: {e}")
-            import traceback
-            traceback.print_exc()
+            # 使用安全的方式打印异常信息，避免在打包环境下stderr无效导致OSError
+            try:
+                import traceback
+                tb_str = traceback.format_exc()
+                print(f"[BirdIPC] 异常详情: {tb_str}")
+            except Exception:
+                pass
             sys.exit(1)
     try:
         if sys.platform == "win32":
@@ -607,6 +617,26 @@ if __name__ == "__main__":
                     QTimer.singleShot(50, _close_loading)
             except Exception:
                 pass
+            
+            # 主窗口加载完成后，启动自动更新检查
+            try:
+                def _start_auto_update_check():
+                    try:
+                        from update.update_manager import get_update_manager
+                        update_manager = get_update_manager()
+                        # 设置主窗口已加载
+                        update_manager.set_main_window_loaded(True)
+                        # 延迟 3 秒后执行后台检查
+                        update_manager.check_update_after_load(delay_ms=3000)
+                        print("Auto update check scheduled")
+                    except Exception as e:
+                        print(f"Start auto update check failed: {e}")
+                
+                # 延迟 5 秒后启动自动更新检查（确保主窗口完全加载）
+                QTimer.singleShot(5000, _start_auto_update_check)
+            except Exception as e:
+                print(f"Schedule auto update check failed: {e}")
+        
         try:
             if loading_dialog:
                 loading_dialog.show()
