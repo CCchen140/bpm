@@ -14,6 +14,85 @@ from utils.sql.data_base import BirdLibraryDB
 from utils.taxonomy.path_taxonomy_matcher import match_taxonomy_from_path
 from utils.log_manager import LogManager
 
+
+# 加载物种名称别名规则缓存
+_species_text_alias_rules_cache = None
+
+
+def _load_species_text_alias_rules() -> list[dict[str, str]]:
+    """
+    读取物种名称别名规则映射表，用于处理异体字/替代写法到规范写法的转换。
+
+    例如：将"鸊鷉"（繁体/异体写法）转换为"䴙䴘"（规范写法）
+
+    返回：
+    - 规则列表：每条包含 from/to 字段，例如 {"from": "鸊鷉", "to": "䴙䴘"}
+    """
+    global _species_text_alias_rules_cache
+    if _species_text_alias_rules_cache is not None:
+        return _species_text_alias_rules_cache
+
+    # 尝试多个可能的路径
+    possible_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "species_text_aliases.json")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "species_text_aliases.json")),
+    ]
+
+    data_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            data_path = p
+            break
+
+    rules: list[dict[str, str]] = []
+    if data_path:
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                for it in raw:
+                    if not isinstance(it, dict):
+                        continue
+                    src = str(it.get("from") or "").strip()
+                    dst = str(it.get("to") or "").strip()
+                    if not src or not dst:
+                        continue
+                    rules.append({"from": src, "to": dst})
+        except Exception:
+            pass
+
+    _species_text_alias_rules_cache = rules
+    return rules
+
+
+def _normalize_species_text(text: str) -> str:
+    """
+    对物种名称进行规范化处理，将异体字/替代写法转换为规范写法。
+
+    参数：
+    - text: 原始物种名称
+
+    返回：
+    - 规范化后的物种名称
+    """
+    s = str(text or "")
+    if not s:
+        return ""
+    rules = _load_species_text_alias_rules()
+    if not rules:
+        return s
+    out = s
+    for r in rules:
+        try:
+            src = str(r.get("from") or "")
+            dst = str(r.get("to") or "")
+        except Exception:
+            continue
+        if not src or not dst:
+            continue
+        out = out.replace(src, dst)
+    return out
+
 class ScanWorker(QThread):
     progress_updated = pyqtSignal(int, int, str)
     scan_finished = pyqtSignal()
@@ -682,6 +761,10 @@ class ScanWorker(QThread):
                             family_cls = taxonomy_from_path.get("family_cls")
                             genus_cls = taxonomy_from_path.get("genus_cls")
                             species_cls = taxonomy_from_path.get("species_cls")
+                            # 对物种名称进行规范化处理，将异体字/替代写法转换为规范写法
+                            # 例如：将"鸊鷉"转换为"䴙䴘"，确保与数据库中的规范名称一致
+                            if species_cls:
+                                species_cls = _normalize_species_text(species_cls)
 
                         has_full_taxonomy = bool(order_cls and family_cls and genus_cls and species_cls)
                         if has_full_taxonomy:
@@ -710,6 +793,9 @@ class ScanWorker(QThread):
                                 family_cls = str(exif_family)
                                 genus_cls = str(exif_genus)
                                 species_cls = str(exif_species)
+                                # 对从EXIF读取的物种名称也进行规范化处理
+                                # 确保异体字/替代写法被转换为规范写法
+                                species_cls = _normalize_species_text(species_cls)
 
                         if tags_to_write:
                             self.pending_exif_updates.append((fpath, tags_to_write))

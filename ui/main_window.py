@@ -2178,6 +2178,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
+        # 程序退出时备份数据库
+        try:
+            from utils.sql.data_base import BirdLibraryDB
+            db = BirdLibraryDB()
+            db.backup_on_exit()
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"退出时备份数据库失败: {e}")
+            except Exception:
+                pass
+        
         super().closeEvent(event)
 
     def resizeEvent(self, event):

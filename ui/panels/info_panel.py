@@ -843,9 +843,14 @@ class InfoPanel(QWidget):
             if io_data is not None and isinstance(io_data.get("record"), dict):
                 record = io_data["record"]
             else:
-                # 如果 io_data 中没有 record，跳过数据库查询，避免阻塞 UI
-                # 数据库查询应该在后台 worker 中完成
+                # 如果 io_data 中没有 record，尝试从数据库查询获取基本信息（如地理位置）
+                # 这是轻量级查询，不会显著阻塞 UI
                 record = None
+                try:
+                    db = BirdLibraryDB()
+                    record = db.get_result_by_path(image_path, table_name='bird_results')
+                except Exception:
+                    pass
             if record:
                 v = record.get("focus_distance")
                 if v is not None and str(v).strip():

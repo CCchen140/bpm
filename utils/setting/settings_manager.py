@@ -6,6 +6,11 @@ import threading
 from utils.paths import PathManager
 
 
+# 配置目录常量，用于存储用户配置文件
+# 使用 PathManager 获取用户设置目录，确保与其他配置一致
+CONFIG_DIR = str(PathManager.instance().get_user_setting_dir())
+
+
 class SettingsManager(QObject):
     setting_changed = pyqtSignal(str, object) # key, value
 

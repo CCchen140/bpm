@@ -58,6 +58,48 @@ class BirdLibraryDB:
         self._init_db()
         self._schedule_fastid_uuid_sync_on_first_load()
 
+    def backup_on_exit(self):
+        """程序退出时备份数据库，只保留一个最新的备份文件"""
+        import shutil
+        from datetime import datetime
+        
+        try:
+            if not os.path.exists(self.db_path):
+                LogManager.instance().info("[DB] Database file not found, skipping backup")
+                return False
+            
+            # 构建备份文件路径（固定名称，只保留最新备份）
+            backup_path = f"{self.db_path}.latest.bak"
+            
+            # 如果已存在旧备份，先删除
+            if os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                    LogManager.instance().info(f"[DB] Removed old backup: {backup_path}")
+                except Exception as e:
+                    LogManager.instance().warning(f"[DB] Failed to remove old backup: {e}")
+            
+            # 执行备份
+            shutil.copy2(self.db_path, backup_path)
+            LogManager.instance().info(f"[DB] Database backed up to: {backup_path}")
+            
+            # 同时备份 WAL 和 SHM 文件（如果存在）
+            for ext in ["-wal", "-shm"]:
+                src = f"{self.db_path}{ext}"
+                dst = f"{backup_path}{ext}"
+                if os.path.exists(src):
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                        shutil.copy2(src, dst)
+                    except Exception as e:
+                        LogManager.instance().warning(f"[DB] Failed to backup {ext} file: {e}")
+            
+            return True
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to backup database on exit: {e}")
+            return False
+
     def _normalize_bbox_json_str(self, v):
         if v is None:
             return None
@@ -616,21 +658,54 @@ class BirdLibraryDB:
         self._dedupe_specific_normalized_paths(cursor, table_name, keys)
 
     def _get_connection(self):
+        """获取数据库连接，配置保护参数以减少损坏风险"""
         # check_same_thread=False 允许在多线程中复用连接（配合锁使用）
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
         conn.row_factory = sqlite3.Row  # 让 cursor 返回类似字典的对象
+        
+        # 配置数据库保护参数
         try:
-            conn.execute("PRAGMA busy_timeout=5000")
+            # 设置忙等待超时时间为10秒，避免并发访问冲突
+            conn.execute("PRAGMA busy_timeout=10000")
         except Exception:
             pass
+        
         try:
+            # 使用WAL模式，提高并发性能并减少损坏风险
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception:
             pass
+        
         try:
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # 使用FULL同步模式，确保数据完整性（比NORMAL更安全）
+            conn.execute("PRAGMA synchronous=FULL")
         except Exception:
             pass
+        
+        try:
+            # 启用外键约束检查
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        
+        try:
+            # 设置临时存储为内存，提高性能
+            conn.execute("PRAGMA temp_store=MEMORY")
+        except Exception:
+            pass
+        
+        try:
+            # 设置缓存大小为10000页（约40MB），提高性能
+            conn.execute("PRAGMA cache_size=10000")
+        except Exception:
+            pass
+        
+        try:
+            # 启用自动检查点，每1000页进行一次检查点操作
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
+        except Exception:
+            pass
+        
         return conn
 
     def _check_database_integrity(self):
@@ -655,21 +730,214 @@ class BirdLibraryDB:
             return False
 
     def _backup_and_rebuild_database(self):
-        """备份损坏的数据库并重建"""
+        """备份损坏的数据库并尝试修复，如果修复失败则重建"""
+        import shutil
+        from datetime import datetime
+        
+        # 显示错误弹窗告知用户数据库损坏
         try:
-            import shutil
-            from datetime import datetime
-            
-            backup_path = f"{self.db_path}.corrupted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            from PyQt6.QtWidgets import QMessageBox, QApplication
+            # 确保有QApplication实例
+            app = QApplication.instance()
+            if app:
+                msg_box = QMessageBox()
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+                msg_box.setWindowTitle("数据库损坏")
+                msg_box.setText("检测到数据库文件损坏，需要重建数据库。\n\n"
+                               "系统将尝试以下操作：\n"
+                               "1. 备份损坏的数据库\n"
+                               "2. 尝试修复数据库\n"
+                               "3. 如果修复失败，将重建数据库并尝试恢复数据\n\n"
+                               "点击'确定'继续，点击'取消'退出程序。")
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+                msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+                
+                result = msg_box.exec()
+                if result == QMessageBox.StandardButton.Cancel:
+                    LogManager.instance().warning("[DB] User cancelled database rebuild, exiting")
+                    import sys
+                    sys.exit(1)
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to show warning dialog: {e}")
+        
+        backup_path = f"{self.db_path}.corrupted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+        
+        try:
+            # 首先备份损坏的数据库
             shutil.copy2(self.db_path, backup_path)
             LogManager.instance().info(f"[DB] Corrupted database backed up to: {backup_path}")
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to backup corrupted database: {e}")
+            # 即使备份失败，也尝试继续修复
+        
+        # 尝试修复数据库而不是直接删除
+        try:
+            LogManager.instance().info(f"[DB] Attempting to repair database...")
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            cursor = conn.cursor()
             
+            # 尝试导出数据到内存
+            cursor.execute("PRAGMA foreign_keys = OFF")
+            cursor.execute("BEGIN TRANSACTION")
+            
+            # 尝试修复
+            cursor.execute("REINDEX")
+            cursor.execute("ANALYZE")
+            
+            conn.commit()
+            conn.close()
+            
+            # 再次检查完整性
+            if self._check_database_integrity():
+                LogManager.instance().info(f"[DB] Database repaired successfully")
+                # 显示修复成功消息
+                try:
+                    from PyQt6.QtWidgets import QMessageBox, QApplication
+                    app = QApplication.instance()
+                    if app:
+                        QMessageBox.information(None, "数据库修复成功", 
+                                               "数据库已成功修复，所有数据已保留。\n"
+                                               f"损坏的数据库已备份到: {backup_path}")
+                except Exception:
+                    pass
+                return True
+            else:
+                LogManager.instance().warning(f"[DB] Database repair failed, will recreate")
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Database repair error: {e}")
+        
+        # 如果修复失败，尝试导出数据后重建
+        try:
+            LogManager.instance().info(f"[DB] Attempting to export data before rebuild...")
+            exported_data = self._try_export_data()
+            
+            # 删除损坏的数据库
             os.remove(self.db_path)
             LogManager.instance().info(f"[DB] Corrupted database removed, will create new one")
+            
+            # 如果成功导出数据，在新数据库中恢复
+            if exported_data:
+                LogManager.instance().info(f"[DB] Will restore {len(exported_data)} records to new database")
+                self._exported_data_for_restore = exported_data
+            
             return True
         except Exception as e:
-            LogManager.instance().warning(f"[DB] Failed to backup/rebuild database: {e}")
+            LogManager.instance().warning(f"[DB] Failed to rebuild database: {e}")
+            
+            # 恢复操作失败，尝试将备份文件恢复为数据库文件
+            try:
+                if os.path.exists(backup_path):
+                    LogManager.instance().info(f"[DB] Attempting to restore backup file...")
+                    
+                    # 如果当前数据库文件存在（可能是部分创建的），先删除
+                    if os.path.exists(self.db_path):
+                        os.remove(self.db_path)
+                    
+                    # 将备份文件恢复为数据库文件
+                    shutil.copy2(backup_path, self.db_path)
+                    LogManager.instance().info(f"[DB] Backup file restored to: {self.db_path}")
+                    
+                    # 显示警告弹窗
+                    try:
+                        from PyQt6.QtWidgets import QMessageBox, QApplication
+                        app = QApplication.instance()
+                        if app:
+                            QMessageBox.warning(None, "数据库恢复警告", 
+                                               "数据库重建失败，已恢复为备份版本。\n\n"
+                                               "建议：\n"
+                                               "1. 检查磁盘空间是否充足\n"
+                                               "2. 尝试重新启动程序\n"
+                                               "3. 如果问题持续，请手动恢复数据库备份\n\n"
+                                               f"备份文件位置: {backup_path}")
+                    except Exception:
+                        pass
+                    
+                    return True
+            except Exception as restore_error:
+                LogManager.instance().error(f"[DB] Failed to restore backup file: {restore_error}")
+                
+                # 显示严重错误弹窗
+                try:
+                    from PyQt6.QtWidgets import QMessageBox, QApplication
+                    app = QApplication.instance()
+                    if app:
+                        QMessageBox.critical(None, "数据库严重错误", 
+                                            "数据库重建失败，且无法恢复备份文件。\n\n"
+                                            "程序将无法正常运行，请手动恢复数据库：\n"
+                                            f"1. 备份文件位置: {backup_path}\n"
+                                            f"2. 数据库位置: {self.db_path}\n\n"
+                                            "建议联系技术支持或手动恢复数据。")
+                except Exception:
+                    pass
+            
             return False
+    
+    def _try_export_data(self):
+        """尝试从损坏的数据库中导出数据"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # 尝试导出 bird_results 表的数据
+            cursor.execute("SELECT * FROM bird_results LIMIT 10000")
+            rows = cursor.fetchall()
+            
+            data = []
+            for row in rows:
+                try:
+                    data.append(dict(row))
+                except Exception:
+                    pass
+            
+            conn.close()
+            return data
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to export data: {e}")
+            return []
+    
+    def _restore_exported_data(self):
+        """恢复导出的数据到新数据库"""
+        if not hasattr(self, '_exported_data_for_restore') or not self._exported_data_for_restore:
+            return
+        
+        try:
+            LogManager.instance().info(f"[DB] Restoring {len(self._exported_data_for_restore)} records...")
+            
+            with self._lock:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                restored_count = 0
+                for record in self._exported_data_for_restore:
+                    try:
+                        # 构建插入语句
+                        columns = []
+                        values = []
+                        placeholders = []
+                        
+                        for key, value in record.items():
+                            if key and value is not None:
+                                columns.append(key)
+                                values.append(value)
+                                placeholders.append('?')
+                        
+                        if columns:
+                            sql = f"INSERT OR REPLACE INTO bird_results ({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
+                            cursor.execute(sql, values)
+                            restored_count += 1
+                    except Exception:
+                        pass
+                
+                conn.commit()
+                conn.close()
+                
+                LogManager.instance().info(f"[DB] Restored {restored_count} records")
+                
+            # 清除导出的数据
+            delattr(self, '_exported_data_for_restore')
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to restore data: {e}")
 
     def _init_db(self):
         """初始化数据库：创建表结构"""
@@ -678,8 +946,10 @@ class BirdLibraryDB:
         except Exception:
             pass
         
+        needs_restore = False
         if os.path.exists(self.db_path):
             if not self._check_database_integrity():
+                needs_restore = True
                 self._backup_and_rebuild_database()
         
         with self._lock:
@@ -860,6 +1130,10 @@ class BirdLibraryDB:
 
             conn.commit()
             conn.close()
+            
+            # 如果需要，恢复导出的数据
+            if needs_restore:
+                self._restore_exported_data()
 
     def _get_thumbnail_disk_cache_table(self, scope):
         s = str(scope or "library").lower()

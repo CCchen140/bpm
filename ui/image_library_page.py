@@ -2695,7 +2695,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # Refresh info panel if current selection affected
         selected = self.get_selected_files()
         if selected and self._normalize_path_key(selected[0]['path']) in target_keys:
-             self.info_panel.update_info(selected[0]['path'])
+            # 从数据库获取最新记录，确保标签信息已更新
+            try:
+                record = self.db.get_result_by_path(selected[0]['path'], table_name='bird_results')
+                io_data = {"record": record} if record else None
+                self.info_panel.update_info(selected[0]['path'], io_data=io_data)
+            except Exception:
+                self.info_panel.update_info(selected[0]['path'])
 
     def on_thumbnail_context_menu_proxy(self, index, pos):
         """处理缩略图右键菜单代理"""
@@ -3863,7 +3869,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 if self.info_panel.isVisible():
                      selected_paths = self.get_selected_paths()
                      if image_path in selected_paths:
-                         self.info_panel.update_info(image_path)
+                         # 从数据库获取最新记录，确保备注信息已更新
+                         try:
+                             record = self.db.get_result_by_path(image_path, table_name='bird_results')
+                             io_data = {"record": record} if record else None
+                             self.info_panel.update_info(image_path, io_data=io_data)
+                         except Exception:
+                             self.info_panel.update_info(image_path)
                          
                 NotificationManager.instance().show_toast("备注已更新")
                 
@@ -3898,12 +3910,23 @@ class ImageLibraryPage(BaseImageBrowserPage):
     def _on_geo_updated(self, file_paths):
         """地理位置更新完成回调，刷新信息面板"""
         try:
-            # 获取当前选中的图片
+            # 清除可能存在的缓存，确保下次切换图片时能获取最新数据
+            # 注意：image_library_page 没有使用 _info_panel_cache，但 info_panel 内部可能有 EXIF 缓存
+            # 这里我们强制刷新当前显示的图片的信息面板
             current_path = getattr(self.preview_panel, "current_image_path", None) if hasattr(self, 'preview_panel') else None
             if current_path and current_path in file_paths:
                 # 刷新信息面板
                 if hasattr(self, 'info_panel') and self.info_panel:
-                    self.info_panel.update_info(current_path)
+                    # 从数据库获取最新记录，确保地理位置信息已更新
+                    try:
+                        from utils.sql.data_base import BirdLibraryDB
+                        db = BirdLibraryDB()
+                        record = db.get_result_by_path(current_path, table_name='bird_results')
+                        io_data = {"record": record} if record else None
+                        self.info_panel.update_info(current_path, io_data=io_data)
+                    except Exception:
+                        # 如果数据库查询失败，仍然尝试刷新信息面板
+                        self.info_panel.update_info(current_path)
         except Exception:
             pass
 
@@ -4828,6 +4851,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 self.preview_panel.set_favorite(is_favorite)
         except Exception:
             pass
+        
+        # 刷新信息面板（如果当前选中的图片被修改）
+        try:
+            selected = self.get_selected_files()
+            if selected and self._normalize_path_key(selected[0]['path']) in target_keys:
+                record = self.db.get_result_by_path(selected[0]['path'], table_name='bird_results')
+                io_data = {"record": record} if record else None
+                self.info_panel.update_info(selected[0]['path'], io_data=io_data)
+        except Exception:
+            pass
              
         # 4. 预加载
         if is_favorite:
@@ -4944,6 +4977,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
             if getattr(self, "current_preview_path", None) and self._normalize_path_key(self.current_preview_path) in target_keys:
                 if hasattr(self, 'preview_panel'):
                     self.preview_panel.set_label(label)
+        except Exception:
+            pass
+        
+        # 刷新信息面板（如果当前选中的图片被修改）
+        try:
+            selected = self.get_selected_files()
+            if selected and self._normalize_path_key(selected[0]['path']) in target_keys:
+                record = self.db.get_result_by_path(selected[0]['path'], table_name='bird_results')
+                io_data = {"record": record} if record else None
+                self.info_panel.update_info(selected[0]['path'], io_data=io_data)
         except Exception:
             pass
         
@@ -5258,6 +5301,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
         try:
             if hasattr(self, 'preview_panel') and self._normalize_path_key(self.preview_panel.current_image_path) in target_keys:
                 self.preview_panel.set_rating(rating)
+        except Exception:
+            pass
+        
+        # 刷新信息面板（如果当前选中的图片被修改）
+        try:
+            selected = self.get_selected_files()
+            if selected and self._normalize_path_key(selected[0]['path']) in target_keys:
+                record = self.db.get_result_by_path(selected[0]['path'], table_name='bird_results')
+                io_data = {"record": record} if record else None
+                self.info_panel.update_info(selected[0]['path'], io_data=io_data)
         except Exception:
             pass
             

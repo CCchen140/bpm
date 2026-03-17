@@ -16543,10 +16543,27 @@ class ImportPage(BaseImageBrowserPage):
     def _on_geo_updated(self, file_paths):
         """地理位置更新完成回调，刷新信息面板"""
         try:
+            # 清除信息面板缓存，确保下次切换图片时能获取最新数据
+            if hasattr(self, '_info_panel_cache') and self._info_panel_cache:
+                for path in file_paths:
+                    # 清除该路径的所有缓存条目（包括虚拟模式缓存）
+                    keys_to_remove = [k for k in self._info_panel_cache.keys() if k == path or k.startswith(path + "_")]
+                    for k in keys_to_remove:
+                        self._info_panel_cache.pop(k, None)
+            
             current_path = getattr(self.preview_panel, "current_image_path", None) if hasattr(self, 'preview_panel') else None
             if current_path and current_path in file_paths:
                 if hasattr(self, 'info_panel') and self.info_panel:
-                    self.info_panel.update_info(current_path)
+                    # 从数据库获取最新记录，确保地理位置信息已更新
+                    try:
+                        from utils.sql.data_base import BirdLibraryDB
+                        db = BirdLibraryDB()
+                        record = db.get_result_by_path(current_path, table_name='import_cache')
+                        io_data = {"record": record} if record else None
+                        self.info_panel.update_info(current_path, io_data=io_data)
+                    except Exception:
+                        # 如果数据库查询失败，仍然尝试刷新信息面板
+                        self.info_panel.update_info(current_path)
         except Exception:
             pass
 
