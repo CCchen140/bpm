@@ -15,6 +15,8 @@ deepseek*
 .ruff_cache/*
 cache/logs/*
 cache/pictures/*
+cache/update/*
+cache/diff/*
 tests/*
 dist/*
 build/installer/*
@@ -22,4 +24,5 @@ build/_pyi_work/*
 models/*
 opensource/*
 cache/focus_scaled/*
+update/*.json
 .git-backup1/*

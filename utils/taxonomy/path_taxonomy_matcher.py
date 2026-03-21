@@ -3,6 +3,23 @@ import re
 
 
 _CHINESE_RE = re.compile(r"^[\u4e00-\u9fff]+$")
+# 匹配全英文字符串（包含字母、空格、连字符、下划线等常见英文命名字符）
+_ENGLISH_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_\-\s]*$")
+
+
+def _is_english_name(name: str) -> bool:
+    """
+    判断文件夹名是否为全英文命名
+
+    参数：
+        name: 文件夹名
+
+    返回：
+        如果是全英文命名返回True，否则返回False
+    """
+    if not name:
+        return False
+    return bool(_ENGLISH_RE.match(str(name).strip()))
 
 
 def match_taxonomy_from_path(file_path: str, root_path: str):
@@ -27,22 +44,39 @@ def match_taxonomy_from_path(file_path: str, root_path: str):
     folder_parts = parts[:-1]
     for i in range(0, len(folder_parts)):
         o = folder_parts[i]
-        if not (o and str(o).endswith("目")):
+        if not o:
             continue
+
+        # 判断当前文件夹名是否为全英文
+        is_english_order = _is_english_name(o)
+
+        # 如果不是全英文，则需要以"目"结尾
+        if not is_english_order and not str(o).endswith("目"):
+            continue
+
         if i + 3 >= len(folder_parts):
             continue
         f = folder_parts[i + 1]
         g = folder_parts[i + 2]
         s = folder_parts[i + 3]
-        if not (f and str(f).endswith("科")):
+
+        # 判断科、属文件夹名是否为全英文
+        is_english_family = _is_english_name(f)
+        is_english_genus = _is_english_name(g)
+
+        # 如果不是全英文，则需要以对应的后缀结尾
+        if not is_english_family and not str(f).endswith("科"):
             continue
-        if not (g and str(g).endswith("属")):
+        if not is_english_genus and not str(g).endswith("属"):
             continue
+
         try:
             s_str = str(s or "").strip()
         except Exception:
             s_str = ""
-        if not s_str or not _CHINESE_RE.match(s_str):
+        # 对于种名，如果是全英文则直接接受，否则需要是中文
+        is_english_species = _is_english_name(s_str)
+        if not s_str or (not is_english_species and not _CHINESE_RE.match(s_str)):
             continue
         return {
             "order_cls": str(o),

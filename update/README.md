@@ -246,71 +246,6 @@ calculate_upgrade_steps("0.0.4_update1", "0.0.5_update2")
 | `size` | integer | 是 | 文件大小（字节） |
 | `hash` | string | 是 | 文件 SHA256 哈希值，格式 `sha256:xxx` |
 
-##### 完整包分包说明
-
-**重要：完整包（cross_upgrade）超过 2GB 时必须分包**
-
-由于 GitHub Releases 单文件限制为 2GB，而栖图的完整安装包通常超过此限制，因此完整包**必须**分包上传。
-
-**分包规则：**
-- 只有 `cross_upgrade`（完整包）需要分包
-- `updates`（增量更新包）通常较小，不需要分包
-- 分包后，客户端会自动下载所有分包并合并
-
-**完整包分包示例：**
-
-```json
-{
-  "base_version": "0.0.5",
-  "cross_upgrade": {
-    "from_base": "0.0.4",
-    "package": "qitu_V0.0.5.zip",
-    "size": 2684354560,
-    "hash": "sha256:abc123...",
-    "is_split": true,
-    "parts": [
-      {
-        "part_num": 1,
-        "filename": "qitu_V0.0.5.zip.part001",
-        "size": 1992294400,
-        "hash": "sha256:def456..."
-      },
-      {
-        "part_num": 2,
-        "filename": "qitu_V0.0.5.zip.part002",
-        "size": 692060160,
-        "hash": "sha256:ghi789..."
-      }
-    ]
-  },
-  "updates": {
-    "1": {
-      "version": "0.0.5_update1",
-      "package": "qitu_V0.0.5_update1.zip",
-      "size": 10240000,
-      "hash": "sha256:jkl012..."
-      // 增量包不需要分包
-    }
-  }
-}
-```
-
-**分包字段说明：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `is_split` | boolean | 是 | 是否已分包，完整包必须为 `true` |
-| `parts` | array | 是 | 分包信息列表 |
-
-**parts 数组元素结构：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `part_num` | integer | 是 | 分包序号（从 1 开始） |
-| `filename` | string | 是 | 分包文件名（如 `qitu_V0.0.5.zip.part001`） |
-| `size` | integer | 是 | 分包大小（字节） |
-| `hash` | string | 是 | 分包 SHA256 哈希值，格式 `sha256:xxx` |
-
 #### 版本类型说明
 
 **1. 初始版本**
@@ -375,53 +310,118 @@ calculate_upgrade_steps("0.0.4_update1", "0.0.5_update2")
 
 #### 自动生成
 
-##### 增量更新包（update）
+##### 完整打包流程（推荐）
 
-增量更新包通常小于 2GB，可以直接生成并更新 manifest：
+使用 `build_delta.py` 一键完成：创建差分包 → 生成 ISS 脚本 → 编译安装包 → 创建 zip → 更新 manifest
 
-```bash
-# 生成 update 升级包并自动更新 manifest
-python build/build_delta.py --from "dist/qitu_V0.0.4" --update 1 --output-zip --update-manifest
+**自动检测update版本：**
 
-# 指定 changelog
-python build/build_delta.py --from "dist/qitu_V0.0.4" --update 1 --output-zip --update-manifest --changelog "修复bug\n- 修复了xxx问题"
+打包脚本会自动从 `utils/system/app_info_manager.py` 中的 `APP_UPDATE` 变量读取update版本号。
+
+```python
+# 在 app_info_manager.py 中设置
+APP_UPDATE = "update1"  # 设置update版本号
 ```
 
-##### 完整包（cross_upgrade）
-
-完整包通常超过 2GB，**必须分包**。流程如下：
+**目录命名规则：**
+- 完整包：`dist/qitu_V0.0.4_fr`（fr = full release）
+- Update 包：`dist/qitu_V0.0.4_update1`（update1 = update 1）
 
 ```bash
-# 1. 生成分包（这会创建 zip 并自动检测是否需要分包）
-python build/build_delta.py --from "dist/qitu_V0.0.4" --to "dist/qitu_V0.0.5" --output-zip --update-manifest
+# 1. 先打包完整版（生成 dist/qitu_V0.0.4_fr）
+python build/build.py
 
-# 如果提示文件超过 2GB，会显示分包信息
+# 2. 打包 update1 完整版（自动检测update版本，生成 dist/qitu_V0.0.4_update1）
+python build/build.py
 
-# 2. 如果忘记分包或需要重新分包，使用 split_package.py
-python build/split_package.py --file "dist/qitu_V0.0.5.zip"
+# 3. 创建差分包（自动查找 fr 和 update1 目录，自动检测update版本）
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --output-zip --update-manifest
 
-# 这会：
-# - 自动分包（如果超过 2GB）
-# - 自动更新 manifest 中的分包信息
+# 跨版本升级（从 V0.0.4 升级到 V0.0.5）
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --to "dist/qitu_V0.0.5_fr" --output-zip --update-manifest
+
+# changelog 从 ReleaseNote.md 自动读取
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --output-zip --update-manifest
 ```
 
-**完整包发布流程：**
+##### 分步打包流程
 
-1. **生成基础 manifest**（包含完整包信息，但无分包信息）
-   ```bash
-   python build/build_delta.py --from "dist/qitu_V0.0.4" --to "dist/qitu_V0.0.5" --output-zip --update-manifest
-   ```
+如果不需要创建 zip 包或只想生成 exe 安装包：
 
-2. **执行分包**（自动检测并更新 manifest）
-   ```bash
-   python build/split_package.py --file "dist/qitu_V0.0.5.zip"
-   ```
+**使用 build.py（推荐）：**
 
-3. **上传到 GitHub Releases**
-   - `qitu_V0.0.5.zip.part001`（必须）
-   - `qitu_V0.0.5.zip.part002`（如果有，必须）
-   - `update_manifest.json`（必须）
-   - `qitu_V0.0.5.zip`（原始文件，可选）
+```bash
+# 完整发布流程（打包 → 差分 → zip → manifest）
+python build/build.py --delta-from "dist/qitu_V0.0.4_fr" --complete
+
+# 打包并生成安装包（不生成zip）
+python build/build.py --delta-from "dist/qitu_V0.0.4_fr" --package
+
+# 仅创建差分包（不编译安装包）
+python build/build.py --delta-from "dist/qitu_V0.0.4_fr" --delta
+```
+
+**使用 build_delta.py：**
+
+```bash
+# 只生成差异文件和 ISS 脚本（不编译）
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --to "dist/qitu_V0.0.4_update1"
+
+# 生成 ISS 脚本并编译为 exe 安装包（不创建 zip）
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --to "dist/qitu_V0.0.4_update1" --setup
+
+# 完整流程（生成 ISS、编译、创建 zip、更新 manifest）
+python build/build_delta.py --from "dist/qitu_V0.0.4_fr" --output-zip --update-manifest
+```
+
+**build.py 三种模式对比：**
+
+| 模式 | 参数 | 输出 |
+|------|------|------|
+| 仅差分包 | `--delta` | ISS脚本 + 差异文件 |
+| 打包并生成安装包 | `--package` | ISS脚本 + 差异文件 + exe安装包 |
+| 完整发布流程 | `--complete` | 以上所有 + zip包 + manifest更新 |
+
+**参数说明：**
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--from` | 旧版本 dist 目录路径（必需） | `dist/qitu_V0.0.4_fr` |
+| `--to` | 新版本 dist 目录路径（可选，默认自动查找） | `dist/qitu_V0.0.4_update1` |
+| `--version` | 升级包版本号（可选，默认从目录名提取） | `0.0.4` |
+| `--update` | update 编号（可选，默认自动检测） | `1` |
+| `--setup` | 生成 ISS 脚本并编译为 exe 安装包 | - |
+| `--output-zip` | 输出为 zip 压缩包（与 --setup 互斥，优先） | - |
+| `--update-manifest` | 同时更新 update_manifest.json（需配合 --output-zip） | - |
+| `--changelog` | 更新日志内容（可选，默认从 ReleaseNote.md 读取） | `"修复bug\n- 修复问题"` |
+
+**执行模式：**
+
+1. **无 `--setup` 和 `--output-zip`**：只生成差异文件和 ISS 脚本，不编译
+2. **`--setup`**：生成 ISS 脚本并编译为 exe 安装包，不创建 zip
+3. **`--output-zip`**：完整流程（生成 ISS、编译、创建 zip、可选更新 manifest）
+4. **同时指定 `--setup` 和 `--output-zip`**：`--output-zip` 优先，执行完整流程
+
+**流程说明：**
+1. 自动从代码中读取 `APP_UPDATE` 版本号
+2. 自动查找旧版本（`fr` 目录）和新版本（`update1` 目录）
+3. 计算新旧版本文件差异
+4. 生成 Inno Setup ISS 脚本
+5. 编译 ISS 生成 exe 安装包
+6. 创建 zip 包（包含 exe + 差异清单）
+7. 计算 zip 的 SHA256 哈希值
+8. 从 `ReleaseNote.md` 自动读取changelog
+9. 更新 `update_manifest.json`
+
+**输出文件：**
+- `build/installer/update_V0.0.4_update1.iss` - Inno Setup 脚本
+- `build/installer/栖图_V0.0.4_gpu_update1.exe` - 安装包
+- `dist/qitu_V0.0.4_update1.zip` - GitHub 发布用 zip 包
+- `dist/update_manifest.json` - 版本清单
+
+**上传到 GitHub Releases：**
+- `qitu_V0.0.4_u1.zip`（必须）
+- `update_manifest.json`（必须）
 
 ### 3.4 链路测试模式
 
@@ -447,9 +447,9 @@ TEST_MODE = True  # 默认 False
 
 ```json
 {
-  "latest_version": "0.0.5_test",
+  "latest_version": "0.0.5_update1_test",
   "release_date": "2026-03-15",
-  "changelog": "## 测试版本 V0.0.5_test\n- 用于测试升级链路",
+  "changelog": "## 测试版本 V0.0.5_update1_test\n- 用于测试升级链路",
   "force_update": false,
   "releases": {
     "0.0.4": {
@@ -465,7 +465,14 @@ TEST_MODE = True  # 默认 False
         "size": 1024,
         "hash": "sha256:xxx"
       },
-      "updates": {}
+      "updates": {
+        "1": {
+          "version": "0.0.5_update1_test",
+          "package": "qitu_V0.0.5_update1_test.zip",
+          "size": 1024,
+          "hash": "sha256:yyy"
+        }
+      }
     }
   }
 }

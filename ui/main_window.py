@@ -870,10 +870,13 @@ class MainWindow(QMainWindow):
         self._entered_main_interface = True
         self.guide_page.hide()
         self.main_widget.show()
-        
+
+        # 升级测试
+        # NotificationManager.instance().show_toast("update2", duration=3000)
+
         if hasattr(self, 'icon_toolbar'):
              self.icon_toolbar.show()
-        
+
         try:
             QTimer.singleShot(150, lambda: self._ensure_page_loaded(0))
             QTimer.singleShot(250, lambda: self._ensure_page_loaded(1))
@@ -2079,30 +2082,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 停止所有后台任务，确保线程及时退出
+        # 停止所有后台任务（异步，不等待）
         try:
             lib = getattr(self, "page_library", None)
             if lib is not None and hasattr(lib, "shutdown"):
-                lib.shutdown()
+                threading.Thread(target=lib.shutdown, daemon=True).start()
         except Exception:
             pass
         try:
             imp = getattr(self, "page_import", None)
             if imp is not None and hasattr(imp, "shutdown"):
-                imp.shutdown()
+                threading.Thread(target=imp.shutdown, daemon=True).start()
         except Exception:
             pass
         
-        # 关闭本地识别服务 IPC 进程
+        # 关闭本地识别服务 IPC 进程（异步，不等待）
         try:
             from core.recognizer.bird_species_recognizer import _get_local_bird_ipc_client
             ipc_client = _get_local_bird_ipc_client()
             if ipc_client is not None and hasattr(ipc_client, "shutdown"):
-                print("[BirdIPC] 正在关闭本地识别服务...")
-                ipc_client.shutdown()
-                print("[BirdIPC] 本地识别服务已关闭")
-        except Exception as e:
-            print(f"[BirdIPC] 关闭本地识别服务失败: {e}")
+                # 使用较短的超时时间，优先保证退出速度
+                threading.Thread(target=lambda: ipc_client.shutdown(timeout=0.5), daemon=True).start()
+        except Exception:
             pass
 
         # 保存窗口状态
@@ -2137,9 +2138,24 @@ class MainWindow(QMainWindow):
 
         pass
 
+        # 停止所有定时器
+        timers_to_stop = [
+            'exif_task_timer',
+            'sys_timer',
+            'settings_click_timer',
+            'charts_debug_click_timer'
+        ]
+        for timer_name in timers_to_stop:
+            try:
+                timer = getattr(self, timer_name, None)
+                if timer and hasattr(timer, 'stop'):
+                    timer.stop()
+            except Exception:
+                pass
+
         # 检查是否有正在进行的 Exif 写入任务
         from utils.exif.exif_utils import ExifHandleWorker
-        
+
         worker_instance = ExifHandleWorker.get_instance()
         skip_confirm = False
         try:
@@ -2161,7 +2177,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 unique_files = 0
             completed, total = worker_instance.get_task_progress()
-            
+
             confirmed = NotificationManager.instance().ask_confirmation(
                 "后台任务正在运行",
                 f"当前还有 Exif 信息正在写入中（待处理 {pending}，涉及文件 {unique_files}）。\n"
@@ -2169,27 +2185,286 @@ class MainWindow(QMainWindow):
                 "强制退出可能会导致数据写入不完整。\n"
                 "建议等待任务完成后再退出"
             )
-            
+
             if not confirmed:
                 event.ignore()
                 return
+
+        # 使用线程异步执行耗时的清理操作，避免阻塞UI
+        import threading
+        cleanup_thread = threading.Thread(target=self._cleanup_on_exit, args=(worker_instance,), daemon=True)
+        cleanup_thread.start()
+
+        # 接受关闭事件，立即关闭窗口
+        event.accept()
+
+        # 强制退出应用程序
         try:
-            worker_instance.stop(force=True)
+            from PyQt6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                app.quit()
         except Exception:
             pass
-        
-        # 程序退出时备份数据库
+
+        # 使用 os._exit 强制终止进程，确保不会残留
+        # 延迟一点执行，让清理线程有机会运行
+        def _force_exit():
+            import time
+            time.sleep(1)  # 给清理线程1秒时间
+            import os
+            import sys
+            # 强制退出，不执行清理操作
+            os._exit(0)
+
+        import threading
+        exit_thread = threading.Thread(target=_force_exit, daemon=True)
+        exit_thread.start()
+
+        super().closeEvent(event)
+
+    def _cleanup_on_exit(self, worker_instance):
+        """
+        在后台线程中执行清理操作
+        避免阻塞主线程导致退出缓慢
+        """
+        import time
+
+        # 记录启动时的进程列表
+        self._log_processes_at_exit("退出开始")
+
+        # 停止 ExifHandleWorker（不等待，立即返回）
+        try:
+            worker_instance.stop(force=True)
+            print("[ExitDebug] ExifHandleWorker.stop() 已调用")
+        except Exception as e:
+            print(f"[ExitDebug] ExifHandleWorker.stop() 失败: {e}")
+
+        # 强制终止所有子进程（减少等待时间）
+        try:
+            self._kill_all_children_processes_fast()
+        except Exception as e:
+            print(f"[ExitDebug] 终止子进程失败: {e}")
+
+        # 记录退出后的进程列表
+        self._log_processes_at_exit("退出完成")
+
+        # 异步备份数据库
         try:
             from utils.sql.data_base import BirdLibraryDB
             db = BirdLibraryDB()
+            # 使用超时较短的备份
             db.backup_on_exit()
-        except Exception as e:
+        except Exception:
+            pass
+
+    def _log_processes_at_exit(self, stage: str):
+        """
+        记录当前所有子进程信息，用于调试残留进程问题
+        """
+        try:
+            import psutil
+            import os
+
+            current_pid = os.getpid()
+            current_process = psutil.Process(current_pid)
+
+            print(f"\n[ExitDebug] ===== {stage} 时的进程列表 =====")
+            print(f"[ExitDebug] 当前进程 PID: {current_pid}")
+
+            # 获取所有子进程
             try:
-                LogManager.instance().warning(f"退出时备份数据库失败: {e}")
-            except Exception:
+                children = current_process.children(recursive=True)
+                if not children:
+                    print(f"[ExitDebug] 没有子进程")
+                else:
+                    print(f"[ExitDebug] 发现 {len(children)} 个子进程:")
+                    for proc in children:
+                        try:
+                            proc_info = proc.as_dict(attrs=['pid', 'name', 'exe', 'cmdline', 'create_time'])
+                            print(f"[ExitDebug]   PID={proc_info['pid']}, Name={proc_info['name']}")
+                            print(f"[ExitDebug]     Exe={proc_info.get('exe', 'N/A')}")
+                            cmdline = proc_info.get('cmdline', [])
+                            if cmdline:
+                                print(f"[ExitDebug]     Cmdline={' '.join(cmdline[:3])}...")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            print(f"[ExitDebug]   PID={proc.pid} (无法获取详细信息)")
+                        except Exception as e:
+                            print(f"[ExitDebug]   PID={proc.pid} (错误: {e})")
+            except Exception as e:
+                print(f"[ExitDebug] 获取子进程列表失败: {e}")
+
+            # 同时记录所有 qitu 相关的进程（包括不是子进程的）
+            print(f"[ExitDebug] ----- 系统中所有 qitu 相关进程 -----")
+            for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+                try:
+                    proc_info = proc.info
+                    proc_name = proc_info.get('name', '').lower()
+                    proc_exe = proc_info.get('exe', '')
+                    if 'qitu' in proc_name or (proc_exe and 'qitu' in proc_exe.lower()):
+                        is_current = proc_info['pid'] == current_pid
+                        print(f"[ExitDebug]   PID={proc_info['pid']}, Name={proc_info['name']}, Current={is_current}")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                except Exception:
+                    continue
+
+            print(f"[ExitDebug] ===== 进程列表结束 =====\n")
+
+        except Exception as e:
+            print(f"[ExitDebug] 记录进程列表失败: {e}")
+
+    def _kill_all_children_processes_fast(self):
+        """
+        快速终止所有子进程
+        使用更短的超时时间，优先保证退出速度
+        """
+        try:
+            import psutil
+
+            current_pid = os.getpid()
+            current_process = psutil.Process(current_pid)
+
+            # 查找所有子进程
+            children = []
+            try:
+                children = current_process.children(recursive=True)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                print(f"[ExitDebug] 获取子进程失败: {e}")
                 pass
-        
-        super().closeEvent(event)
+
+            if not children:
+                print("[ExitDebug] 没有子进程需要终止")
+                return
+
+            print(f"[ExitDebug] 准备终止 {len(children)} 个子进程")
+
+            # 先尝试优雅终止
+            for proc in children:
+                try:
+                    print(f"[ExitDebug]   终止 PID={proc.pid}, Name={proc.name()}")
+                    proc.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                except Exception as e:
+                    print(f"[ExitDebug]   终止 PID={proc.pid} 失败: {e}")
+
+            # 短暂等待（最多0.5秒）
+            gone, alive = psutil.wait_procs(children, timeout=0.5)
+            print(f"[ExitDebug] 已终止 {len(gone)} 个进程，还有 {len(alive)} 个存活")
+
+            # 强制杀死仍未终止的进程
+            for proc in alive:
+                try:
+                    print(f"[ExitDebug]   强制杀死 PID={proc.pid}")
+                    proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                except Exception as e:
+                    print(f"[ExitDebug]   强制杀死 PID={proc.pid} 失败: {e}")
+
+            # 再次等待
+            if alive:
+                gone2, alive2 = psutil.wait_procs(alive, timeout=0.5)
+                print(f"[ExitDebug] 强制杀死后，已终止 {len(gone2)} 个，还有 {len(alive2)} 个存活")
+
+        except Exception as e:
+            print(f"[ExitDebug] 终止子进程过程出错: {e}")
+
+    def _kill_exiftool_processes(self):
+        """
+        强制终止所有残留的 exiftool 进程
+        用于程序退出时清理可能残留的子进程
+        """
+        try:
+            import psutil
+            import time
+
+            # 获取当前进程的 PID
+            current_pid = os.getpid()
+            current_process = psutil.Process(current_pid)
+
+            # 查找所有子进程中的 exiftool 进程
+            exiftool_processes = []
+            try:
+                children = current_process.children(recursive=True)
+                for child in children:
+                    try:
+                        # 检查进程名是否包含 exiftool
+                        if 'exiftool' in child.name().lower():
+                            exiftool_processes.append(child)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # 终止所有找到的 exiftool 进程
+            for proc in exiftool_processes:
+                try:
+                    proc.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # 等待进程终止
+            gone, alive = psutil.wait_procs(exiftool_processes, timeout=2)
+
+            # 强制杀死仍未终止的进程
+            for proc in alive:
+                try:
+                    proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # 再次等待
+            psutil.wait_procs(alive, timeout=1)
+
+        except Exception:
+            pass
+
+    def _kill_all_children_processes(self):
+        """
+        强制终止所有子进程
+        用于程序退出时清理可能残留的 Python 子进程
+        """
+        try:
+            import psutil
+
+            # 获取当前进程的 PID
+            current_pid = os.getpid()
+            current_process = psutil.Process(current_pid)
+
+            # 查找所有子进程
+            children = []
+            try:
+                children = current_process.children(recursive=True)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            if not children:
+                return
+
+            # 终止所有子进程
+            for proc in children:
+                try:
+                    proc.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # 等待进程终止
+            gone, alive = psutil.wait_procs(children, timeout=2)
+
+            # 强制杀死仍未终止的进程
+            for proc in alive:
+                try:
+                    proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # 再次等待
+            psutil.wait_procs(alive, timeout=1)
+
+        except Exception:
+            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

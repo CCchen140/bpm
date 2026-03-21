@@ -241,7 +241,7 @@ class InstallThread(QThread):
             return return_code == 0
             
         except Exception as e:
-            print(f"运行安装程序失败: {e}")
+            _log_error("运行安装程序失败", e)
             return False
     
     def _extract_package_with_tracking(self, package_path: str) -> Optional[List[str]]:
@@ -311,7 +311,7 @@ class InstallThread(QThread):
             return affected_files
 
         except Exception as e:
-            print(f"解压升级包失败: {e}")
+            _log_error("解压升级包失败", e)
             return None
 
     def _extract_package(self, package_path: str) -> bool:
@@ -329,7 +329,7 @@ class InstallThread(QThread):
             import tempfile
             
             if not package_path.endswith('.zip'):
-                print(f"不支持的压缩格式: {package_path}")
+                _log_error(f"不支持的压缩格式: {package_path}")
                 return False
             
             # 创建临时目录解压
@@ -342,7 +342,7 @@ class InstallThread(QThread):
                 return self._apply_delta_update(temp_dir)
                 
         except Exception as e:
-            print(f"解压失败: {e}")
+            _log_error("解压失败", e)
             return False
     
     def _apply_delta_update(self, delta_path: str) -> bool:
@@ -361,63 +361,63 @@ class InstallThread(QThread):
         """
         try:
             if not os.path.isdir(delta_path):
-                print(f"增量更新路径不是目录: {delta_path}")
+                _log_error(f"增量更新路径不是目录: {delta_path}")
                 return False
             
             # 第一步：处理删除列表
             delete_list_path = os.path.join(delta_path, "_delete_files.txt")
             if os.path.exists(delete_list_path):
-                print("处理删除文件列表...")
+                _log_info("处理删除文件列表...")
                 with open(delete_list_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         # 跳过注释和空行
                         if not line or line.startswith('#'):
                             continue
-                        
+
                         # 构建目标文件路径
                         file_to_delete = os.path.join(self.install_dir, line)
                         if os.path.exists(file_to_delete):
                             try:
                                 os.remove(file_to_delete)
-                                print(f"  [DELETE] {line}")
+                                _log_debug(f"[DELETE] {line}")
                             except Exception as e:
-                                print(f"  [警告] 无法删除 {line}: {e}")
+                                _log_warning(f"无法删除 {line}: {e}")
                         else:
-                            print(f"  [SKIP] 文件不存在: {line}")
+                            _log_debug(f"[SKIP] 文件不存在: {line}")
             
             # 第二步：复制新文件
-            print("复制新文件...")
+            _log_info("复制新文件...")
             copied_count = 0
             for root, dirs, files in os.walk(delta_path):
                 for file in files:
                     # 跳过特殊文件
                     if file.startswith('_'):
                         continue
-                    
+
                     src_path = os.path.join(root, file)
                     # 计算相对路径（使用正斜杠统一路径分隔符）
                     rel_path = os.path.relpath(src_path, delta_path).replace("\\", "/")
                     dst_path = os.path.join(self.install_dir, rel_path)
-                    
+
                     # 确保目标目录存在
                     dst_dir = os.path.dirname(dst_path)
                     os.makedirs(dst_dir, exist_ok=True)
-                    
+
                     # 复制文件
                     try:
                         shutil.copy2(src_path, dst_path)
                         copied_count += 1
-                        print(f"  [COPY] {rel_path}")
+                        _log_debug(f"[COPY] {rel_path}")
                     except Exception as e:
-                        print(f"  [错误] 无法复制 {rel_path}: {e}")
+                        _log_error(f"无法复制 {rel_path}: {e}")
                         return False
-            
-            print(f"增量更新完成，共复制 {copied_count} 个文件")
+
+            _log_info(f"增量更新完成，共复制 {copied_count} 个文件")
             return True
                 
         except Exception as e:
-            print(f"应用增量更新失败: {e}")
+            _log_error("应用增量更新失败", e)
             return False
     
     def cancel(self):
@@ -564,7 +564,7 @@ def restart_application(app_path: str) -> bool:
         )
         return True
     except Exception as e:
-        print(f"重启应用失败: {e}")
+        _log_error("重启应用失败", e)
         return False
 
 

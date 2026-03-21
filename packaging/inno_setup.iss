@@ -26,4 +26,8 @@ Name: "{group}\\{#MyAppName}"; Filename: "{app}\\{#MyAppExeName}"
 Name: "{commondesktop}\\{#MyAppName}"; Filename: "{app}\\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\\{#MyAppExeName}"; Description: "运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// 引用外部的卸载处理代码文件
+#include "..\build\installer_script.iss"

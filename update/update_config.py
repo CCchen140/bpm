@@ -91,6 +91,16 @@ TEST_VERSION_SUFFIX = "_test"
 # 如果为空，则使用正常的 UPDATE_MANIFEST_URL
 LINK_TEST_MANIFEST_URL = ""
 
+# 同版本升级开关
+# 开启后，即使当前版本与目标版本相同（忽略 _test 后缀），也允许升级
+# 用于测试同版本的升级流程
+SAME_VERSION_UPGRADE = False  # 默认 False
+
+# 强制提示已忽略版本开关
+# 开启后，检测到已忽略的版本时会按照未忽略来提示
+# 用于测试忽略版本功能
+FORCE_SHOW_IGNORED_VERSION = False  # 默认 False
+
 # =============================================================================
 # 路径配置
 # =============================================================================
@@ -98,20 +108,35 @@ LINK_TEST_MANIFEST_URL = ""
 def get_update_cache_dir() -> str:
     """
     获取升级缓存目录
-    
+
     返回:
         缓存目录路径
     """
-    # 使用系统临时目录或应用数据目录
-    if hasattr(os, 'getenv'):
-        # Windows: %LOCALAPPDATA%/栖图/cache/update
-        local_app_data = os.getenv('LOCALAPPDATA')
-        if local_app_data:
-            return os.path.join(local_app_data, "栖图", "cache", "update")
-    
-    # 回退到程序目录下的 cache/update
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 如果是打包后的程序，使用可执行文件所在目录
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境，使用代码目录
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_dir, "cache", "update")
+
+
+def get_diff_cache_dir() -> str:
+    """
+    获取差异文件清单缓存目录
+
+    返回:
+        差异清单缓存目录路径 (/cache/diff/)
+    """
+    # 如果是打包后的程序，使用可执行文件所在目录
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境，使用代码目录
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    diff_dir = os.path.join(base_dir, "cache", "diff")
+    os.makedirs(diff_dir, exist_ok=True)
+    return diff_dir
 
 
 def get_update_config_dir() -> str:
@@ -121,13 +146,17 @@ def get_update_config_dir() -> str:
     返回:
         配置目录路径
     """
-    if hasattr(os, 'getenv'):
-        local_app_data = os.getenv('LOCALAPPDATA')
-        if local_app_data:
-            return os.path.join(local_app_data, "栖图", "config")
-    
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "config")
+    try:
+        # 使用 PathManager 的统一用户配置目录
+        from utils.paths import PathManager
+        pm = PathManager.instance()
+        config_dir = pm.get_user_setting_dir() / "update"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return str(config_dir)
+    except Exception:
+        # 回退到程序目录下的 config/update
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, "config", "update")
 
 
 # 升级计划文件名

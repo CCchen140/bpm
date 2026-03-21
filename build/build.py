@@ -559,6 +559,9 @@ def main():
   # 使用 build_delta 创建升级包（推荐）
   python build/build.py --delta-from "dist/qitu_V1.0.0" --delta
   
+  # 完整发布流程（打包 → 创建差分包 → 生成zip → 更新manifest）
+  python build/build.py u1 --delta-from "dist/qitu_V0.0.4_fr" --complete
+  
   # CPU/GPU 版本打包
   python build/build.py --flavor cpu
   python build/build.py --flavor gpu
@@ -574,6 +577,8 @@ def main():
     parser.add_argument("--from-version", dest="from_version", default="", help="增量包：来源版本号（如: V1.0.0）")
     parser.add_argument("--full", action="store_true", help="强制打包完整包（忽略 --delta-from）")
     parser.add_argument("--delta", action="store_true", help="使用 build_delta.py 创建升级包（需要 --delta-from）")
+    parser.add_argument("--complete", action="store_true", help="完整发布流程：打包 → 创建差分包 → 生成zip → 更新manifest（需要 --delta-from）")
+    parser.add_argument("--package", action="store_true", help="打包并生成安装包：打包 → 创建差分包 → 生成安装包（不生成zip，需要 --delta-from）")
     args = parser.parse_args()
 
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -582,6 +587,22 @@ def main():
             sys.path.insert(0, root)
     except Exception:
         pass
+
+    # 自动从代码中读取update版本号
+    try:
+        from utils.system.app_info_manager import APP_UPDATE
+        # 如果APP_UPDATE不为空，提取数字部分作为suffix
+        if APP_UPDATE:
+            # 支持格式: "update1" -> "update1", "u1" -> "u1"
+            update_str = str(APP_UPDATE).strip()
+            # 如果用户没有手动指定suffix，则使用代码中的版本
+            if not args.suffix and update_str:
+                args.suffix = update_str
+                print(f"[自动检测] 从代码中读取到update版本: {APP_UPDATE}")
+    except Exception as e:
+        print(f"[警告] 无法从代码读取update版本: {e}")
+        pass
+
     spec_path = os.path.join(root, "build", "bird_picture_manager.spec")
     icon_gen = os.path.join(root, "build", "generate_icon.py")
 
@@ -661,12 +682,25 @@ def main():
     
     suffix_token = str(suffix or "").strip()
 
-    # 构建 dist 目录名称：qitu_Vx.x.x
+    # 构建 dist 目录名称
+    # 完整包（不带update参数）：qitu_Vx.x.x_fr
+    # update包（带update参数）：qitu_Vx.x.x_ux
     dist_name = "qitu"
     if v_token:
         dist_name = f"{dist_name}_V{v_token}"
     if suffix_token:
-        dist_name = f"{dist_name}_{suffix_token}"
+        # 如果suffix是update编号格式（如update1, u1），统一转换为u格式（完整包使用u1）
+        if suffix_token.lower().startswith('update') and suffix_token[6:].isdigit():
+            # update1 -> _u1
+            dist_name = f"{dist_name}_u{suffix_token[6:]}"
+        elif suffix_token.startswith('u') and suffix_token[1:].isdigit():
+            # u1 -> _u1
+            dist_name = f"{dist_name}_{suffix_token}"
+        else:
+            dist_name = f"{dist_name}_{suffix_token}"
+    else:
+        # 完整包默认添加 fr (full release) 后缀
+        dist_name = f"{dist_name}_fr"
     
     # 保存原始 app_name 用于后续（如需要）
     original_app_name = app_name
@@ -704,12 +738,110 @@ def main():
         delta_from = str(getattr(args, "delta_from", "") or "").strip()
         from_version = str(getattr(args, "from_version", "") or "").strip()
         is_full = bool(getattr(args, "full", False))
+        is_complete = bool(getattr(args, "complete", False))
+        is_package = bool(getattr(args, "package", False))
         
         print(f"\n[打包] delta_from={delta_from}")
         print(f"[打包] from_version={from_version}")
         print(f"[打包] is_full={is_full}")
+        print(f"[打包] is_complete={is_complete}")
+        print(f"[打包] is_package={is_package}")
         
-        if delta_from and not is_full:
+        # 处理完整发布流程（--complete）
+        if is_complete and delta_from:
+            print("\n[完整发布流程] 开始执行...")
+            delta_from_abs = os.path.abspath(delta_from)
+            
+            if not os.path.isdir(delta_from_abs):
+                print(f"[完整发布流程] 错误: 旧版本目录不存在: {delta_from_abs}")
+                print(f"[完整发布流程] 将只生成完整包")
+            else:
+                try:
+                    delta_script = os.path.join(root, "build", "build_delta.py")
+                    if not os.path.exists(delta_script):
+                        print(f"[完整发布流程] 错误: build_delta.py 不存在: {delta_script}")
+                    else:
+                        # 提取update编号（从suffix）
+                        update_num = ""
+                        if suffix:
+                            if suffix.lower().startswith('update') and suffix[6:].isdigit():
+                                update_num = suffix[6:]
+                            elif suffix.startswith('u') and suffix[1:].isdigit():
+                                update_num = suffix[1:]
+                        if not update_num:
+                            update_num = "1"  # 默认update 1
+                        
+                        # 构建完整发布命令（包含 --output-zip 和 --update-manifest）
+                        delta_cmd = [
+                            sys.executable,
+                            delta_script,
+                            "--from", delta_from_abs,
+                            "--to", dist_dir,
+                            "--version", app_version,
+                            "--flavor", flavor,
+                            "--update", update_num,
+                            "--output-zip",
+                            "--update-manifest"
+                        ]
+                        
+                        print(f"[完整发布流程] 执行: {' '.join(delta_cmd)}")
+                        subprocess.check_call(delta_cmd, cwd=root)
+                        print("\n[完整发布流程] 执行成功！")
+                        print(f"[完整发布流程] 生成的文件:")
+                        print(f"  - 安装包: build/installer/")
+                        print(f"  - ZIP包: dist/qitu_V{app_version}_update{update_num}.zip")
+                        print(f"  - Manifest: dist/update_manifest.json")
+                except Exception as e:
+                    print(f"[完整发布流程] 执行失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+        # 处理打包并生成安装包流程（--package）
+        elif is_package and delta_from:
+            print("\n[打包并生成安装包] 开始执行...")
+            delta_from_abs = os.path.abspath(delta_from)
+            
+            if not os.path.isdir(delta_from_abs):
+                print(f"[打包并生成安装包] 错误: 旧版本目录不存在: {delta_from_abs}")
+                print(f"[打包并生成安装包] 将只生成完整包")
+            else:
+                try:
+                    delta_script = os.path.join(root, "build", "build_delta.py")
+                    if not os.path.exists(delta_script):
+                        print(f"[打包并生成安装包] 错误: build_delta.py 不存在: {delta_script}")
+                    else:
+                        # 提取update编号（从suffix或自动检测）
+                        update_num = ""
+                        if suffix:
+                            if suffix.lower().startswith('update') and suffix[6:].isdigit():
+                                update_num = suffix[6:]
+                            elif suffix.startswith('u') and suffix[1:].isdigit():
+                                update_num = suffix[1:]
+                        if not update_num:
+                            update_num = "1"  # 默认update 1
+                        
+                        # 构建打包命令（使用 --setup 生成安装包，不生成zip）
+                        delta_cmd = [
+                            sys.executable,
+                            delta_script,
+                            "--from", delta_from_abs,
+                            "--to", dist_dir,
+                            "--version", app_version,
+                            "--flavor", flavor,
+                            "--update", update_num,
+                            "--setup"  # 只生成安装包，不创建zip
+                        ]
+                        
+                        print(f"[打包并生成安装包] 执行: {' '.join(delta_cmd)}")
+                        subprocess.check_call(delta_cmd, cwd=root)
+                        print("\n[打包并生成安装包] 执行成功！")
+                        print(f"[打包并生成安装包] 生成的文件:")
+                        print(f"  - 安装包: build/installer/")
+                        print(f"  - 差异包: dist/qitu_V{app_version}_update{update_num}/")
+                except Exception as e:
+                    print(f"[打包并生成安装包] 执行失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+        elif delta_from and not is_full:
             # 检查旧版本目录是否存在
             delta_from_abs = os.path.abspath(delta_from)
             print(f"[打包] 检查旧版本目录: {delta_from_abs}")

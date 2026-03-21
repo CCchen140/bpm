@@ -1154,7 +1154,7 @@ class ImageDetailPanel(QWidget):
         
         # 加载初始图片
         self.load_current_image()
-        
+
         # 确保缩略图栏选中当前图片
         self.update_thumbnail_selection()
 

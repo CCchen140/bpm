@@ -675,7 +675,7 @@ class GuidePage(QWidget):
         # 页码 1: 数据存储位置页
         self.data_page = IntroPage(
             "数据存储位置",
-            "选择您的个人数据（设置、数据库、收藏等）保存位置。\n默认为文档目录下的 BirdManager/data。",
+            "选择您的个人数据（设置、数据库、收藏等）保存位置。\n默认为文档目录下的qitu",
             "mdi6.database",
             settings_manager=self.settings_manager,
             mode="data"

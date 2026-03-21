@@ -170,6 +170,157 @@ def clear_cache():
         _log_warning(f"清除缓存失败: {e}")
 
 
+# 禁用列表文件路径
+_DISABLED_URLS_FILE = os.path.join(os.path.dirname(__file__), '.disabled_urls.json')
+
+# 禁用时长（秒）
+_DISABLE_DURATION = 3600  # 1小时
+
+
+def _load_disabled_urls() -> Dict[str, float]:
+    """
+    加载禁用的URL列表
+    
+    返回:
+        禁用的URL字典，键为URL，值为禁用结束时间戳
+    """
+    try:
+        if not os.path.exists(_DISABLED_URLS_FILE):
+            return {}
+        
+        with open(_DISABLED_URLS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 清理已过期的禁用记录
+        current_time = time.time()
+        disabled_urls = {}
+        for url, expire_time in data.items():
+            if expire_time > current_time:
+                disabled_urls[url] = expire_time
+            else:
+                _log_debug(f"URL 禁用已过期: {url}")
+        
+        # 如果有过期记录，保存清理后的数据
+        if len(disabled_urls) != len(data):
+            _save_disabled_urls(disabled_urls)
+        
+        return disabled_urls
+    except Exception as e:
+        _log_debug(f"加载禁用列表失败: {e}")
+        return {}
+
+
+def _save_disabled_urls(disabled_urls: Dict[str, float]):
+    """
+    保存禁用的URL列表
+    
+    参数:
+        disabled_urls: 禁用的URL字典
+    """
+    try:
+        with open(_DISABLED_URLS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(disabled_urls, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        _log_warning(f"保存禁用列表失败: {e}")
+
+
+def disable_url(url: str, duration: int = _DISABLE_DURATION):
+    """
+    禁用指定URL
+    
+    参数:
+        url: 要禁用的URL
+        duration: 禁用时长（秒），默认1小时
+    """
+    disabled_urls = _load_disabled_urls()
+    expire_time = time.time() + duration
+    disabled_urls[url] = expire_time
+    _save_disabled_urls(disabled_urls)
+    _log_info(f"URL 已禁用 {duration} 秒: {url}")
+
+
+def is_url_disabled(url: str) -> bool:
+    """
+    检查URL是否被禁用
+    
+    参数:
+        url: 要检查的URL
+        
+    返回:
+        是否被禁用
+    """
+    disabled_urls = _load_disabled_urls()
+    if url in disabled_urls:
+        expire_time = disabled_urls[url]
+        if time.time() < expire_time:
+            remaining = int(expire_time - time.time())
+            _log_debug(f"URL 仍被禁用（剩余 {remaining} 秒）: {url}")
+            return True
+        else:
+            # 过期了，移除
+            del disabled_urls[url]
+            _save_disabled_urls(disabled_urls)
+    return False
+
+
+def record_url_failure(url: str):
+    """
+    记录URL失败，连续2次失败则禁用
+    
+    参数:
+        url: 失败的URL
+    """
+    # 使用临时文件记录失败次数
+    failure_file = os.path.join(os.path.dirname(__file__), '.url_failures.json')
+    
+    try:
+        # 加载现有记录
+        failures = {}
+        if os.path.exists(failure_file):
+            with open(failure_file, 'r', encoding='utf-8') as f:
+                failures = json.load(f)
+        
+        # 清理30分钟前的记录
+        current_time = time.time()
+        cutoff_time = current_time - 1800  # 30分钟
+        failures = {k: v for k, v in failures.items() if v['time'] > cutoff_time}
+        
+        # 记录本次失败
+        if url not in failures:
+            failures[url] = {'count': 0, 'time': current_time}
+        
+        failures[url]['count'] += 1
+        failures[url]['time'] = current_time
+        
+        # 保存记录
+        with open(failure_file, 'w', encoding='utf-8') as f:
+            json.dump(failures, f, ensure_ascii=False, indent=2)
+        
+        # 检查是否达到禁用阈值（2次）
+        if failures[url]['count'] >= 2:
+            disable_url(url)
+            # 清除失败记录
+            del failures[url]
+            with open(failure_file, 'w', encoding='utf-8') as f:
+                json.dump(failures, f, ensure_ascii=False, indent=2)
+            _log_info(f"URL 连续失败 2 次，已加入禁用列表: {url}")
+        else:
+            _log_debug(f"URL 失败次数: {failures[url]['count']}/2: {url}")
+            
+    except Exception as e:
+        _log_warning(f"记录URL失败失败: {e}")
+
+
+def clear_disabled_urls():
+    """清除所有禁用的URL"""
+    try:
+        if os.path.exists(_DISABLED_URLS_FILE):
+            os.remove(_DISABLED_URLS_FILE)
+            _log_info("禁用列表已清除")
+    except Exception as e:
+        _log_warning(f"清除禁用列表失败: {e}")
+
+
 def ping_host(host: str, port: int = 443, timeout: float = 3.0) -> Optional[float]:
     """
     检测主机连通性和延迟

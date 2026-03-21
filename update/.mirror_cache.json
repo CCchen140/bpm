@@ -1,13 +1,21 @@
 {
-  "timestamp": 1773674780.8948646,
+  "timestamp": 1774077658.2905784,
   "mirror_order": [
     {
       "url": "https://github.com/CCchen140/qitupage/releases/latest/download/update_manifest.json",
       "desc": "github-direct"
     },
     {
+      "url": "https://kgithub.com/CCchen140/qitupage/releases/download/latest/update_manifest.json",
+      "desc": "kgithub"
+    },
+    {
       "url": "https://githubfast.com/CCchen140/qitupage/releases/download/latest/update_manifest.json",
       "desc": "githubfast"
+    },
+    {
+      "url": "https://ghproxy.com/https://github.com/CCchen140/qitupage/releases/download/latest/update_manifest.json",
+      "desc": "ghproxy"
     }
   ]
 }

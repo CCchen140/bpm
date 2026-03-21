@@ -12,6 +12,30 @@ from typing import List, Dict, Tuple, Optional
 from . import update_config as config
 
 
+# 获取日志管理器实例
+def _get_logger():
+    """获取日志管理器实例"""
+    try:
+        from utils.log_manager import LogManager
+        return LogManager.instance()
+    except Exception:
+        return None
+
+
+def _log_info(msg: str):
+    """记录info日志"""
+    logger = _get_logger()
+    if logger:
+        logger.info(f"[FileSplitter] {msg}")
+
+
+def _log_error(msg: str):
+    """记录error日志"""
+    logger = _get_logger()
+    if logger:
+        logger.error(f"[FileSplitter] {msg}")
+
+
 def calculate_sha256(file_path: str) -> str:
     """
     计算文件的 SHA256 哈希值
@@ -59,28 +83,27 @@ def split_file(file_path: str, output_dir: str, part_size: int = None) -> Tuple[
         part_size = config.PART_SIZE
     
     if not os.path.exists(file_path):
-        print(f"错误: 文件不存在: {file_path}")
+        _log_error(f"文件不存在: {file_path}")
         return False, []
-    
+
     file_size = get_file_size(file_path)
-    
+
     # 如果文件小于限制，不需要分包
     if file_size <= config.GITHUB_FILE_SIZE_LIMIT:
-        print(f"文件大小 {format_size(file_size)} 未超过限制，无需分包")
+        _log_info(f"文件大小 {format_size(file_size)} 未超过限制，无需分包")
         return False, []
-    
+
     # 计算分包数量
     num_parts = (file_size + part_size - 1) // part_size
-    
+
     if num_parts > config.MAX_PARTS:
-        print(f"错误: 分包数量 {num_parts} 超过最大限制 {config.MAX_PARTS}")
+        _log_error(f"分包数量 {num_parts} 超过最大限制 {config.MAX_PARTS}")
         return False, []
-    
-    print(f"分割文件: {os.path.basename(file_path)}")
-    print(f"  原始大小: {format_size(file_size)}")
-    print(f"  分包大小: {format_size(part_size)}")
-    print(f"  分包数量: {num_parts}")
-    print()
+
+    _log_info(f"分割文件: {os.path.basename(file_path)}")
+    _log_info(f"  原始大小: {format_size(file_size)}")
+    _log_info(f"  分包大小: {format_size(part_size)}")
+    _log_info(f"  分包数量: {num_parts}")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -97,9 +120,9 @@ def split_file(file_path: str, output_dir: str, part_size: int = None) -> Tuple[
             # 读取并写入分包
             remaining = part_size if part_num < num_parts else file_size - (part_num - 1) * part_size
             bytes_written = 0
-            
-            print(f"  创建分包 {part_num}/{num_parts}: {part_filename}")
-            
+
+            _log_info(f"  创建分包 {part_num}/{num_parts}: {part_filename}")
+
             with open(part_path, 'wb') as part_file:
                 while bytes_written < remaining:
                     chunk_size = min(8192, remaining - bytes_written)
@@ -108,21 +131,21 @@ def split_file(file_path: str, output_dir: str, part_size: int = None) -> Tuple[
                         break
                     part_file.write(chunk)
                     bytes_written += len(chunk)
-            
+
             # 计算分包哈希
             part_hash = calculate_sha256(part_path)
             part_size_actual = get_file_size(part_path)
-            
+
             parts_info.append({
                 "part_num": part_num,
                 "filename": part_filename,
                 "size": part_size_actual,
                 "hash": f"sha256:{part_hash}"
             })
-            
-            print(f"    大小: {format_size(part_size_actual)}, 哈希: {part_hash[:16]}...")
-    
-    print(f"\n✓ 文件分割完成，共 {num_parts} 个分包")
+
+            _log_info(f"    大小: {format_size(part_size_actual)}, 哈希: {part_hash[:16]}...")
+
+    _log_info(f"文件分割完成，共 {num_parts} 个分包")
     return True, parts_info
 
 
@@ -138,55 +161,55 @@ def merge_files(parts: List[str], output_path: str, verify_hash: str = None) -> 
     返回:
         合并是否成功
     """
-    print(f"合并分包到: {output_path}")
-    print(f"  分包数量: {len(parts)}")
-    
+    _log_info(f"合并分包到: {output_path}")
+    _log_info(f"  分包数量: {len(parts)}")
+
     # 检查所有分包是否存在
     for part in parts:
         if not os.path.exists(part):
-            print(f"错误: 分包不存在: {part}")
+            _log_error(f"分包不存在: {part}")
             return False
-    
+
     # 创建输出目录
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     # 如果输出文件已存在，先删除
     if os.path.exists(output_path):
         os.remove(output_path)
-    
+
     # 合并文件
     total_size = 0
     with open(output_path, 'wb') as outfile:
         for i, part_path in enumerate(parts, 1):
             part_size = get_file_size(part_path)
-            print(f"  [{i}/{len(parts)}] 合并: {os.path.basename(part_path)} ({format_size(part_size)})")
-            
+            _log_info(f"  [{i}/{len(parts)}] 合并: {os.path.basename(part_path)} ({format_size(part_size)})")
+
             with open(part_path, 'rb') as infile:
                 while True:
                     chunk = infile.read(8192)
                     if not chunk:
                         break
                     outfile.write(chunk)
-            
+
             total_size += part_size
-    
-    print(f"\n✓ 合并完成，总大小: {format_size(total_size)}")
-    
+
+    _log_info(f"合并完成，总大小: {format_size(total_size)}")
+
     # 验证哈希（如果提供）
     if verify_hash:
-        print("  验证文件完整性...")
+        _log_info("  验证文件完整性...")
         actual_hash = calculate_sha256(output_path)
         expected_hash = verify_hash.lower().replace('sha256:', '')
-        
+
         if actual_hash == expected_hash:
-            print(f"  ✓ 哈希验证通过")
+            _log_info("  哈希验证通过")
             return True
         else:
-            print(f"  ✗ 哈希验证失败")
-            print(f"    期望: {expected_hash}")
-            print(f"    实际: {actual_hash}")
+            _log_error("  哈希验证失败")
+            _log_error(f"    期望: {expected_hash}")
+            _log_error(f"    实际: {actual_hash}")
             return False
-    
+
     return True
 
 

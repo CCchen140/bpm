@@ -97,10 +97,27 @@ flavor_suffix = ""
 if suffix and suffix.lower() in ("cpu", "gpu"):
     flavor_suffix = suffix.lower()
 
-# 构建 dist 目录名称：qitu_Vx.x.x
+# 构建 dist 目录名称：qitu_Vx.x.x_fr 或 qitu_Vx.x.x_u1
+# suffix 支持: update1, u1 (update包) 或 cpu, gpu (flavor)
+# 完整包（不带suffix）：qitu_Vx.x.x_fr
+# update包（带suffix如u1）：qitu_Vx.x.x_u1
 dist_name = "qitu"
 if v_token:
     dist_name = f"{dist_name}_V{v_token}"
+# 添加 suffix（如果不是 cpu/gpu 这种 flavor 后缀）
+if suffix and suffix.lower() not in ("cpu", "gpu"):
+    # 统一转换为u格式（完整包使用u1）
+    if suffix.lower().startswith('update') and suffix[6:].isdigit():
+        # update1 -> _u1
+        dist_name = f"{dist_name}_u{suffix[6:]}"
+    elif suffix.startswith('u') and suffix[1:].isdigit():
+        # u1 -> _u1
+        dist_name = f"{dist_name}_{suffix}"
+    else:
+        dist_name = f"{dist_name}_{suffix}"
+else:
+    # 完整包默认添加 fr (full release) 后缀
+    dist_name = f"{dist_name}_fr"
 
 # exe 名称使用英文
 exe_name = "qitu"

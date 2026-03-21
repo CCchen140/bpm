@@ -112,15 +112,14 @@ class VersionInfo:
         return result
     
     def __eq__(self, other) -> bool:
-        """比较相等"""
+        """比较相等（默认忽略 _test 后缀）"""
         if isinstance(other, VersionInfo):
             return (self.base == other.base and 
-                    self.update == other.update and 
-                    self.is_test == other.is_test)
+                    self.update == other.update)
         return False
     
     def __lt__(self, other) -> bool:
-        """比较小于"""
+        """比较小于（默认忽略 _test 后缀）"""
         if not isinstance(other, VersionInfo):
             other = VersionInfo(str(other))
         
@@ -132,11 +131,7 @@ class VersionInfo:
             return self_base < other_base
         
         # 基础版本相同，比较 update 号
-        if self.update != other.update:
-            return self.update < other.update
-        
-        # 正式版本优先于测试版本
-        return self.is_test and not other.is_test
+        return self.update < other.update
     
     def __le__(self, other) -> bool:
         """比较小于等于"""
@@ -253,7 +248,8 @@ class UpdateChecker(QObject):
                         "url": update_info.get("url", ""),
                         "size": update_info.get("size", 0),
                         "hash": update_info.get("hash", ""),
-                        "download_path": ""
+                        "download_path": "",
+                        "tag": update_info.get("tag", "")
                     }
                     # 添加分包信息（如果有）
                     if update_info.get("is_split", False):
@@ -289,7 +285,8 @@ class UpdateChecker(QObject):
                     "url": cross_upgrade.get("url", ""),
                     "size": cross_upgrade.get("size", 0),
                     "hash": cross_upgrade.get("hash", ""),
-                    "download_path": ""
+                    "download_path": "",
+                    "tag": cross_upgrade.get("tag", "")
                 }
                 # 添加分包信息（如果有）
                 if cross_upgrade.get("is_split", False):
@@ -318,7 +315,8 @@ class UpdateChecker(QObject):
                         "url": update_info.get("url", ""),
                         "size": update_info.get("size", 0),
                         "hash": update_info.get("hash", ""),
-                        "download_path": ""
+                        "download_path": "",
+                        "tag": update_info.get("tag", "")
                     }
                     # 添加分包信息（如果有）
                     if update_info.get("is_split", False):
@@ -376,8 +374,13 @@ class CheckUpdateThread(QThread):
             checker = UpdateChecker()
             comparison = checker.compare_versions(self.current_version, latest_version)
             
-            if comparison >= 0:
-                # 当前版本已是最新或更新
+            # 检查是否为同版本（忽略 _test 后缀）
+            current_v = VersionInfo(self.current_version)
+            is_same_version = (current_v.base == latest_v.base and 
+                              current_v.update == latest_v.update)
+            
+            if comparison >= 0 and not (is_same_version and config.SAME_VERSION_UPGRADE):
+                # 当前版本已是最新或更新，且不满足同版本升级条件
                 _log_info(f"当前版本已是最新: {self.current_version}")
                 self.check_completed.emit({
                     "has_update": False,
@@ -400,14 +403,33 @@ class CheckUpdateThread(QThread):
                 return
             
             _log_info(f"升级路径计算完成，共 {len(upgrade_steps)} 步")
-            
+
+            # 获取目标版本的更新内容
+            # 从 manifest 的 releases 中获取对应版本的 changelog
+            target_changelog = ""
+            releases = manifest.get("releases", {})
+            if latest_v.base in releases:
+                release_info = releases[latest_v.base]
+                if latest_v.update > 0:
+                    # 获取 update 版本的 changelog
+                    update_key = str(latest_v.update)
+                    if update_key in release_info.get("updates", {}):
+                        target_changelog = release_info["updates"][update_key].get("changelog", "")
+                else:
+                    # 获取基础版本的 changelog
+                    target_changelog = release_info.get("changelog", "")
+
+            # 如果目标版本没有 changelog，使用全局 changelog
+            if not target_changelog:
+                target_changelog = manifest.get("changelog", "")
+
             # 组装更新信息
             update_info = {
                 "has_update": True,
                 "current_version": self.current_version,
                 "latest_version": latest_version,
                 "release_date": manifest.get("release_date", ""),
-                "changelog": manifest.get("changelog", ""),
+                "changelog": target_changelog,
                 "force_update": manifest.get("force_update", False),
                 "min_supported_version": manifest.get("min_supported_version", config.MIN_SUPPORTED_VERSION),
                 "upgrade_steps": upgrade_steps,
@@ -482,6 +504,12 @@ class CheckUpdateThread(QThread):
         
         # 所有地址都失败了
         _log_error("所有地址都无法获取版本清单")
+        
+        # 清除镜像缓存，下次检查时会重新测试镜像可用性
+        from .mirror_selector import clear_cache
+        clear_cache()
+        _log_info("已清除镜像缓存，下次检查时将重新测试镜像可用性")
+        
         if isinstance(last_error, urllib.error.HTTPError):
             _log_error(f"HTTP 错误: {last_error.code} - {last_error.reason}")
             raise Exception(f"HTTP 错误: {last_error.code} - {last_error.reason}")

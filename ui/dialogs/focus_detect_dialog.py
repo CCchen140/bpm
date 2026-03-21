@@ -34,6 +34,7 @@ from ui.widgets.base_popup_dialog import BasePopupDialog
 from ui.utils.color_manager import ColorManager
 from ui.widgets.themed_combo_box import ThemedComboBox
 from utils.setting.settings_manager import SettingsManager
+from ui.utils.notification_manager import NotificationManager
 
 
 class FocusDetectDialog(BasePopupDialog):

@@ -160,6 +160,7 @@ class DownloadThread(QThread):
                 
                 # 以追加模式写入文件
                 mode = 'ab' if downloaded_size > 0 else 'wb'
+                last_progress = 0
                 with open(self._temp_path, mode) as f:
                     while not self._is_cancelled:
                         chunk = response.read(config.DOWNLOAD_CHUNK_SIZE)
@@ -172,7 +173,14 @@ class DownloadThread(QThread):
                         # 发送进度信号
                         if total_size:
                             progress = int((downloaded_size / total_size) * 100)
-                            self.progress.emit(progress)
+                            if progress != last_progress:
+                                self.progress.emit(progress)
+                                last_progress = progress
+                        else:
+                            # 如果无法获取总大小，发送模拟进度（缓慢增加到99%）
+                            if downloaded_size > 0 and downloaded_size % (1024 * 1024) == 0:  # 每1MB更新一次
+                                last_progress = min(last_progress + 5, 99)
+                                self.progress.emit(last_progress)
                 
                 if self._is_cancelled:
                     _log_warning("下载已取消")

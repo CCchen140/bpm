@@ -1322,16 +1322,44 @@ class _LocalBirdIPCClient:
             req["lon"] = float(lon)
         return self.call(req)
 
-    def shutdown(self):
+    def shutdown(self, timeout: float = 5.0):
+        """关闭本地识别服务
+        
+        参数:
+            timeout: 等待服务关闭的最大时间（秒），默认5秒
+        """
+        # 先尝试发送shutdown命令，但不等待响应
         try:
-            self.call({"action": "shutdown"})
+            # 直接发送请求，不调用call()以避免长时间等待
+            self._send_request({"action": "shutdown"})
         except Exception:
             pass
-        try:
-            if self._proc is not None:
+        
+        # 等待服务进程结束
+        if self._proc is not None:
+            try:
+                # 等待进程结束，最多等待timeout秒
+                self._proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # 超时后强制终止
                 try:
                     self._proc.terminate()
+                    # 再等待一小段时间
+                    self._proc.wait(timeout=1.0)
                 except Exception:
-                    pass
-        finally:
-            self._proc = None
+                    # 如果terminate失败，尝试kill
+                    try:
+                        self._proc.kill()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                self._proc = None
+        
+        # 清理锁文件
+        try:
+            if os.path.exists(self._lock_file):
+                os.remove(self._lock_file)
+        except Exception:
+            pass

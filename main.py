@@ -62,12 +62,80 @@ def _write_crash_log(message: str):
         pass
 
 def check_single_instance():
-    """检查是否已有实例在运行，防止程序被多次启动"""
+    """检查是否已有实例在运行，防止程序被多次启动
+    
+    如果发现有残留进程，会尝试终止它们
+    """
     try:
         import ctypes
         from ctypes import wintypes
+        import psutil
         
-        # 创建一个命名互斥量
+        # 首先检查并终止残留的 qitu.exe 进程
+        current_pid = os.getpid()
+        current_exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+        current_exe_name = os.path.basename(current_exe).lower()
+        
+        killed_count = 0
+        print("\n[StartupDebug] ===== 扫描残留进程 =====")
+        print(f"[StartupDebug] 当前进程 PID: {current_pid}, Exe: {current_exe}")
+        
+        for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+            try:
+                proc_info = proc.info
+                proc_name = proc_info.get('name', '').lower()
+                proc_exe = proc_info.get('exe', '')
+                proc_pid = proc_info.get('pid', 0)
+                proc_cmdline = proc_info.get('cmdline', [])
+                
+                # 跳过当前进程
+                if proc_pid == current_pid:
+                    continue
+                
+                # 检查是否是 qitu.exe 或类似的进程名
+                is_qitu = proc_name in ['qitu.exe', '栖图.exe'] or \
+                         (proc_exe and 'qitu' in proc_exe.lower() and proc_exe.lower() != current_exe.lower())
+                
+                # 打印所有进程信息用于调试
+                if is_qitu:
+                    print(f"[StartupDebug] 发现 qitu 进程:")
+                    print(f"[StartupDebug]   PID={proc_pid}, Name={proc_name}")
+                    print(f"[StartupDebug]   Exe={proc_exe}")
+                    if proc_cmdline:
+                        print(f"[StartupDebug]   Cmdline={' '.join(proc_cmdline[:3])}...")
+                    
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                        killed_count += 1
+                        print(f"[StartupDebug]   已终止残留进程")
+                    except psutil.TimeoutExpired:
+                        # 超时后强制杀死
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=1)
+                            killed_count += 1
+                            print(f"[StartupDebug]   已强制杀死残留进程")
+                        except Exception as e:
+                            print(f"[StartupDebug]   强制杀死失败: {e}")
+                    except Exception as e:
+                        print(f"[StartupDebug]   终止失败: {e}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except Exception as e:
+                print(f"[StartupDebug] 扫描进程时出错: {e}")
+                continue
+        
+        print(f"[StartupDebug] ===== 扫描结束，共终止 {killed_count} 个进程 =====\n")
+        
+        if killed_count > 0:
+            print(f"共终止 {killed_count} 个残留进程")
+            _write_crash_log(f"启动时发现并终止了 {killed_count} 个残留进程")
+            # 等待一小段时间确保进程完全退出
+            import time
+            time.sleep(0.5)
+        
+        # 创建命名互斥量
         mutex_name = "Global\\BirdPictureManager_QiTu_SingleInstance"
         kernel32 = ctypes.windll.kernel32
         
@@ -76,7 +144,7 @@ def check_single_instance():
         last_error = kernel32.GetLastError()
         
         if last_error == 183:  # ERROR_ALREADY_EXISTS
-            # 互斥量已存在，说明已有实例在运行
+            # 互斥量已存在，说明仍有实例在运行
             print("Another instance is already running. Exiting.")
             _write_crash_log("已存在另一个实例，退出启动")
             return False
@@ -646,5 +714,25 @@ if __name__ == "__main__":
             pass
         QTimer.singleShot(0, _start_async_init)
     exit_code = app.exec()
-            
-    sys.exit(exit_code)
+    
+    # 确保所有非守护线程都被终止
+    print("[Exit] 应用程序事件循环已结束，准备退出...")
+    
+    # 强制终止所有子进程
+    try:
+        import psutil
+        current_pid = os.getpid()
+        current_process = psutil.Process(current_pid)
+        children = current_process.children(recursive=True)
+        for child in children:
+            try:
+                child.kill()
+            except:
+                pass
+        psutil.wait_procs(children, timeout=1)
+    except:
+        pass
+    
+    # 使用 os._exit 强制退出，避免残留
+    print(f"[Exit] 强制退出进程，退出码: {exit_code}")
+    os._exit(exit_code)

@@ -34,6 +34,47 @@ from update.update_progress_dialog import UpdateProgressDialog
 from update.update_history_manager import get_history_manager
 
 
+# 获取日志管理器实例
+def _get_logger():
+    """获取日志管理器实例"""
+    try:
+        from utils.log_manager import LogManager
+        return LogManager.instance()
+    except Exception:
+        return None
+
+
+def _log_debug(msg: str):
+    """记录debug日志"""
+    logger = _get_logger()
+    if logger:
+        logger.debug(f"[UpdateLauncher] {msg}")
+
+
+def _log_info(msg: str):
+    """记录info日志"""
+    logger = _get_logger()
+    if logger:
+        logger.info(f"[UpdateLauncher] {msg}")
+
+
+def _log_warning(msg: str):
+    """记录warning日志"""
+    logger = _get_logger()
+    if logger:
+        logger.warning(f"[UpdateLauncher] {msg}")
+
+
+def _log_error(msg: str, exc: Exception = None):
+    """记录error日志"""
+    logger = _get_logger()
+    if logger:
+        if exc:
+            logger.exception(f"[UpdateLauncher] {msg}", exc)
+        else:
+            logger.error(f"[UpdateLauncher] {msg}")
+
+
 class UpdateLauncher(QObject):
     """
     升级启动器 - 独立进程执行升级
@@ -75,7 +116,7 @@ class UpdateLauncher(QObject):
             # 加载升级计划
             self._plan = self._load_update_plan(plan_path)
             if not self._plan:
-                print("错误: 无法加载升级计划")
+                _log_error("无法加载升级计划")
                 return 1
             
             # 创建 Qt 应用
@@ -102,12 +143,11 @@ class UpdateLauncher(QObject):
                     # 测试模式：显示成功信息，不执行实际替换
                     self.status_changed.emit("测试模式：下载和解压已完成，跳过文件替换")
                     self.phase_changed.emit("测试完成")
-                    print("\n" + "=" * 80)
-                    print("测试模式完成！")
-                    print("=" * 80)
-                    print(f"升级包已下载到: {self._plan.get('download_dir', '')}")
-                    print("文件替换、清理和启动主程序步骤已跳过")
-                    print("=" * 80)
+                    _log_info("=" * 40)
+                    _log_info("测试模式完成！")
+                    _log_info("=" * 40)
+                    _log_info(f"升级包已下载到: {self._plan.get('download_dir', '')}")
+                    _log_info("文件替换、清理和启动主程序步骤已跳过")
                     # 保持对话框显示，等待用户关闭
                     from PyQt6.QtCore import QEventLoop
                     loop = QEventLoop()
@@ -126,7 +166,7 @@ class UpdateLauncher(QObject):
                 return 1
                 
         except Exception as e:
-            print(f"升级失败: {e}")
+            _log_error("升级失败", e)
             return 1
         finally:
             # 确保对话框关闭
@@ -147,7 +187,7 @@ class UpdateLauncher(QObject):
             with open(plan_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            print(f"加载升级计划失败: {e}")
+            _log_error("加载升级计划失败", e)
             return None
     
     def _do_update(self) -> bool:
@@ -179,7 +219,7 @@ class UpdateLauncher(QObject):
         """
         packages = self._plan.get('packages', [])
         if not packages:
-            print("没有需要下载的包")
+            _log_info("没有需要下载的包")
             return True
         
         download_dir = self._plan.get('download_dir', config.get_update_cache_dir())
@@ -203,6 +243,9 @@ class UpdateLauncher(QObject):
         self._download_success = False
         self._download_error = ""
         
+        # 创建事件循环
+        loop = QEventLoop()
+        
         def on_completed():
             self._download_success = True
             loop.quit()
@@ -215,7 +258,6 @@ class UpdateLauncher(QObject):
         self._downloader.download_failed.connect(on_failed)
         
         # 开始下载
-        loop = QEventLoop()
         self._downloader.download_packages(packages)
         loop.exec()
         
@@ -254,10 +296,10 @@ class UpdateLauncher(QObject):
             if os.path.exists(filepath):
                 package_paths.append(filepath)
             else:
-                print(f"警告: 找不到升级包: {filepath}")
+                _log_warning(f"找不到升级包: {filepath}")
 
         if not package_paths:
-            print("错误: 没有可安装的升级包")
+            _log_error("没有可安装的升级包")
             return False
 
         # 更新UI
@@ -331,7 +373,7 @@ class UpdateLauncher(QObject):
                     pass
                     
         except Exception as e:
-            print(f"清理临时文件失败: {e}")
+            _log_error("清理临时文件失败", e)
     
     def _launch_main_app(self):
         """启动主程序"""
@@ -340,9 +382,9 @@ class UpdateLauncher(QObject):
             
             main_app_path = self._plan.get('main_app_path', '')
             if not main_app_path or not os.path.exists(main_app_path):
-                print(f"警告: 找不到主程序: {main_app_path}")
+                _log_warning(f"找不到主程序: {main_app_path}")
                 return
-            
+
             # 启动主程序
             subprocess.Popen(
                 [main_app_path],
@@ -351,11 +393,11 @@ class UpdateLauncher(QObject):
                 shell=False,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            
-            print("主程序已启动")
-            
+
+            _log_info("主程序已启动")
+
         except Exception as e:
-            print(f"启动主程序失败: {e}")
+            _log_error("启动主程序失败", e)
     
     def _on_cancel(self):
         """处理取消请求"""
@@ -398,11 +440,11 @@ class UpdateLauncher(QObject):
                 success=True
             )
 
-            print(f"升级历史已记录: {from_version} -> {to_version}")
-            print(f"受影响文件数: {len(self._affected_files)}")
+            _log_info(f"升级历史已记录: {from_version} -> {to_version}")
+            _log_info(f"受影响文件数: {len(self._affected_files)}")
 
         except Exception as e:
-            print(f"记录升级历史失败: {e}")
+            _log_error("记录升级历史失败", e)
 
 
 def main():
@@ -434,7 +476,7 @@ def main():
     
     # 检查计划文件
     if not os.path.exists(args.plan):
-        print(f"错误: 升级计划文件不存在: {args.plan}")
+        _log_error(f"升级计划文件不存在: {args.plan}")
         return 1
     
     # 创建启动器并运行
