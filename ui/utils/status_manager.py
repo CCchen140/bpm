@@ -36,6 +36,16 @@ class StatusManager(QObject):
         finally:
             self._lock.unlock()
         
+    def update_task(self, task_id, message):
+        """更新任务消息"""
+        self._lock.lock()
+        try:
+            if task_id in self._tasks:
+                self._tasks[task_id] = (message, self._tasks[task_id][1])
+                self._update_status()
+        finally:
+            self._lock.unlock()
+
     def finish_task(self, task_id):
         """Finish a task by ID"""
         self._lock.lock()

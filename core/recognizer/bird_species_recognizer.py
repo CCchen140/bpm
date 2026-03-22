@@ -50,11 +50,12 @@ class BirdSpeciesRecognizer:
         lat: Optional[float] = None,
         lon: Optional[float] = None,
         region_code: Optional[str] = None,
-        apply_region_filter: bool = True
+        apply_region_filter: bool = True,
+        status_callback: Optional[callable] = None
     ) -> BirdSpeciesResult:
         """
         识别鸟种
-        
+
         Args:
             image_path: 图片路径
             location_hint: 地点提示（用于云端识别）
@@ -63,7 +64,8 @@ class BirdSpeciesRecognizer:
             lon: 经度（用于本地识别的地域过滤）
             region_code: 区域代码（用于本地识别的地域过滤）
             apply_region_filter: 是否应用地域过滤
-        
+            status_callback: 状态回调函数，接收一个字符串参数
+
         Returns:
             BirdSpeciesResult 对象
         """
@@ -75,7 +77,8 @@ class BirdSpeciesRecognizer:
                     lat=lat,
                     lon=lon,
                     region_code=region_code,
-                    apply_region_filter=apply_region_filter
+                    apply_region_filter=apply_region_filter,
+                    status_callback=status_callback
                 )
             if svc == "dongniao":
                 return self._recognize_dongniao(image_path)
@@ -104,13 +107,23 @@ class BirdSpeciesRecognizer:
         lat: Optional[float] = None,
         lon: Optional[float] = None,
         region_code: Optional[str] = None,
-        apply_region_filter: bool = True
+        apply_region_filter: bool = True,
+        status_callback: Optional[callable] = None
     ) -> BirdSpeciesResult:
         """本地IPC识别，支持地域过滤"""
         client = _get_local_bird_ipc_client()
+
+        # 检查服务是否已运行，如果没有则通知UI正在启动服务
+        if not client.is_running() and status_callback:
+            status_callback("正在启动本地识别服务，首次使用需要加载模型...")
+
         ok = client.ensure_service()
         if not ok:
             raise BirdRecognitionError("本地识别服务启动失败")
+
+        if status_callback:
+            status_callback("正在识别物种...")
+
         resp = client.predict(
             image_path=image_path,
             top_k=3,

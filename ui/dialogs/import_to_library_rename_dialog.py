@@ -1,10 +1,12 @@
 import os
 import re
 import shutil
+import tempfile
 from datetime import datetime
 from threading import Thread
 from typing import Any
 
+import cv2
 from ui.utils.icon_loader import qta
 from PyQt6.QtCore import Qt, QTimer, QStringListModel, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -31,6 +33,7 @@ from ui.utils.notification_manager import NotificationManager
 from ui.utils.status_manager import StatusManager
 from ui.widgets.base_popup_dialog import BasePopupDialog
 from utils.exif.exif_utils import EXIF_TAG, ExifHandleWorker, READ_PICTURE_METADATA_TAG, READ_PICTURE_TIME_TAG
+from utils.file.file import load_image
 from utils.file.file_util import get_fast_id
 from utils.file.fingerprint import get_unique_id
 from utils.setting.settings_manager import SettingsManager
@@ -702,13 +705,54 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
         def run():
             out = ""
             err = ""
+            tmp_path = None
             try:
-                text = BirdSpeciesRecognizer().recognize(p, location_hint="", time_hint="").text
+                # 检查是否为RAW文件，如果是则先转换为临时JPG
+                raw_exts = {'.nef', '.raw', '.cr2', '.cr3', '.raf', '.orf', '.dng', '.arw'}
+                ext = os.path.splitext(p)[1].lower()
+                if ext in raw_exts:
+                    # 使用load_image加载RAW文件（提取缩略图）
+                    img = load_image(p)
+                    if img is None:
+                        raise RuntimeError("读取RAW图片失败：无法提取缩略图")
+                    # 创建临时JPG文件
+                    fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+                    os.close(fd)
+                    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                    if not ok:
+                        raise RuntimeError("RAW图片编码失败")
+                    with open(tmp_path, "wb") as f:
+                        f.write(bytes(buf))
+                    # 使用临时文件路径进行识别
+                    recognize_path = tmp_path
+                else:
+                    recognize_path = p
+
+                # 定义状态回调函数，用于更新任务状态
+                def status_callback(message):
+                    try:
+                        StatusManager.instance().update_task(task_id, message)
+                    except Exception:
+                        pass
+
+                text = BirdSpeciesRecognizer().recognize(
+                    recognize_path,
+                    location_hint="",
+                    time_hint="",
+                    status_callback=status_callback
+                ).text
                 out = extract_species_name(text)
                 if out == "无法识别":
                     out = ""
             except Exception as e:
                 err = str(e)
+            finally:
+                # 清理临时文件
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
             try:
                 self._quick_detect_done.emit(int(task_id), str(out or ""), str(err or ""))
             except Exception:

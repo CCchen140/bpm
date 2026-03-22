@@ -987,14 +987,24 @@ class ExifHandleWorker:
                 args += [f"-{t}" for t in tags]
             args.append(p)
 
-            code, stdout, stderr = self._popen_exiftool(args, timeout=timeout, config_file=config_file)
-            if code != 0:
-                raise RuntimeError((stderr or stdout or "").strip())
-            data = json.loads(stdout or "[]")
-            if isinstance(data, list) and data:
-                if isinstance(data[0], dict):
-                    return data[0]
-            return {}
+            # 使用持久进程读取，避免每次创建新进程的开销
+            try:
+                raw = self._stayopen_exec(args, timeout=int(timeout))
+                data = json.loads(raw or "[]")
+                if isinstance(data, list) and data:
+                    if isinstance(data[0], dict):
+                        return data[0]
+                return {}
+            except Exception:
+                # 持久进程失败时回退到 popen 方式
+                code, stdout, stderr = self._popen_exiftool(args, timeout=timeout, config_file=config_file)
+                if code != 0:
+                    raise RuntimeError((stderr or stdout or "").strip())
+                data = json.loads(stdout or "[]")
+                if isinstance(data, list) and data:
+                    if isinstance(data[0], dict):
+                        return data[0]
+                return {}
 
         mode = _get_exif_write_mode()
         target_path = str(file_path or "")

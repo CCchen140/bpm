@@ -1838,7 +1838,7 @@ class ImportPage(BaseImageBrowserPage):
                     if ok and not state["loaded"]:
                         state["loaded"] = True
                         try:
-                            self.load_images(path, recursive=False)
+                            self.load_images(path, recursive=True)
                         except Exception:
                             pass
                         return
@@ -1846,7 +1846,7 @@ class ImportPage(BaseImageBrowserPage):
                     if state["tries"] >= 6 and not state["loaded"]:
                         state["loaded"] = True
                         try:
-                            self.load_images(path, recursive=False)
+                            self.load_images(path, recursive=True)
                         except Exception:
                             pass
                         return
@@ -4186,7 +4186,7 @@ class ImportPage(BaseImageBrowserPage):
             if cached and (current_time - cached.get("time", 0)) < 30:
                 try:
                     from utils.log_manager import LogManager
-                    LogManager.instance().info(f"[InfoPanelCache] virtual hit path={p1[-80:] if len(p1) > 80 else p1}")
+                    LogManager.instance().debug(f"[InfoPanelCache] virtual hit path={p1[-80:] if len(p1) > 80 else p1}")
                     panel.update_info(p1, cached.get("ctx"), io_data=cached.get("io_data"), exif_data=cached.get("exif_data"))
                 except Exception:
                     pass
@@ -4201,14 +4201,14 @@ class ImportPage(BaseImageBrowserPage):
         if _cached and (_current_time - _cached.get("time", 0)) < 30:
             try:
                 from utils.log_manager import LogManager
-                LogManager.instance().info(f"[InfoPanelCache] page hit path={p1[-80:] if len(p1) > 80 else p1}")
+                LogManager.instance().debug(f"[InfoPanelCache] page hit path={p1[-80:] if len(p1) > 80 else p1}")
                 panel.update_info(p1, None, io_data=_cached.get("io_data"), exif_data=_cached.get("exif_data"))
             except Exception:
                 pass
             return
         try:
             from utils.log_manager import LogManager
-            LogManager.instance().info(f"[InfoPanelCache] page miss path={p1[-80:] if len(p1) > 80 else p1}")
+            LogManager.instance().debug(f"[InfoPanelCache] page miss path={p1[-80:] if len(p1) > 80 else p1}")
         except Exception:
             pass
         from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
@@ -5170,14 +5170,18 @@ class ImportPage(BaseImageBrowserPage):
                     pass
                 return
         try:
-            path = os.path.normcase(os.path.normpath(str(path).replace("/", os.sep)))
+            path = os.path.normpath(str(path).replace("/", os.sep))
         except Exception:
             try:
-                path = os.path.normcase(str(path).replace("/", os.sep))
+                path = str(path).replace("/", os.sep)
             except Exception:
                 pass
+
+        # 如果路径是文件（不是目录），获取其所在目录
+        # 注意：不能仅凭扩展名判断，因为可能存在以图片扩展名命名的目录（如 DSC_2461.NEF）
         if os.path.isfile(path):
             path = os.path.dirname(path)
+
         if not os.path.isdir(path):
             self.image_files = []
             self.grid_view.clear_thumbnails()
@@ -5190,7 +5194,7 @@ class ImportPage(BaseImageBrowserPage):
             return
         self.has_valid_folder = True
         self.settings_manager.set("import/last_folder", path)
-        self.load_images(path)
+        self.load_images(path, recursive=True)
 
     def load_images(self, folder_path, recursive=False):
         if not folder_path or not os.path.exists(folder_path):
@@ -5257,17 +5261,9 @@ class ImportPage(BaseImageBrowserPage):
                 from PyQt6.QtGui import QImageReader
             except Exception:
                 QImageReader = None
+            # 导入页面不使用图库的扫描排除设置
+            # 因为导入页面的目的就是导入图库排除目录中的图片
             excl = []
-            try:
-                for p in (self.settings_manager.get("library/scan_exclude_dirs", []) or []):
-                    if not p:
-                        continue
-                    try:
-                        excl.append(os.path.normcase(os.path.normpath(str(p))))
-                    except Exception:
-                        excl.append(str(p))
-            except Exception:
-                excl = []
             rx = None
             try:
                 rx_str = str(self.settings_manager.get("library/scan_exclude_regex", "") or "").strip()
@@ -5303,15 +5299,28 @@ class ImportPage(BaseImageBrowserPage):
                     p_norm = os.path.normcase(os.path.normpath(str(p)))
                 except Exception:
                     p_norm = str(p)
-                    
+
                 # 默认排除回收站等系统目录（即使 excl 为空）
                 default_excludes = ["$RECYCLE.BIN", "System Volume Information", "Recovery"]
                 for de in default_excludes:
-                    if de.lower() in p_norm.lower():
-                         # 检查是否是路径的一部分，且作为独立目录名出现
-                         # 简单做法：只要包含这个名字，大概率就是系统目录
-                         return True
-                
+                    # 使用更精确的匹配：检查路径组件是否完全匹配，而不是子字符串匹配
+                    # 避免 DSC_2461.NEF 这样的目录名被误排除
+                    de_lower = de.lower()
+                    p_lower = p_norm.lower()
+                    # 检查是否作为独立的路径组件出现
+                    if de_lower in p_lower:
+                        # 确保是作为目录名出现，而不是其他名称的一部分
+                        # 检查前面是否是路径分隔符或开头，后面是否是路径分隔符或结尾
+                        idx = p_lower.find(de_lower)
+                        if idx >= 0:
+                            # 检查前面
+                            before_ok = (idx == 0) or (p_lower[idx-1] in (os.sep, '/'))
+                            # 检查后面
+                            after_idx = idx + len(de_lower)
+                            after_ok = (after_idx >= len(p_lower)) or (p_lower[after_idx] in (os.sep, '/'))
+                            if before_ok and after_ok:
+                                return True
+
                 for e in excl:
                     if not e:
                         continue
@@ -5360,7 +5369,7 @@ class ImportPage(BaseImageBrowserPage):
                                     norm_full = os.path.normcase(os.path.normpath(full))
                                     if norm_full in seen_dirs:
                                         continue
-                                    
+
                                     # 如果跟随软链接，需要检查目标真实路径
                                     if os.path.islink(full):
                                         real_path = os.path.realpath(full)
@@ -5369,54 +5378,58 @@ class ImportPage(BaseImageBrowserPage):
                                             continue
                                 except Exception:
                                     pass
-                                    
+
                                 kept.append(d)
                             dirs[:] = kept
-                        for name in files:
-                            ext = os.path.splitext(name)[1].lower()
-                            if ext in valid_extensions:
-                                full_path = os.path.join(root, name)
-                                
-                                # 文件去重检查
-                                try:
-                                    norm_path = os.path.normcase(os.path.normpath(full_path))
-                                    if norm_path in seen_paths:
-                                        continue
-                                    seen_paths.add(norm_path)
-                                except Exception:
-                                    pass
-                                
-                                if _path_matches_exclude(full_path):
-                                    continue
-                                try:
-                                    stat = os.stat(full_path)
-                                    width = 0
-                                    height = 0
-                                    if QImageReader is not None:
-                                        try:
-                                            from utils.system.stderr_suppressor import suppress_stderr_fd
 
-                                            with suppress_stderr_fd():
-                                                reader = QImageReader(full_path)
-                                                s = reader.size()
-                                                width = int(s.width()) if s and s.width() > 0 else 0
-                                                height = int(s.height()) if s and s.height() > 0 else 0
-                                        except Exception:
-                                            width = 0
-                                            height = 0
-                                    create_time = datetime.fromtimestamp(stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S')
-                                    image_files.append({
-                                        'path': full_path,
-                                        'name': name,
-                                        'create_time': create_time,
-                                        'shot_time': create_time,
-                                        'size': stat.st_size,
-                                        'width': width,
-                                        'height': height,
-                                        'has_exif': False,
-                                    })
-                                except Exception:
-                                    pass
+                        for name in files:
+                            try:
+                                ext = os.path.splitext(name)[1].lower()
+                                if ext in valid_extensions:
+                                    full_path = os.path.join(root, name)
+
+                                    # 文件去重检查
+                                    try:
+                                        norm_path = os.path.normcase(os.path.normpath(full_path))
+                                        if norm_path in seen_paths:
+                                            continue
+                                        seen_paths.add(norm_path)
+                                    except Exception:
+                                        pass
+
+                                    if _path_matches_exclude(full_path):
+                                        continue
+                                    try:
+                                        stat = os.stat(full_path)
+                                        width = 0
+                                        height = 0
+                                        if QImageReader is not None:
+                                            try:
+                                                from utils.system.stderr_suppressor import suppress_stderr_fd
+
+                                                with suppress_stderr_fd():
+                                                    reader = QImageReader(full_path)
+                                                    s = reader.size()
+                                                    width = int(s.width()) if s and s.width() > 0 else 0
+                                                    height = int(s.height()) if s and s.height() > 0 else 0
+                                            except Exception:
+                                                width = 0
+                                                height = 0
+                                        create_time = datetime.fromtimestamp(stat.st_ctime).strftime('%Y-%m-%d %H:%M:%S')
+                                        image_files.append({
+                                            'path': full_path,
+                                            'name': name,
+                                            'create_time': create_time,
+                                            'shot_time': create_time,
+                                            'size': stat.st_size,
+                                            'width': width,
+                                            'height': height,
+                                            'has_exif': False,
+                                        })
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                 else:
                     # 非递归模式不需要 seen_dirs，但也可以用 seen_paths 简单的去重
                     with os.scandir(folder_path) as entries:
@@ -5466,19 +5479,9 @@ class ImportPage(BaseImageBrowserPage):
                     last_err = str(e)
                 except Exception:
                     last_err = "scan_error"
-                image_files = []
+                # 不要重置 image_files，保留已扫描到的文件
             if request_id != self._folder_load_request_id:
                 return
-            if not image_files:
-                try:
-                    from utils.log_manager import LogManager
-
-                    LogManager.instance().debug(
-                        f"[Import] scan empty folder={folder_path} recursive={bool(recursive)} exts={len(valid_extensions)} err={last_err}"
-                    )
-                except Exception:
-                    pass
-
             self.scanResultsReady.emit(request_id, image_files)
 
         Thread(target=run_scan, daemon=True, name=f"ImportFolderScan-{request_id}").start()
@@ -6028,8 +6031,21 @@ class ImportPage(BaseImageBrowserPage):
         if not folder_key:
             return set()
         try:
+            result = set()
+            # 获取当前文件夹的暂存文件
             s = self._stash_by_folder.get(folder_key)
-            return set(s) if s else set()
+            if s:
+                result.update(s)
+
+            # 递归获取所有子文件夹的暂存文件
+            # 使用规范化后的路径作为前缀匹配
+            folder_key_norm = folder_key.rstrip('/\\') + os.sep
+            for key, stashed in self._stash_by_folder.items():
+                if key != folder_key and key.startswith(folder_key_norm):
+                    if stashed:
+                        result.update(stashed)
+
+            return result
         except Exception:
             return set()
 
@@ -16659,7 +16675,7 @@ class ImportPage(BaseImageBrowserPage):
                 if not is_v:
                     folder = self.settings_manager.get("import/last_folder", "") or ""
                     if folder and os.path.exists(folder):
-                        self.load_images(folder, recursive=False)
+                        self.load_images(folder, recursive=True)
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开导入图库窗口失败: {e}")
 
@@ -16982,7 +16998,7 @@ class ImportPage(BaseImageBrowserPage):
         try:
             folder = self.settings_manager.get("import/last_folder", "") or ""
             if folder and os.path.exists(folder):
-                self.load_images(folder, recursive=False)
+                self.load_images(folder, recursive=True)
         except Exception:
             pass
         try:
@@ -17219,14 +17235,14 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         pass
             if auto_folder and os.path.exists(auto_folder):
-                self.load_images(auto_folder, recursive=False)
+                self.load_images(auto_folder, recursive=True)
             else:
                 path = self.settings_manager.get("import/last_path")
                 if path and os.path.exists(path):
                     if not root_paths:
                         self.folder_panel.add_root_folders([path])
                         self._save_import_root_paths(self._get_import_root_paths_from_tree())
-                    self.load_images(path, recursive=False)
+                    self.load_images(path, recursive=True)
 
         try:
             self._refresh_focus_progress_ui()

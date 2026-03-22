@@ -1715,7 +1715,20 @@ class ImportToLibraryDialog(BasePopupDialog):
                         time_hint = (self.shot_time_input.text() or "").strip()
                     except Exception:
                         time_hint = ""
-                    text = BirdSpeciesRecognizer().recognize(tmp_path, location_hint=location_hint, time_hint=time_hint).text
+
+                    # 定义状态回调函数，用于更新任务状态
+                    def status_callback(message):
+                        try:
+                            StatusManager.instance().update_task(task_id, message)
+                        except Exception:
+                            pass
+
+                    text = BirdSpeciesRecognizer().recognize(
+                        tmp_path,
+                        location_hint=location_hint,
+                        time_hint=time_hint,
+                        status_callback=status_callback
+                    ).text
                 finally:
                     try:
                         os.remove(tmp_path)

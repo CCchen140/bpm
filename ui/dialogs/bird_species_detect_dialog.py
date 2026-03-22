@@ -985,6 +985,7 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
         if cv2 is None:
             NotificationManager.instance().show_warning("错误", "缺少依赖：opencv-python")
             return
+
         bbox = list(self._bbox_xyxy)
         try:
             location_hint = (self.location_input.text() or "").strip()
@@ -994,10 +995,7 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
             time_hint = (self.shot_time_input.text() or "").strip()
         except Exception:
             time_hint = ""
-        
-        # 获取GPS信息和区域代码用于地域过滤
-        lat, lon, region_code = self._get_gps_for_current_image()
-        
+
         self.recognize_btn.setEnabled(False)
         task_id = StatusManager.instance().start_task("正在识别物种...")
         self._species_req_id += 1
@@ -1005,8 +1003,28 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
         self._species_tasks[req_id] = int(task_id)
 
         def run():
+            import time
+            thread_start = time.time()
             try:
+                # 在后台线程中获取GPS信息（避免阻塞UI）
+                try:
+                    StatusManager.instance().update_task(task_id, "正在获取位置信息...")
+                except Exception:
+                    pass
+                gps_start = time.time()
+                lat, lon, region_code = self._get_gps_for_current_image()
+                print(f"[Timing] GPS获取耗时: {time.time() - gps_start:.3f}s")
+
+                # 更新状态：正在加载图片
+                try:
+                    StatusManager.instance().update_task(task_id, "正在加载图片...")
+                except Exception:
+                    pass
+
+                load_start = time.time()
                 img = load_image(self._current_path)
+                print(f"[Timing] 图片加载耗时: {time.time() - load_start:.3f}s")
+                
                 if img is None:
                     raise RuntimeError("读取图片失败")
                 h, w = img.shape[:2]
@@ -1016,10 +1034,22 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                 y2 = max(0, min(int(bbox[3]), h))
                 if x2 <= x1 or y2 <= y1:
                     raise RuntimeError("主体框无效")
+                
+                # 更新状态：正在裁剪图片
+                try:
+                    StatusManager.instance().update_task(task_id, "正在裁剪图片...")
+                except Exception:
+                    pass
+
+                crop_start = time.time()
                 crop = img[y1:y2, x1:x2]
                 crop = self._to_uint8_bgr(crop)
+                print(f"[Timing] 裁剪耗时: {time.time() - crop_start:.3f}s")
+
                 if crop is None:
                     raise RuntimeError("裁剪图片处理失败")
+
+                encode_start = time.time()
                 fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
                 os.close(fd)
                 try:
@@ -1028,20 +1058,34 @@ class BirdSpeciesDetectDialog(BasePopupDialog):
                         raise RuntimeError("裁剪图片编码失败")
                     with open(tmp_path, "wb") as f:
                         f.write(bytes(buf))
+                    print(f"[Timing] 编码耗时: {time.time() - encode_start:.3f}s")
+
+                    # 定义状态回调函数，用于更新任务状态
+                    def status_callback(message):
+                        try:
+                            StatusManager.instance().update_task(task_id, message)
+                        except Exception:
+                            pass
+
+                    recognize_start = time.time()
                     text = BirdSpeciesRecognizer().recognize(
                         tmp_path,
                         location_hint=str(location_hint or ""),
                         time_hint=str(time_hint or ""),
                         lat=lat,
                         lon=lon,
-                        region_code=region_code
+                        region_code=region_code,
+                        status_callback=status_callback
                     ).text
+                    print(f"[Timing] 识别耗时: {time.time() - recognize_start:.3f}s")
                 finally:
                     try:
                         os.remove(tmp_path)
                     except Exception:
                         pass
+
                 species = self._extract_species_name(text)
+                print(f"[Timing] 总耗时: {time.time() - thread_start:.3f}s")
                 try:
                     self._species_done.emit(req_id, str(species or ""), "")
                 except Exception:

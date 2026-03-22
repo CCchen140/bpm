@@ -642,6 +642,17 @@ if __name__ == "__main__":
         app.processEvents()
         
         def _start_async_init():
+            # 预初始化ExifHandleWorker，避免首次使用时阻塞UI
+            def _init_exif_worker():
+                try:
+                    print("[Init] 预初始化ExifHandleWorker...")
+                    from utils.exif.exif_utils import ExifHandleWorker
+                    ExifHandleWorker.get_instance()
+                    print("[Init] ExifHandleWorker预初始化完成")
+                except Exception as e:
+                    print(f"[Init] ExifHandleWorker预初始化失败: {e}")
+            Thread(target=_init_exif_worker, daemon=True, name="ExifWorkerInit").start()
+
             try:
                 if hasattr(window, "page_library") and hasattr(window.page_library, "cache_manager"):
                     window.page_library._library_cache_loading_started = True
