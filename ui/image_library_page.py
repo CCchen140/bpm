@@ -2020,7 +2020,19 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 连接信号以便在更改时保存
         self.content_splitter.splitterMoved.connect(lambda: self.settings_manager.set("library/splitter_state", self.content_splitter.saveState()))
         try:
-            self.preview_info_splitter.splitterMoved.connect(lambda: self.settings_manager.set("library/preview_info_splitter_state", self.preview_info_splitter.saveState()))
+            def _on_preview_info_splitter_moved():
+                self.settings_manager.set("library/preview_info_splitter_state", self.preview_info_splitter.saveState())
+                # 如果信息面板处于收起状态，确保info_tree保持隐藏
+                try:
+                    if hasattr(self, "info_panel") and self.info_panel is not None:
+                        if getattr(self.info_panel, "_vert_collapsed", False):
+                            try:
+                                self.info_panel.info_tree.setVisible(False)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            self.preview_info_splitter.splitterMoved.connect(_on_preview_info_splitter_moved)
         except Exception:
             pass
         self.view_combo.currentIndexChanged.connect(lambda idx: self.settings_manager.set("library/display_mode", idx))
@@ -7905,7 +7917,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.settings_manager.set("library/preview_visible", visible)
         try:
             if hasattr(self, "info_panel") and self.info_panel is not None:
-                self.info_panel.setVisible(bool(visible))
+                # 只有当信息面板不是收起状态时才设置可见性
+                # 避免覆盖信息面板的收起状态
+                if not getattr(self.info_panel, "_vert_collapsed", False):
+                    self.info_panel.setVisible(bool(visible))
         except Exception:
             pass
         try:

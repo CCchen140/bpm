@@ -1625,6 +1625,16 @@ class ImportPage(BaseImageBrowserPage):
                 self._splitter_layout_timer.start()
             except Exception:
                 pass
+            # 如果信息面板处于收起状态，确保info_tree保持隐藏
+            try:
+                if hasattr(self, "info_panel") and self.info_panel is not None:
+                    if getattr(self.info_panel, "_vert_collapsed", False):
+                        try:
+                            self.info_panel.info_tree.setVisible(False)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         self.content_splitter.splitterMoved.connect(_on_content_splitter_moved)
         self.preview_info_splitter.splitterMoved.connect(_on_vertical_splitter_moved)
@@ -1635,13 +1645,21 @@ class ImportPage(BaseImageBrowserPage):
         QTimer.singleShot(0, self.load_settings)
 
     def _on_preview_visibility_changed(self, visible):
+        """预览面板可见性改变时的回调
+        
+        参数:
+            visible: True表示预览面板展开，False表示折叠
+        """
         try:
             self.settings_manager.set("import/preview_visible", bool(visible))
         except Exception:
             pass
         try:
             if hasattr(self, "info_panel") and self.info_panel is not None:
-                self.info_panel.setVisible(bool(visible))
+                # 只有当信息面板不是收起状态时才设置可见性
+                # 避免覆盖信息面板的收起状态
+                if not getattr(self.info_panel, "_vert_collapsed", False):
+                    self.info_panel.setVisible(bool(visible))
         except Exception:
             pass
         try:
@@ -4263,7 +4281,7 @@ class ImportPage(BaseImageBrowserPage):
                     self._info_panel_cache.pop(_k, None)
             try:
                 from utils.log_manager import LogManager
-                LogManager.instance().info(f"[InfoPanelCache] written path={path[-80:] if len(path) > 80 else path} size={len(self._info_panel_cache)}")
+                LogManager.instance().debug(f"[InfoPanelCache] written path={path[-80:] if len(path) > 80 else path} size={len(self._info_panel_cache)}")
             except Exception:
                 pass
         except Exception:
@@ -8665,6 +8683,11 @@ class ImportPage(BaseImageBrowserPage):
         return None
 
     def _toggle_stash_for_paths(self, file_paths):
+        """切换指定路径的暂存状态
+        
+        参数:
+            file_paths: 文件路径列表
+        """
         if not file_paths:
             return
         folder_key = self._get_current_folder_key()
@@ -8687,6 +8710,7 @@ class ImportPage(BaseImageBrowserPage):
             if not k:
                 continue
             if k in stash:
+                # 在当前文件夹的暂存集合中找到，直接移除
                 try:
                     stash.remove(k)
                 except Exception:
@@ -8694,9 +8718,26 @@ class ImportPage(BaseImageBrowserPage):
                 changed_to_false.append(k)
                 removed += 1
             else:
-                stash.add(k)
-                changed_to_true.append(k)
-                added += 1
+                # 检查是否在其他文件夹（如子文件夹）的暂存集合中
+                found_in_other = False
+                for other_key, other_stash in self._stash_by_folder.items():
+                    if other_key != folder_key and k in other_stash:
+                        try:
+                            other_stash.remove(k)
+                            if not other_stash:
+                                self._stash_by_folder.pop(other_key, None)
+                        except Exception:
+                            pass
+                        found_in_other = True
+                        changed_to_false.append(k)
+                        removed += 1
+                        break
+                
+                if not found_in_other:
+                    # 未在任何暂存集合中，添加到当前文件夹
+                    stash.add(k)
+                    changed_to_true.append(k)
+                    added += 1
 
         if not stash:
             try:
@@ -16437,6 +16478,11 @@ class ImportPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("错误", f"无法打开图片: {e}")
 
     def open_in_external_editor(self, image_paths: list[str]):
+        """在外部编辑器中打开图片
+        
+        参数:
+            image_paths: 图片路径列表
+        """
         paths = [str(p) for p in (image_paths or []) if p]
         if not paths:
             return
@@ -16448,11 +16494,37 @@ class ImportPage(BaseImageBrowserPage):
         if not os.path.exists(app_path):
             NotificationManager.instance().show_warning("错误", "编辑软件路径无效，请在设置页配置")
             return
+        
+        # 尝试多种方式启动外部程序
+        # 方式1: 普通方式启动
         try:
             import subprocess
-            subprocess.Popen([app_path, *paths])
+            subprocess.Popen([app_path, *paths], shell=False)
+            return
         except Exception as e:
-            NotificationManager.instance().show_warning("错误", f"无法在外部软件中打开: {e}")
+            # 如果是权限错误，尝试使用runas
+            if "740" in str(e) or "需要提升" in str(e):
+                pass  # 继续尝试使用runas
+            else:
+                # 其他错误，尝试shell=True方式
+                try:
+                    cmd = f'"{app_path}"' + ''.join([f' "{p}"' for p in paths])
+                    subprocess.Popen(cmd, shell=True)
+                    return
+                except Exception:
+                    pass
+        
+        # 方式2: 使用runas以管理员权限启动
+        try:
+            import subprocess
+            # 使用runas命令以管理员权限运行
+            # runas /user:Administrator 需要密码，不适合
+            # 使用powershell的Start-Process -Verb runas
+            ps_cmd = f'Start-Process -FilePath "{app_path}" -ArgumentList {",".join([f'"{p}"' for p in paths])} -Verb runas'
+            subprocess.Popen(["powershell", "-Command", ps_cmd], shell=False)
+            return
+        except Exception as e2:
+            NotificationManager.instance().show_warning("错误", f"无法在外部软件中打开，该软件需要管理员权限。请尝试以管理员身份运行本程序，或修改外部软件的配置使其不需要管理员权限。")
 
     def copy_image(self, image_path):
         """复制图片到剪贴板"""

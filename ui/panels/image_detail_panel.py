@@ -720,7 +720,7 @@ class ImageAllInfoOverlay(QWidget):
                 return
 
         try:
-            self.show()
+            # 不自动显示，由 _update_main_info_stack_layout 控制显示/隐藏
             self.adjustSize()
         except RuntimeError:
             # C++ 对象已被删除
@@ -1928,7 +1928,7 @@ class ImageDetailPanel(QWidget):
                 except TypeError:
                     info_overlay.set_data(filename, details)
                 
-                # 确保信息浮层及其父控件可见
+                # 小的信息面板始终显示
                 try:
                     info_overlay.show()
                     info_overlay.raise_()
@@ -4137,6 +4137,10 @@ class ImageDetailPanel(QWidget):
             pass
 
         info = getattr(self, "info_overlay_main", None)
+        all_overlay = getattr(self, "all_info_overlay_main", None)
+        expand_btn = getattr(self, "all_info_expand_btn", None)
+
+        # 小的信息面板始终显示
         try:
             if info is not None:
                 info.setMaximumWidth(int(w))
@@ -4146,8 +4150,6 @@ class ImageDetailPanel(QWidget):
                 info.show()
         except Exception as e:
             pass
-        all_overlay = getattr(self, "all_info_overlay_main", None)
-        expand_btn = getattr(self, "all_info_expand_btn", None)
 
         try:
             info_h = int(info.height()) if info is not None else 0
@@ -4155,7 +4157,11 @@ class ImageDetailPanel(QWidget):
             info_h = 0
         y_all = int(info_h) + int(gap)
 
-        if bool(getattr(self, "_all_info_collapsed", False)):
+        # 检查是否处于收起状态
+        is_collapsed = bool(getattr(self, "_all_info_collapsed", False))
+        
+        if is_collapsed:
+            # 收起状态：只隐藏大的详细信息面板，显示展开按钮
             try:
                 if all_overlay is not None:
                     all_overlay.hide()
@@ -4170,6 +4176,7 @@ class ImageDetailPanel(QWidget):
                 pass
             return
 
+        # 展开状态：显示详细信息面板
         try:
             if expand_btn is not None:
                 expand_btn.hide()
@@ -4177,7 +4184,6 @@ class ImageDetailPanel(QWidget):
             pass
 
         if all_overlay is None:
-            print(f"[DEBUG] all_overlay is None")
             return
         html_content = str(getattr(all_overlay, "_html", "") or "").strip()
         try:
@@ -4186,7 +4192,6 @@ class ImageDetailPanel(QWidget):
                 return
             all_overlay.show()
         except Exception as e:
-            print(f"[DEBUG] all_overlay show/hide exception: {e}")
             pass
         try:
             all_overlay.setFixedWidth(int(w))
@@ -4249,7 +4254,9 @@ class ImageDetailPanel(QWidget):
 
         all_overlay = getattr(self, "all_info_overlay_main", None)
         expand_btn = getattr(self, "all_info_expand_btn", None)
+        
         if collapsed:
+            # 收起状态：只隐藏大的详细信息面板，保持小的信息面板显示
             try:
                 if all_overlay is not None:
                     all_overlay.hide()
@@ -4261,6 +4268,7 @@ class ImageDetailPanel(QWidget):
             except Exception:
                 pass
         else:
+            # 展开状态：隐藏展开按钮，显示详细信息面板
             try:
                 if expand_btn is not None:
                     expand_btn.hide()

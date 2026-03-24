@@ -76,6 +76,19 @@ begin
       begin
         RegDeleteKeyIncludingSubkeys(HKCU, 'Software\BirdPictureManager');
       end;
+
+      // 5. 删除程序目录下的 cache 和 update 目录
+      UserDataPath := ExpandConstant('{app}\cache');
+      if DirExists(UserDataPath) then
+      begin
+         DelTree(UserDataPath, True, True, True);
+      end;
+
+      UserDataPath := ExpandConstant('{app}\update');
+      if DirExists(UserDataPath) then
+      begin
+         DelTree(UserDataPath, True, True, True);
+      end;
     end;
   end;
 end;

@@ -147,6 +147,26 @@ class InfoPanel(QWidget):
         self.init_ui()
         ColorManager.instance().register_listener(self._apply_theme_styles)
         
+    def showEvent(self, event):
+        """当面板变为可见时，重新应用收起状态"""
+        super().showEvent(event)
+        # 如果面板处于收起状态，确保info_tree保持隐藏
+        if getattr(self, "_vert_collapsed", False):
+            try:
+                self.info_tree.setVisible(False)
+            except Exception:
+                pass
+    
+    def resizeEvent(self, event):
+        """当面板尺寸变化时，重新应用收起状态"""
+        super().resizeEvent(event)
+        # 如果面板处于收起状态，确保info_tree保持隐藏
+        if getattr(self, "_vert_collapsed", False):
+            try:
+                self.info_tree.setVisible(False)
+            except Exception:
+                pass
+         
     def init_ui(self):
         self.setMinimumHeight(34)
         self.setMaximumHeight(16777215)
@@ -196,6 +216,12 @@ class InfoPanel(QWidget):
         self._apply_theme_styles()
 
     def set_vertical_collapsed(self, collapsed: bool):
+        """设置信息面板的收起/展开状态
+        
+        参数:
+            collapsed: True表示收起，False表示展开
+        """
+        was_collapsed = getattr(self, "_vert_collapsed", False)
         self._vert_collapsed = bool(collapsed)
         try:
             self.info_tree.setVisible(not bool(collapsed))
@@ -205,6 +231,13 @@ class InfoPanel(QWidget):
             self._apply_theme_styles()
         except Exception:
             pass
+        # 如果从收起状态切换到展开状态，且有保存的待更新路径，则刷新显示
+        if was_collapsed and not collapsed:
+            pending_path = getattr(self, "_pending_update_path", None)
+            if pending_path and pending_path != getattr(self, "_current_image_path", None):
+                # 使用QTimer延迟调用，避免在信号处理中直接调用
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.update_info(pending_path))
 
     def _adjust_key_column_width(self):
         try:
@@ -737,6 +770,9 @@ class InfoPanel(QWidget):
         """EXIF 加载完成后的回调（在主线程执行）；并回写缓存供下次命中使用。"""
         if request_id != self._focus_distance_request_id:
             return
+        # 如果面板处于收起状态，不更新UI
+        if getattr(self, "_vert_collapsed", False):
+            return
         self._apply_exif_to_ui(image_path, exif_data)
         try:
             self.exif_loaded_for_cache.emit(image_path, exif_data)
@@ -767,6 +803,12 @@ class InfoPanel(QWidget):
             p = image_path
         image_path = p or image_path
         self._current_image_path = image_path
+        
+        # 如果面板处于收起状态，只保存路径不更新UI
+        if getattr(self, "_vert_collapsed", False):
+            self._pending_update_path = image_path
+            return
+        
         try:
             filename = os.path.basename(image_path) if image_path else "-"
         except Exception:
@@ -778,7 +820,14 @@ class InfoPanel(QWidget):
             pass
 
     def update_info(self, image_path, context=None, io_data=None, exif_data=None):
-        """更新信息树内容。io_data 由后台 worker 提供时可避免主线程做文件/DB I/O；exif_data 由缓存提供时不再启动 EXIF 线程。"""
+        """更新信息树内容。io_data 由后台 worker 提供时可避免主线程做文件/DB I/O；exif_data 由缓存提供时不再启动 EXIF 线程。
+        
+        参数:
+            image_path: 图片路径
+            context: 上下文信息（如对焦检测结果）
+            io_data: 后台worker提供的文件信息
+            exif_data: EXIF数据缓存
+        """
         import time
         
         if not image_path:
@@ -805,9 +854,18 @@ class InfoPanel(QWidget):
             p = image_path
         image_path = p or image_path
         
+        # 如果面板处于收起状态，只保存路径不更新UI，避免面板重新显示
+        if getattr(self, "_vert_collapsed", False):
+            self._pending_update_path = image_path
+            self._current_image_path = image_path
+            return
+        
         self._current_image_path = image_path
         self._focus_distance_request_id += 1
         request_id = self._focus_distance_request_id
+        
+        # 清除待更新路径标记
+        self._pending_update_path = None
         
         # 取消之前的EXIF加载线程
         try:
@@ -1165,6 +1223,9 @@ class InfoPanel(QWidget):
             pass
 
         def _deferred_layout_and_exif():
+            # 如果面板在延迟期间被收起，不执行任何操作
+            if getattr(self, "_vert_collapsed", False):
+                return
             try:
                 self._adjust_key_column_width()
                 self.info_tree.doItemsLayout()
@@ -1230,10 +1291,14 @@ class InfoPanel(QWidget):
         self._adjust_key_column_width()
 
     def _on_focus_distance_ready(self, request_id: int, image_path: str, focus_distance: str):
+        """对焦距离加载完成后的回调"""
         try:
             if request_id != self._focus_distance_request_id:
                 return
             if not image_path or image_path != self._current_image_path:
+                return
+            # 如果面板处于收起状态，不更新UI
+            if getattr(self, "_vert_collapsed", False):
                 return
             if not focus_distance or str(focus_distance).strip() in ("", "-"):
                 return
