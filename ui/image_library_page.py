@@ -3001,17 +3001,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
             rename_action.triggered.connect(lambda: self.rename_image(index, image_path))
             # 删除
             delete_action = menu.addAction(qta.icon('mdi6.trash-can-outline', color='#e74c3c'), "删除")
-            def _delete_clicked():
-                selected = self.get_selected_files()
-                try:
-                    selected_paths = {self._normalize_path_key(f.get("path")) for f in (selected or []) if isinstance(f, dict) and f.get("path")}
-                except Exception:
-                    selected_paths = set()
-                if len(selected_paths) > 1 and self._normalize_path_key(image_path) in selected_paths:
-                    self.on_delete_clicked()
-                else:
-                    self.delete_image(index, image_path)
-            delete_action.triggered.connect(_delete_clicked)
+            delete_action.triggered.connect(lambda: self.delete_selected_images())
             
             menu.addSeparator()
 
@@ -4192,6 +4182,191 @@ class ImageLibraryPage(BaseImageBrowserPage):
             NotificationManager.instance().show_toast("删除成功")
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"删除失败: {e}")
+
+    def delete_selected_images(self):
+        """删除选中的图片（支持多选）"""
+        selected_files = self.get_selected_files()
+        
+        if not selected_files:
+            NotificationManager.instance().show_warning("提示", "没有选中图片")
+            return
+        
+        # 获取上次的删除选择状态
+        delete_local_key = "library/delete_local_file_enabled"
+        def _to_bool(v, default=True):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return bool(int(v))
+            try:
+                s = str(v).strip().lower()
+            except Exception:
+                return bool(default)
+            if s in ("1", "true", "yes", "y", "on"):
+                return True
+            if s in ("0", "false", "no", "n", "off", ""):
+                return False
+            return bool(default)
+        
+        # 根据选中数量显示不同的提示信息
+        file_count = len(selected_files)
+        if file_count == 1:
+            # 单张图片
+            file_name = os.path.basename(selected_files[0].get('path', ''))
+            message = f"确定要删除以下文件吗？\n{file_name}"
+        else:
+            # 多张图片
+            message = f"确定要删除选中的 {file_count} 个文件吗？"
+        
+        confirmed, delete_local = NotificationManager.instance().ask_confirmation(
+            "确认删除",
+            message,
+            show_checkbox=True,
+            checkbox_text="同时删除本地磁盘文件",
+            default_checked=_to_bool(self.settings_manager.get(delete_local_key, True), default=True)
+        )
+
+        try:
+            self.settings_manager.set(delete_local_key, delete_local)
+            self.settings_manager.sync()
+        except Exception:
+            pass
+
+        if not confirmed:
+            return
+
+        deleted_paths = []
+        deleted_uuids = []
+        failed_paths = []
+        
+        try:
+            root_dir = str(self.settings_manager.get("general/root_path") or "")
+        except Exception:
+            root_dir = ""
+
+        for file_info in selected_files:
+            try:
+                image_path = file_info.get('path')
+                if not image_path:
+                    continue
+                
+                # 1. 删除本地文件 (如果勾选)
+                if delete_local and os.path.exists(image_path):
+                    try:
+                        from utils.file.file_utils import delete_with_sidecar
+                        delete_with_sidecar(image_path, prefer_trash=True)
+                    except Exception:
+                        try:
+                            from utils.file.file_utils import delete_with_sidecar
+                            delete_with_sidecar(image_path, prefer_trash=False)
+                        except Exception:
+                            pass
+                    try:
+                        if os.path.exists(image_path):
+                            failed_paths.append(str(image_path))
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        self._safe_rmdir_empty(os.path.dirname(str(image_path or "")), root_limit=root_dir)
+                    except Exception:
+                        pass
+                
+                # 2. 从数据库删除 (总是执行，清理记录)
+                try:
+                    u = file_info.get("uuid")
+                except Exception:
+                    u = None
+                if not u:
+                    try:
+                        rec = self.db.get_result_by_path(image_path, table_name="bird_results")
+                    except Exception:
+                        rec = None
+                    if isinstance(rec, dict):
+                        u = rec.get("uuid")
+                if u:
+                    deleted_uuids.append(str(u))
+                deleted_paths.append(image_path)
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"删除失败 {file_info.get('name', '')}: {e}")
+                except Exception:
+                    pass
+
+        if deleted_uuids:
+            try:
+                self.db.delete_results_by_uuids(list(deleted_uuids), table_name="bird_results")
+            except Exception:
+                pass
+
+        # 删除本地缩略图缓存（内存缓存和磁盘缓存）
+        if deleted_paths:
+            try:
+                # 删除内存缓存
+                if hasattr(self, "cache_manager") and self.cache_manager:
+                    self.cache_manager.invalidate_many(deleted_paths)
+            except Exception:
+                pass
+            try:
+                # 删除磁盘缓存
+                from cache.thumbnail_disk_cache import ThumbnailDiskCache
+                disk_cache = ThumbnailDiskCache(self.cache_manager, scope="library")
+                disk_cache.invalidate_many(deleted_paths)
+            except Exception:
+                pass
+
+        # 从内存列表中移除
+        if deleted_paths:
+            try:
+                deleted_keys = {self._normalize_path_key(p) for p in (deleted_paths or []) if p}
+            except Exception:
+                deleted_keys = set(deleted_paths or [])
+            def _keep_img2(img):
+                try:
+                    if not isinstance(img, dict):
+                        return True
+                    if deleted_uuids and img.get("uuid") and str(img.get("uuid")) in set(deleted_uuids):
+                        return False
+                    p = img.get('path') or img.get('file_path') or img.get('filepath')
+                    if not p:
+                        return True
+                    return self._normalize_path_key(p) not in deleted_keys
+                except Exception:
+                    return True
+            try:
+                self.image_files = [img for img in (self.image_files or []) if _keep_img2(img)]
+            except Exception:
+                pass
+            try:
+                self.raw_image_files = [img for img in (self.raw_image_files or []) if _keep_img2(img)]
+            except Exception:
+                pass
+            
+            try:
+                if getattr(self, "current_preview_path", None):
+                    pk = self._normalize_path_key(str(getattr(self, "current_preview_path", "") or ""))
+                    if pk in deleted_keys:
+                        self.clear_preview()
+            except Exception:
+                pass
+            self.update_thumbnails()
+            try:
+                if hasattr(self, "folder_panel") and self.folder_panel is not None:
+                    self.folder_panel.refresh_tree(root_path=root_dir)
+            except Exception:
+                pass
+            
+            # 显示删除结果
+            if failed_paths:
+                NotificationManager.instance().show_warning(
+                    "提示", 
+                    f"删除完成：成功 {len(deleted_paths)} 个，失败 {len(failed_paths)} 个（文件可能被占用）"
+                )
+            else:
+                if len(deleted_paths) == 1:
+                    NotificationManager.instance().show_toast("删除成功")
+                else:
+                    NotificationManager.instance().show_toast(f"成功删除 {len(deleted_paths)} 个文件")
 
     def show_image_properties(self, image_path):
         """显示图片属性"""
