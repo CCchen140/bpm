@@ -2858,9 +2858,12 @@ class ImageLibraryPage(BaseImageBrowserPage):
             show_in_folder_action = menu.addAction(qta.icon('mdi6.folder-open', color='#555'), "在文件管理器中打开")
             show_in_folder_action.triggered.connect(lambda: self.folder_panel.open_in_explorer(os.path.dirname(image_path)))
 
-            # 复制
-            copy_action = menu.addAction(qta.icon('mdi6.content-copy', color='#555'), "复制")
-            copy_action.triggered.connect(lambda: self.copy_image(image_path))
+            # 复制图片（支持多选和RAW缩略图）
+            copy_action = menu.addAction(qta.icon('mdi6.content-copy', color='#555'), "复制图片")
+            copy_action.triggered.connect(lambda: self.copy_image())
+            # 复制图片文件（含XMP文件）
+            copy_file_action = menu.addAction(qta.icon('mdi6.file-multiple', color='#555'), "复制图片文件")
+            copy_file_action.triggered.connect(lambda: self.copy_image_files())
             # 复制路径
             copy_path_action = menu.addAction(qta.icon('mdi6.link-variant', color='#555'), "复制路径")
             copy_path_action.triggered.connect(lambda: self.copy_image_path(image_path))
@@ -3645,8 +3648,41 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"无法打开文件管理器: {e}")
 
-    def copy_image(self, image_path):
-        """复制图片到剪贴板"""
+    def copy_image(self, image_path=None):
+        """复制图片到剪贴板，支持多选图片和RAW缩略图
+        
+        Args:
+            image_path: 单张图片路径（可选，如果为None则复制所有选中的图片）
+        """
+        try:
+            from PyQt6.QtGui import QClipboard, QImage
+            from utils.file.file import load_image
+            import numpy as np
+            
+            # 获取要复制的图片路径列表
+            if image_path:
+                # 单张图片
+                paths = [image_path]
+            else:
+                # 多选图片
+                paths = self.get_selected_paths()
+            
+            if not paths:
+                NotificationManager.instance().show_warning("提示", "没有选中图片")
+                return
+            
+            # 复制第一张图片的数据到剪贴板
+            self._copy_single_image(paths[0])
+            
+            # 如果有多张图片，显示提示
+            if len(paths) > 1:
+                NotificationManager.instance().show_toast(f"已复制第一张图片到剪贴板（共选中 {len(paths)} 张）")
+            
+        except Exception as e:
+            NotificationManager.instance().show_warning("错误", f"复制失败: {e}")
+
+    def _copy_single_image(self, image_path):
+        """复制单张图片到剪贴板"""
         try:
             from PyQt6.QtGui import QClipboard, QImage
             from utils.file.file import load_image
@@ -3663,22 +3699,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
             height, width, channel = img_data.shape
             bytes_per_line = 3 * width
             
-            # load_image 返回的是 BGR 格式 (OpenCV默认)
-            # QImage.Format.Format_BGR888 表示源数据是 BGR 顺序
-            # 这里的逻辑是：告诉 QImage "这是 BGR 数据"，Qt 会自动正确解析
-            # 如果使用 Format_RGB888，则红蓝通道会反转
-            # 注意：rgbSwapped() 会物理交换 R/B 通道并返回新副本，
-            # 或者直接构造 QImage 时指定 Format_BGR888 也是一种方式。
-            # 下面这种写法：构造时声明是 BGR888，不需要再 swap，或者构造时声明 RGB888 然后 swap
-            
-            # 方法 A: 声明源数据是 RGB888 (欺骗)，然后 swap 得到正确颜色 (如果源是 BGR)
-            # q_img = QImage(img_data.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).rgbSwapped()
-            
             # 方法 B: 正确声明源数据是 BGR888
             q_img = QImage(img_data.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
             
-            # 为了确保数据被复制且脱离 numpy 引用，同时也为了确保剪贴板兼容性，
-            # 最好在这里做一个深拷贝并转为标准 RGB
+            # 深拷贝并转为标准 RGB
             q_img = q_img.copy() 
             
             pixmap = QPixmap.fromImage(q_img)
@@ -3700,6 +3724,70 @@ class ImageLibraryPage(BaseImageBrowserPage):
                     clipboard.setPixmap(pixmap)
             except Exception:
                 pass
+
+    def copy_image_files(self, image_path=None):
+        """复制图片文件到剪贴板（含XMP文件）
+        
+        Args:
+            image_path: 单张图片路径（可选，如果为None则复制所有选中的图片）
+        """
+        try:
+            from PyQt6.QtCore import QMimeData, QUrl
+            
+            # 获取要复制的图片路径列表
+            if image_path:
+                paths = [image_path]
+            else:
+                paths = self.get_selected_paths()
+            
+            if not paths:
+                NotificationManager.instance().show_warning("提示", "没有选中图片")
+                return
+            
+            # 收集所有要复制的文件（图片 + 对应的XMP文件）
+            files_to_copy = []
+            xmp_count = 0
+            
+            for path in paths:
+                if os.path.exists(path):
+                    files_to_copy.append(path)
+                    
+                    # 检查是否存在对应的XMP文件
+                    base_path = os.path.splitext(path)[0]
+                    
+                    # 在 Windows 上文件系统不区分大小写，所以只需要检查一次
+                    # 优先检查小写扩展名
+                    xmp_path = base_path + '.xmp'
+                    if os.path.exists(xmp_path):
+                        files_to_copy.append(xmp_path)
+                        xmp_count += 1
+                    else:
+                        # 如果小写不存在，再检查大写（Linux/Mac 可能区分大小写）
+                        xmp_path_upper = base_path + '.XMP'
+                        if os.path.exists(xmp_path_upper):
+                            files_to_copy.append(xmp_path_upper)
+                            xmp_count += 1
+            
+            if not files_to_copy:
+                NotificationManager.instance().show_warning("错误", "文件不存在")
+                return
+            
+            # 创建MIME数据
+            mime_data = QMimeData()
+            urls = [QUrl.fromLocalFile(f) for f in files_to_copy]
+            mime_data.setUrls(urls)
+            
+            clipboard = QApplication.clipboard()
+            clipboard.setMimeData(mime_data)
+            
+            # 显示提示
+            if xmp_count > 0:
+                NotificationManager.instance().show_toast(f"已复制 {len(paths)} 个图片文件和 {xmp_count} 个XMP文件")
+            else:
+                NotificationManager.instance().show_toast(f"已复制 {len(paths)} 个图片文件")
+                
+        except Exception as e:
+            NotificationManager.instance().show_warning("错误", f"复制文件失败: {e}")
 
     def copy_image_path(self, image_path):
         """复制图片路径到剪贴板"""
