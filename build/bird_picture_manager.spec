@@ -202,7 +202,7 @@ try:
 except Exception:
     pass
 
-for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil"):
+for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil", "win10toast"):
     try:
         if collect_submodules is not None:
             hiddenimports += collect_submodules(_opt_pkg)

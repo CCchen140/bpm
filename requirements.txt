@@ -1,5 +1,5 @@
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install PyInstaller pypinyin geopy GPUtil psutil qtawesome ultralytics opencv-python rawpy exifread PyExifTool pyinstaller ultralytics PyQt6 PyQt6-WebEngine -i https://mirrors.aliyun.com/pypi/simple
+pip install PyInstaller pypinyin geopy GPUtil psutil qtawesome ultralytics opencv-python rawpy exifread PyExifTool pyinstaller ultralytics PyQt6 PyQt6-WebEngine pynput win10toast -i https://mirrors.aliyun.com/pypi/simple
 conda install pytorch torchvision pytorch-cuda=13.0 -c pytorch -c nvidia -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/win-64/
 
 linux依赖：

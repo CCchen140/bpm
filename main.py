@@ -313,6 +313,8 @@ if __name__ == "__main__":
 
     print("Creating QApplication...")
     app = QApplication(sys.argv)
+    app.setApplicationName("栖图")
+    app.setApplicationDisplayName("栖图")
 
     # P1：立即显示加载框，将 LogManager/Migration/ColorManager 等放在其后，改善感知速度
     # 尝试从设置中读取主题配置，使加载窗口初始颜色与主题一致
@@ -613,6 +615,15 @@ if __name__ == "__main__":
 
     if app_icon:
         window.setWindowIcon(app_icon)
+
+    # 初始化系统托盘管理器
+    try:
+        from ui.utils.system_tray_manager import SystemTrayManager
+        SystemTrayManager.instance().initialize(window, app_icon)
+        print("SystemTrayManager initialized")
+    except Exception as e:
+        print(f"SystemTrayManager initialization failed: {e}")
+
     is_first_run = window.settings_manager.get("general/first_run")
     if isinstance(is_first_run, str):
         is_first_run = is_first_run.lower() == "true"

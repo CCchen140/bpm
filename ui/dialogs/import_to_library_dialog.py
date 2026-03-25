@@ -1099,7 +1099,8 @@ class ImportToLibraryDialog(BasePopupDialog):
         self._loop_running = False
         self._loop_enabled = False
         try:
-            NotificationManager.instance().show_toast("后台循环检测完成")
+            # 使用 smart_notify：前台显示 Toast，后台显示系统通知
+            NotificationManager.instance().smart_notify("导入检测", "后台循环检测完成")
         except Exception:
             pass
         self._stop_background_loop()

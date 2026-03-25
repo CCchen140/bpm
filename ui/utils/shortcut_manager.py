@@ -108,6 +108,7 @@ class ShortcutManager(QObject):
         self.register_default("FolderTree.FocusToGrid", "D", "文件树：切换到缩略图并选中可见首项")
         self.register_default("ThumbnailGrid.FocusToTree", "Alt+A", "缩略图：切换到文件树并定位当前文件夹")
         self.register_default("General.Close", "Esc", "关闭当前窗口或返回")
+        self.register_default("Global.BirdDetect", "Ctrl+Shift+R", "全局快捷键识鸟（屏幕截图识别）")
         
     def register_default(self, shortcut_id, default_sequence, description=""):
         """注册默认快捷键"""

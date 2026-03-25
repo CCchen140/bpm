@@ -139,6 +139,10 @@ class BirdSpeciesRecognizer:
         if not isinstance(preds, list) or not preds:
             return BirdSpeciesResult(text="无法识别")
         p0 = preds[0] if isinstance(preds[0], dict) else {}
+        # 检查置信度，低于10%认为是识别失败
+        confidence = float(p0.get("confidence") or 0.0)
+        if confidence < 0.1:
+            return BirdSpeciesResult(text="无法识别")
         name = str(p0.get("chinese_name") or "").strip()
         return BirdSpeciesResult(text=name or "无法识别")
 
@@ -559,20 +563,9 @@ def recognize_bird_species(image_path: str, api_key: Optional[str] = None) -> st
 
 def run_local_bird_ipc_service():
     try:
-        print("[BirdIPC] 启动本地识别服务...")
         svc = _LocalBirdIPCService()
         svc.start()
-        print("[BirdIPC] 本地识别服务已停止")
-    except Exception as e:
-        # 使用安全的方式打印异常信息，避免在打包环境下stderr无效导致OSError
-        try:
-            print(f"[BirdIPC] 本地识别服务异常: {e}")
-            import traceback
-            # 将traceback输出到字符串，避免直接写入可能已关闭的stderr
-            tb_str = traceback.format_exc()
-            print(f"[BirdIPC] 异常详情: {tb_str}")
-        except Exception:
-            pass
+    except Exception:
         raise
 
 
@@ -619,53 +612,34 @@ class _LocalBirdModel:
             raise BirdRecognitionError(f"读取鸟种库失败: {e}") from e
 
     def _load_model(self):
-        print(f"[_LocalBirdModel] 加载模型，设备: {self._device}")
         model_path = self._opensource_dir / "model20240824.pth"
-        print(f"[_LocalBirdModel] 模型路径: {model_path}")
         if not model_path.exists():
             raise BirdRecognitionError(f"缺少模型文件: {model_path}")
-        print("[_LocalBirdModel] 模型文件存在")
         try:
-            print("[_LocalBirdModel] 导入 torch...")
             import torch
-            print(f"[_LocalBirdModel] torch 版本: {torch.__version__}")
             import torchvision.models as models
             import torch.nn as nn
-            print("[_LocalBirdModel] torch 导入成功")
         except Exception as e:
-            print(f"[_LocalBirdModel] 导入 torch 失败: {e}")
-            import traceback
-            traceback.print_exc()
             raise BirdRecognitionError(f"缺少依赖: {e}") from e
 
         try:
-            print("[_LocalBirdModel] 初始化 ResNet34 模型...")
             net = models.resnet34(weights=None)
             try:
                 in_features = int(getattr(net.fc, "in_features", 512) or 512)
             except Exception:
                 in_features = 512
             net.fc = nn.Linear(in_features, 11000)
-            print("[_LocalBirdModel] 模型初始化成功")
         except Exception as e:
-            print(f"[_LocalBirdModel] 初始化模型失败: {e}")
-            import traceback
-            traceback.print_exc()
             raise BirdRecognitionError(f"初始化模型失败: {e}") from e
 
         try:
-            print("[_LocalBirdModel] 加载模型权重...")
             sd = torch.load(str(model_path), map_location="cpu")
             if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd.get("state_dict"), dict):
                 sd = sd["state_dict"]
             if not isinstance(sd, dict):
                 raise BirdRecognitionError("模型文件格式异常")
             net.load_state_dict(sd, strict=True)
-            print("[_LocalBirdModel] 模型权重加载成功")
         except Exception as e:
-            print(f"[_LocalBirdModel] 加载模型权重失败: {e}")
-            import traceback
-            traceback.print_exc()
             raise BirdRecognitionError(f"加载模型权重失败: {e}") from e
 
         net.eval()
@@ -934,28 +908,17 @@ class _LocalBirdIPCService:
             pass
 
     def _load_model(self):
-        print("[BirdIPC] 正在加载模型...")
         opensource_dir = _resolve_opensource_dir()
-        print(f"[BirdIPC] 开源目录: {opensource_dir}")
         device = "cpu"
         try:
             from utils.system.gpu_utils import is_torch_cuda_usable
-
             if bool(is_torch_cuda_usable()):
                 device = "cuda"
-                print("[BirdIPC] 使用 CUDA 设备")
-            else:
-                print("[BirdIPC] 使用 CPU 设备")
-        except Exception as e:
-            print(f"[BirdIPC] 检测 GPU 失败，使用 CPU: {e}")
-            device = "cpu"
+        except Exception:
+            pass
         try:
             self._model = _LocalBirdModel(opensource_dir=opensource_dir, device=device)
-            print("[BirdIPC] 模型加载成功")
         except Exception as e:
-            print(f"[BirdIPC] 模型加载失败: {e}")
-            import traceback
-            traceback.print_exc()
             raise
 
     def _read_request(self) -> dict[str, Any] | None:
@@ -1194,11 +1157,6 @@ class _LocalBirdIPCClient:
         except Exception:
             cmd = [sys.executable, "--bird-ipc-service"]
 
-        print(f"[BirdIPC] 启动服务进程，命令: {' '.join(cmd)}")
-        print(f"[BirdIPC] 工作目录: {project_root}")
-        print(f"[BirdIPC] 可执行文件: {sys.executable}")
-        print(f"[BirdIPC] 是否打包: {getattr(sys, 'frozen', False)}")
-        
         env = os.environ.copy()
         try:
             # Windows: 隐藏控制台窗口
@@ -1211,18 +1169,13 @@ class _LocalBirdIPCClient:
             if sys.platform == "win32":
                 kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
             self._proc = subprocess.Popen(cmd, **kwargs)
-            print(f"[BirdIPC] 服务进程已启动，PID: {self._proc.pid}")
         except Exception as e:
-            print(f"[BirdIPC] 启动服务进程失败: {e}")
-            import traceback
-            traceback.print_exc()
             self._proc = None
             return False
 
         start = time.time()
         while time.time() - start < 60.0:
             if self.is_running():
-                print("[BirdIPC] 服务进程已就绪")
                 return True
             # 检查进程是否已退出
             if self._proc.poll() is not None:
@@ -1230,16 +1183,15 @@ class _LocalBirdIPCClient:
                 try:
                     stdout_output, stderr_output = self._proc.communicate(timeout=5)
                     if stdout_output:
-                        print(f"[BirdIPC] 服务进程标准输出:\n{stdout_output.decode('utf-8', errors='ignore')}")
+                        LogManager.instance().debug(f"[BirdIPC] 服务进程输出:\n{stdout_output.decode('utf-8', errors='ignore')}")
                     if stderr_output:
-                        print(f"[BirdIPC] 服务进程错误输出:\n{stderr_output.decode('utf-8', errors='ignore')}")
-                except Exception as e:
-                    print(f"[BirdIPC] 读取服务进程输出失败: {e}")
-                print(f"[BirdIPC] 服务进程异常退出，返回码: {self._proc.returncode}")
+                        LogManager.instance().error(f"[BirdIPC] 服务进程错误:\n{stderr_output.decode('utf-8', errors='ignore')}")
+                except Exception:
+                    pass
                 self._proc = None
                 return False
             time.sleep(0.2)
-        print("[BirdIPC] 等待服务启动超时")
+        LogManager.instance().error("[BirdIPC] 等待服务启动超时")
         return False
 
     def _send_request(self, req: dict[str, Any]) -> bool:

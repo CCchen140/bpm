@@ -155,6 +155,42 @@ class NotificationManager(QObject):
             target_toast = self.toast
         if target_toast:
             target_toast.show_message(message, duration, position=position)
+
+    def show_system_notify(self, title: str, message: str, icon_type=None):
+        """
+        显示 Windows 系统通知（右下角 Toast）
+
+        参数:
+            title: 通知标题
+            message: 通知内容
+            icon_type: 图标类型，默认使用 NoIcon（无声音）
+        """
+        LogManager.instance().info(f"[NotificationManager] 调用系统通知: {title}")
+        try:
+            from ui.utils.system_tray_manager import SystemTrayManager
+            SystemTrayManager.instance().show_notification(title, message, icon_type)
+        except Exception as e:
+            LogManager.instance().error(f"[NotificationManager] 发送系统通知失败: {e}")
+
+    def smart_notify(self, title: str, message: str, duration=2000, position: str = "bottom"):
+        """
+        智能通知：
+        - 窗口在前台且可见 → 应用内 Toast
+        - 窗口在后台或最小化 → 系统通知
+
+        参数:
+            title: 通知标题
+            message: 通知内容
+            duration: 应用内 Toast 显示时长
+            position: 应用内 Toast 位置
+        """
+        is_active = self.parent_widget and self.parent_widget.isActiveWindow()
+        if is_active:
+            # 窗口在前台，使用应用内 Toast
+            self.show_toast(f"{title}: {message}" if title else message, duration=duration, position=position)
+        else:
+            # 窗口在后台，使用系统通知
+            self.show_system_notify(title, message)
             
     def show_warning(self, title, message):
         """显示警告对话框"""

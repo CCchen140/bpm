@@ -13840,7 +13840,8 @@ class ImportPage(BaseImageBrowserPage):
         if err:
             NotificationManager.instance().show_warning("错误", f"保存检测结果失败: {err}")
             return
-        NotificationManager.instance().show_toast("对焦检测完成")
+        # 使用 smart_notify：前台显示 Toast，后台显示系统通知
+        NotificationManager.instance().smart_notify("对焦检测", "对焦检测完成")
         if warn:
             try:
                 NotificationManager.instance().show_toast(str(warn))

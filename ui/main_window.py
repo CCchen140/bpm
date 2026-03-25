@@ -574,6 +574,12 @@ class MainWindow(QMainWindow):
             app_icon = get_app_icon(icon_color)
             QApplication.instance().setWindowIcon(app_icon)
             self.setWindowIcon(app_icon)
+            # 同步更新系统托盘图标
+            try:
+                from ui.utils.system_tray_manager import SystemTrayManager
+                SystemTrayManager.instance().set_icon(app_icon)
+            except Exception:
+                pass
         except Exception:
             pass
         status_bg = cm.get("theme.background.primary")
@@ -807,6 +813,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _init_bird_detect_controller(self):
+        """初始化全局快捷键识鸟功能"""
+        try:
+            from ui.utils.bird_detect_controller import init_bird_detect_controller
+            init_bird_detect_controller()
+        except Exception as e:
+            LogManager.instance().error(f"初始化全局快捷键识鸟功能失败: {e}")
+
     def check_guide_needed(self):
         """检查是否需要显示引导页"""
         # Check for data migration flag (set by MigrationManager)
@@ -890,6 +904,9 @@ class MainWindow(QMainWindow):
                 pass
         QTimer.singleShot(1200, self._warmup_subject_detector_once)
         QTimer.singleShot(600, self._warmup_exiftool_stayopen_once)
+        
+        # 初始化全局快捷键识鸟功能
+        QTimer.singleShot(800, self._init_bird_detect_controller)
         
         # 尝试启动主界面功能引导（针对已有用户或测试模式）
         # 延迟一点时间，确保界面已完全显示
@@ -2103,6 +2120,13 @@ class MainWindow(QMainWindow):
             if ipc_client is not None and hasattr(ipc_client, "shutdown"):
                 # 使用较短的超时时间，优先保证退出速度
                 threading.Thread(target=lambda: ipc_client.shutdown(timeout=0.5), daemon=True).start()
+        except Exception:
+            pass
+
+        # 关闭全局快捷键识鸟功能
+        try:
+            from ui.utils.bird_detect_controller import shutdown_bird_detect_controller
+            shutdown_bird_detect_controller()
         except Exception:
             pass
 
