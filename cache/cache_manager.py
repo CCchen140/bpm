@@ -10,12 +10,30 @@ from utils.system.task_scheduler import TaskScheduler, TaskType
 from utils.system.gpu_utils import GPUScaler
 from PyQt6.QtCore import Qt, QBuffer, QIODevice, QByteArray
 from PyQt6.QtGui import QPixmap, QImage
-import cv2
-import numpy as np
 from utils.file.file import load_image
 from utils.setting.settings_manager import SettingsManager
 from ui.utils.status_manager import StatusManager
 from utils.log_manager import LogManager
+
+# 延迟导入 cv2 和 numpy，避免启动时加载重型依赖
+_cv2 = None
+_numpy = None
+
+def _get_cv2():
+    """延迟加载 cv2 模块"""
+    global _cv2
+    if _cv2 is None:
+        import cv2
+        _cv2 = cv2
+    return _cv2
+
+def _get_numpy():
+    """延迟加载 numpy 模块"""
+    global _numpy
+    if _numpy is None:
+        import numpy as np
+        _numpy = np
+    return _numpy
 
 # 图片缓存管理器（LRU 缓存）
 class ImageCacheManager:
@@ -561,6 +579,7 @@ class ImageCacheManager:
                 try:
                     cv_img = load_image(p)
                     if cv_img is not None:
+                        cv2 = _get_cv2()
                         cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
                         height, width, channel = cv_img.shape
                         bytes_per_line = 3 * width
@@ -750,6 +769,7 @@ class ImageCacheManager:
                     if cv_img is not None:
                         # OpenCV BGR -> QImage RGB
                         # 注意：cv_img 是 numpy array
+                        cv2 = _get_cv2()
                         cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
                         height, width, channel = cv_img.shape
                         bytes_per_line = 3 * width

@@ -1,10 +1,28 @@
-import cv2
-import numpy as np
 from PyQt6.QtGui import QImage
 import os
 import sys
 import threading
 import time
+
+# 延迟导入 cv2 和 numpy，避免启动时加载重型依赖
+_cv2 = None
+_numpy = None
+
+def _get_cv2():
+    """延迟加载 cv2 模块"""
+    global _cv2
+    if _cv2 is None:
+        import cv2
+        _cv2 = cv2
+    return _cv2
+
+def _get_numpy():
+    """延迟加载 numpy 模块"""
+    global _numpy
+    if _numpy is None:
+        import numpy as np
+        _numpy = np
+    return _numpy
 
 
 def _detect_gpu_type() -> str:
@@ -656,6 +674,7 @@ def is_torch_cuda_usable() -> bool:
 
 def is_opencv_cuda_usable() -> bool:
     try:
+        cv2 = _get_cv2()
         if not hasattr(cv2, "cuda"):
             return False
         return int(cv2.cuda.getCudaEnabledDeviceCount() or 0) > 0
@@ -788,12 +807,14 @@ class GPUScaler:
             pass
         if not cls._checked:
             try:
+                cv2 = _get_cv2()
                 if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
                     cls._backend = "cuda"
             except Exception:
                 cls._backend = None
             if cls._backend is None:
                 try:
+                    cv2 = _get_cv2()
                     if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
                         cv2.ocl.setUseOpenCL(True)
                         if cv2.ocl.useOpenCL():
@@ -840,6 +861,8 @@ class GPUScaler:
             bytes_per_line = int(src.bytesPerLine())
             ptr = src.bits()
             ptr.setsize(src_h * bytes_per_line)
+            np = _get_numpy()
+            cv2 = _get_cv2()
             arr = np.frombuffer(ptr, np.uint8).reshape((src_h, bytes_per_line))
             arr = arr[:, :src_w * 3].reshape((src_h, src_w, 3))
             interpolation = cv2.INTER_NEAREST if fast_mode else cv2.INTER_LINEAR
@@ -885,6 +908,8 @@ class GPUScaler:
         if not cls.is_available():
             return None
         try:
+            cv2 = _get_cv2()
+            np = _get_numpy()
             h, w = int(arr.shape[0]), int(arr.shape[1])
             if w <= 0 or h <= 0:
                 return None

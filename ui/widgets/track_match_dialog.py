@@ -414,6 +414,8 @@ class TrackMatchDialog(BasePopupDialog):
             pass
 
         calibrate_bar = QWidget()
+        # 设置背景透明，避免显示灰色长条
+        calibrate_bar.setStyleSheet("background-color: transparent; border: none;")
         calibrate_layout = QHBoxLayout(calibrate_bar)
         calibrate_layout.setContentsMargins(0, 8, 0, 0)
         calibrate_layout.setSpacing(10)
@@ -655,6 +657,12 @@ class TrackMatchDialog(BasePopupDialog):
         try:
             if hasattr(self, "apply_track_btn") and self.apply_track_btn:
                 self.apply_track_btn.setStyleSheet(_btn_style())
+        except Exception:
+            pass
+        # 时间校准按钮样式：移除灰色背景，添加边框
+        try:
+            if hasattr(self, "calibrate_btn") and self.calibrate_btn:
+                self.calibrate_btn.setStyleSheet(_btn_style())
         except Exception:
             pass
 

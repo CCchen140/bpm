@@ -1453,11 +1453,20 @@ class ImageLibraryPage(BaseImageBrowserPage):
         threading.Thread(target=run, daemon=True).start()
 
     def init_ui(self):
+        """初始化UI - 优化为分阶段构造，减少启动时的主线程阻塞"""
         # 初始化显示模式（对应 view_combo 的索引：0=仅缩略图, 1=缩略图+文件名, 2=缩略图+详情）
         self.display_mode = 1  # 默认显示文件名
         self._apply_theme_styles()
 
-        # 左侧：文件夹区域
+        # 第一阶段：构建骨架（工具栏 + 网格区），用户可见可交互
+        self._build_ui_skeleton()
+        
+        # 第二阶段：延迟构造其他面板，减少启动阻塞
+        QTimer.singleShot(0, self._build_ui_panels)
+
+    def _build_ui_skeleton(self):
+        """构建UI骨架（第一阶段）：只创建核心可见组件"""
+        # 左侧：文件夹区域（必须立即创建，用户需要看到）
         self.folder_panel = FolderPanel(self.db, self.settings_manager, context="library")
         # Restore standard toolbar buttons for library page
         self.folder_panel.add_search_button()
@@ -1475,7 +1484,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
         self.set_left_panel(self.folder_panel)
 
-        # ========== 工具栏 ==========
+        # ========== 工具栏（骨架阶段创建）==========
         self.toolbar = ToolbarView(self, self.settings_manager, config={"show_stash": False, "show_new_folder": False, "compact_quick_filter_spacing": True})
         self.toolbar.newFolderRequested.connect(self.on_new_folder_clicked)
         self.toolbar.renameRequested.connect(self.on_rename_clicked)
@@ -1522,25 +1531,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self.toolbar_track_match_btn = None
 
         self.set_toolbar(self.toolbar)
-        
-        # 将筛选面板重新定位为 ImageLibraryPage 的子组件，以便实现悬浮效果
-        if hasattr(self.toolbar, 'filter_panel') and self.toolbar.filter_panel:
-             self.toolbar.filter_panel.setParent(self)
-             self.toolbar.filter_panel.hide()
-             # self.filter_panel is a property, no need to set it
-             if hasattr(self.toolbar, 'filter_btn'):
-                 self._filter_btn = self.toolbar.filter_btn
 
-        # Connect signals for event filter state
-        if hasattr(self.toolbar, 'filter_btn'):
-            self.toolbar.filter_btn.toggled.connect(self._update_event_filter_state)
-        if hasattr(self.folder_panel, 'search_btn'):
-            self.folder_panel.search_btn.toggled.connect(self._update_event_filter_state)
-            
-        # Ensure initial check
-        self._update_event_filter_state()
-
-        # ========== 缩略图网格 ==========
+        # ========== 缩略图网格（骨架阶段创建）==========
         self.grid_view = VirtualThumbnailGridView(self)
         self.grid_view.itemClicked.connect(self.on_thumbnail_clicked_proxy)
         self.grid_view.itemDoubleClicked.connect(self.on_thumbnail_double_clicked)
@@ -1561,6 +1553,94 @@ class ImageLibraryPage(BaseImageBrowserPage):
             pass
         self.grid_view.installEventFilter(self)
         self.grid_view.scroll_area.viewport().installEventFilter(self)
+
+    @property
+    def filter_btn(self):
+        return self.toolbar.filter_btn
+
+    @property
+    def folder_search_btn(self):
+        return self.folder_panel.search_btn
+
+    @property
+    def scroll_area(self):
+        return self.grid_view.scroll_area
+
+    @property
+    def preview_slider(self):
+        return self.toolbar.preview_slider
+
+    @property
+    def filter_panel(self):
+        return self.toolbar.filter_panel
+
+    @property
+    def current_thumb_size(self):
+        return self.grid_view.current_thumb_size
+        
+    @current_thumb_size.setter
+    def current_thumb_size(self, value):
+        self.grid_view.current_thumb_size = value
+
+    @property
+    def view_combo(self):
+        return self.toolbar.view_combo
+
+    @property
+    def sort_combo(self):
+        return self.toolbar.sort_combo
+        
+    @property
+    def fav_btn(self):
+        return self.toolbar.fav_btn
+        
+    @property
+    def star_rating(self):
+        return self.toolbar.star_rating
+        
+    @property
+    def rating_filter_btn(self):
+        return self.toolbar.rating_filter_btn
+
+    def _build_ui_panels(self):
+        """构建UI面板（第二阶段）：延迟创建非核心组件"""
+        # 此方法在 QTimer.singleShot(0) 中调用，将阻塞分散到多个事件循环周期
+        try:
+            self._do_build_toolbar_extras()
+        except Exception as e:
+            LogManager.instance().warning(f"[ImageLibraryPage] 构建工具栏附加组件失败: {e}")
+        
+        try:
+            self._do_build_grid_extras()
+        except Exception as e:
+            LogManager.instance().warning(f"[ImageLibraryPage] 构建网格附加组件失败: {e}")
+        
+        try:
+            self._do_build_preview_panel()
+        except Exception as e:
+            LogManager.instance().warning(f"[ImageLibraryPage] 构建预览面板失败: {e}")
+
+    def _do_build_toolbar_extras(self):
+        """构建工具栏附加组件"""
+        # 将筛选面板重新定位为 ImageLibraryPage 的子组件，以便实现悬浮效果
+        if hasattr(self.toolbar, 'filter_panel') and self.toolbar.filter_panel:
+             self.toolbar.filter_panel.setParent(self)
+             self.toolbar.filter_panel.hide()
+             # self.filter_panel is a property, no need to set it
+             if hasattr(self.toolbar, 'filter_btn'):
+                 self._filter_btn = self.toolbar.filter_btn
+
+        # Connect signals for event filter state
+        if hasattr(self.toolbar, 'filter_btn'):
+            self.toolbar.filter_btn.toggled.connect(self._update_event_filter_state)
+        if hasattr(self.folder_panel, 'search_btn'):
+            self.folder_panel.search_btn.toggled.connect(self._update_event_filter_state)
+            
+        # Ensure initial check
+        self._update_event_filter_state()
+
+    def _do_build_grid_extras(self):
+        """构建网格区域的附加组件"""
         # 缩略图滚动性能控制器已移除
         self._thumb_ui_controller = None
 
@@ -1568,8 +1648,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._spray_exit_shortcut = QShortcut(self)
             self._spray_exit_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self._spray_exit_shortcut.activated.connect(self._on_spray_exit_shortcut)
-            self._spray_exit_shortcut.setEnabled(False)
             self._update_spray_exit_shortcut()
+            self._spray_exit_shortcut.setEnabled(False)
             ShortcutManager.instance().shortcuts_changed.connect(self._update_spray_exit_shortcut)
 
         if self._select_all_shortcut is None:
@@ -1639,7 +1719,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         
         # 初始排列缩略图（使用默认列数）
         self.grid_view.arrange_thumbnails()
-        
+
+    def _do_build_preview_panel(self):
+        """构建预览面板和信息面板"""
         # 右侧：图片预览窗口
         self.preview_panel = PreviewPanel(self.settings_manager, cache_context="library")
         self.preview_panel.visibility_changed.connect(self.on_preview_visibility_changed)
@@ -1714,11 +1796,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 self._info_collapsed_vert = True
                 self._preview_collapsed_vert = False
                 try:
-                    self.info_panel.set_vertical_collapsed(True)
+                    self.preview_panel.set_vertical_collapsed(False)
                 except Exception:
                     pass
                 try:
-                    self.preview_panel.set_vertical_collapsed(False)
+                    self.info_panel.set_vertical_collapsed(True)
                 except Exception:
                     pass
                 total = max(1, int(sizes[0] + sizes[1]))
@@ -1770,7 +1852,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
             pass
 
         # 设置初始比例：文件夹 1，图片 3，预览 1
-        self.content_splitter.setSizes([200, 600, 280])
+        # 优化：增加预览面板默认宽度到 360，避免滑条和按钮重叠
+        self.content_splitter.setSizes([200, 520, 360])
         try:
             self.content_splitter.setStretchFactor(0, 0)
             self.content_splitter.setStretchFactor(1, 10)
@@ -1785,60 +1868,22 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.center_stack_layout.addWidget(self.content_splitter)
         self.main_layout.addWidget(self.center_stack, 1)
 
-        # ========== 下方状态栏 ==========
-        # Status bar removed - using MainWindow global status bar
+        # 加载设置
+        self.load_settings()
+        self._settings_loaded = True
+
+        # 安装全局事件过滤器（用于检测点击外部关闭筛选面板）
+        try:
+            if not self._event_filter_installed:
+                QApplication.instance().installEventFilter(self)
+                self._event_filter_installed = True
+        except Exception:
+            pass
+        
         # 使用 QTimer 延迟初始化缩略图大小，确保 UI 完全加载
         QTimer.singleShot(100, self._init_thumbnail_size)
         # 延迟加载设置（包括上次选中的文件夹）
         QTimer.singleShot(300, self.load_settings)
-
-    @property
-    def filter_btn(self):
-        return self.toolbar.filter_btn
-
-    @property
-    def folder_search_btn(self):
-        return self.folder_panel.search_btn
-
-    @property
-    def scroll_area(self):
-        return self.grid_view.scroll_area
-
-    @property
-    def preview_slider(self):
-        return self.toolbar.preview_slider
-
-    @property
-    def filter_panel(self):
-        return self.toolbar.filter_panel
-
-    @property
-    def current_thumb_size(self):
-        return self.grid_view.current_thumb_size
-        
-    @current_thumb_size.setter
-    def current_thumb_size(self, value):
-        self.grid_view.current_thumb_size = value
-
-    @property
-    def view_combo(self):
-        return self.toolbar.view_combo
-
-    @property
-    def sort_combo(self):
-        return self.toolbar.sort_combo
-        
-    @property
-    def fav_btn(self):
-        return self.toolbar.fav_btn
-        
-    @property
-    def star_rating(self):
-        return self.toolbar.star_rating
-        
-    @property
-    def rating_filter_btn(self):
-        return self.toolbar.rating_filter_btn
 
     def initialize(self):
         """手动初始化加载（用于延迟加载）"""
@@ -4739,12 +4784,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         thumb._stale_thumbnail = True
                     except Exception:
                         pass
-                    # 清除缩略图数据，强制重新加载
-                    try:
-                        thumb.thumbnail_pixmap = None
-                        thumb._thumbnail_image = None
-                    except Exception:
-                        pass
+                    # 优化：不清除现有缩略图数据，保持旧图片显示直到新图片加载完成
+                    # 这样可以避免缩略图变成占位符导致的闪烁问题
+                    # thumb.thumbnail_pixmap = None
+                    # thumb._thumbnail_image = None
                 
                 # 强制触发滚动事件，Loader 会检查 visible range 并重新加载过期/未加载的图片
                 self.on_scroll_value_changed(self.grid_view.scroll_area.verticalScrollBar().value())

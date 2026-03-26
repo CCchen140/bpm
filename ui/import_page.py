@@ -12597,10 +12597,16 @@ class ImportPage(BaseImageBrowserPage):
             auto_switch = bool(self.settings_manager.get("focus_detect/auto_switch_to_scan_mode", True))
         except Exception:
             auto_switch = True
+        # 优化：立即切换到虚拟文件模式，确保进度条能正确显示
+        # 必须在显示进度条之前完成模式切换，否则 _refresh_focus_progress_ui 会隐藏 overlay
         if auto_switch:
             try:
                 if not bool(getattr(self, "is_virtual_mode", False)):
-                    QTimer.singleShot(0, lambda: self.mode_switch.setChecked(True))
+                    self.is_virtual_mode = True
+                    try:
+                        self.mode_switch.setChecked(True)
+                    except Exception:
+                        pass
             except Exception:
                 pass
         try:
@@ -12708,28 +12714,28 @@ class ImportPage(BaseImageBrowserPage):
             self._update_focus_stop_toolbar_btn()
         except Exception:
             pass
-        self._focus_progress_operation = "准备中"
+        self._focus_progress_operation = "正在初始化对焦检测..."
         self._focus_progress_done = 0
         self._focus_progress_total = 0
         self._focus_progress_start_ts = float(time.time())
         self._focus_exif_base_done = 0
         self._focus_exif_total = 0
+        # 优化：在两种模式下都显示初始化进度条，让用户知道对焦检测正在启动
         try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                overlay = getattr(self, "_focus_progress_overlay", None)
-                if overlay is not None and hasattr(overlay, "set_progress"):
-                    try:
-                        device_txt = self._get_focus_detect_device_text()
-                    except Exception:
-                        device_txt = ""
-                    base_text = "当前操作：准备中"
-                    overlay.set_progress(
-                        visible=True,
-                        current=int(self._focus_progress_done),
-                        total=int(self._focus_progress_total),
-                        text=base_text,
-                        device_text=device_txt,
-                    )
+            overlay = getattr(self, "_focus_progress_overlay", None)
+            if overlay is not None and hasattr(overlay, "set_progress"):
+                try:
+                    device_txt = self._get_focus_detect_device_text()
+                except Exception:
+                    device_txt = ""
+                base_text = "当前操作：正在初始化对焦检测..."
+                overlay.set_progress(
+                    visible=True,
+                    current=int(self._focus_progress_done),
+                    total=int(self._focus_progress_total),
+                    text=base_text,
+                    device_text=device_txt,
+                )
         except Exception:
             pass
         _focus_log("set _focus_detect_running=True and start timers")
@@ -12789,8 +12795,9 @@ class ImportPage(BaseImageBrowserPage):
                 _focus_log("worker thread: importing detect_focus_batch_for_import")
                 from core.check_cli import detect_focus_batch_for_import
                 _focus_log("worker thread: collecting paths")
+                # 优化：将"扫描文件"改为"初始化对焦检测"，保持进度显示一致性
                 try:
-                    progress_bridge.progress.emit("扫描文件", 0, 0, float(time.time()))
+                    progress_bridge.progress.emit("初始化对焦检测", 0, 0, float(time.time()))
                 except Exception:
                     pass
                 try:
@@ -12806,10 +12813,11 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         pass
                     return
-                try:
-                    progress_bridge.progress.emit("准备中", 0, int(len(run_paths)), float(time.time()))
-                except Exception:
-                    pass
+                # 优化：移除"准备中"进度更新，让 detect_focus_batch_for_import 中的"初始化对焦检测"能够正确显示
+                # try:
+                #     progress_bridge.progress.emit("准备中", 0, int(len(run_paths)), float(time.time()))
+                # except Exception:
+                #     pass
 
                 def progress_cb(op: str, done: int, total: int, start_ts: float):
                     try:
@@ -12999,7 +13007,18 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         pass
                     _focus_log(f"worker thread: calling detect_focus_batch_for_import(paths={len(run_paths)})")
-                    results = detect_focus_batch_for_import(run_paths, **call_opts)
+                    
+                    # 定义进度回调函数，将对焦检测内部进度反馈到UI
+                    def _progress_callback(op: str, done: int, total: int, start_ts: float):
+                        try:
+                            progress_bridge.progress.emit(str(op), int(done), int(total), float(start_ts))
+                        except Exception:
+                            pass
+                    
+                    # 传递进度回调函数，使"读取对焦点"等阶段能在UI上显示进度
+                    call_opts_with_callback = dict(call_opts)
+                    call_opts_with_callback["progress_callback"] = _progress_callback
+                    results = detect_focus_batch_for_import(run_paths, **call_opts_with_callback)
                     _focus_log("worker thread: detect_focus_batch_for_import returned")
             except Exception as e:
                 err = str(e)

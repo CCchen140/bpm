@@ -891,9 +891,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'icon_toolbar'):
              self.icon_toolbar.show()
 
+        # 优化：仅在启动时预加载图库页面（索引0），导入页面（索引1）改为按需加载
+        # 这样可以减少启动时的主线程阻塞时间
         try:
             QTimer.singleShot(150, lambda: self._ensure_page_loaded(0))
-            QTimer.singleShot(250, lambda: self._ensure_page_loaded(1))
+            # 不再预加载导入页面，改为首次切换到导入页时才加载
+            # QTimer.singleShot(250, lambda: self._ensure_page_loaded(1))
         except Exception:
             pass
 
@@ -1210,16 +1213,19 @@ class MainWindow(QMainWindow):
             self._charts_page_loading = False
 
     def _warmup_subject_detector_once(self):
+        """预热主体检测器 - 优化为按需延迟加载，避免启动时导入重型依赖"""
         try:
             if getattr(self, "_subject_detector_warmup_started", False):
                 return
             self._subject_detector_warmup_started = True
         except Exception:
             self._subject_detector_warmup_started = True
+        
+        # 优化：不再在启动时预热主体检测器，改为首次实际使用时再加载
+        # 这样可以避免启动时导入 torch 等重型依赖，显著减少启动时间
+        # 预热操作推迟到用户首次使用相关功能时自动触发
         try:
-            from core.check_cli import warmup_subject_detector_async
-
-            warmup_subject_detector_async()
+            LogManager.instance().debug("[Startup] 主体检测器预热已推迟到首次使用时")
         except Exception:
             pass
 

@@ -1102,12 +1102,6 @@ def detect_focus_batch_for_import(
             pass
 
     results_by_path: Dict[str, Dict[str, Any]] = {}
-    try:
-        if callable(progress_callback):
-            progress_callback("初始化", 0, int(len(paths)), float(time.time()))
-    except Exception:
-        pass
-
     _t_focus0 = time.perf_counter()
     _sum_worker_ms = 0.0
     _max_worker_ms = 0.0
@@ -1183,6 +1177,37 @@ def detect_focus_batch_for_import(
             focus_trace(f"stage=focus.async_pool_init err={e}")
             pool_init_future = None
 
+    # 优化：先显示"初始化对焦检测"，等待进程池初始化完成后再进入"读取对焦点"阶段
+    _init_start_ts = time.time()
+    if use_multiprocess and pool_init_future is not None:
+        # 通知UI开始初始化阶段
+        try:
+            if callable(progress_callback):
+                progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_start_ts))
+        except Exception:
+            pass
+        # 等待进程池初始化完成（带进度反馈）
+        _wait_start = time.time()
+        while not pool_init_future.done():
+            elapsed = time.time() - _wait_start
+            if elapsed > 60:  # 超时检查
+                break
+            # 每0.5秒更新一次进度
+            try:
+                if callable(progress_callback) and int(elapsed * 2) > int((elapsed - 0.1) * 2):
+                    progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_start_ts))
+            except Exception:
+                pass
+            time.sleep(0.1)
+    else:
+        # 非多进程模式，直接通知UI开始初始化阶段
+        try:
+            if callable(progress_callback):
+                progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_start_ts))
+        except Exception:
+            pass
+
+    # 进程池初始化完成后，进入读取对焦点阶段
     if bool(enable_af_point_detect):
         _af_start_ts = time.time()
         try:
@@ -1230,17 +1255,14 @@ def detect_focus_batch_for_import(
         except Exception:
             pass
 
-    # 对焦点检测完成后，检查进程池初始化状态
-    if use_multiprocess and pool_init_future is not None:
-        # 检查进程池是否已完成初始化
-        if not pool_init_future.done():
-            # 进程池还在初始化中，显示等待提示
-            _init_start_ts = time.time()
-            try:
-                if callable(progress_callback):
-                    progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_start_ts))
-            except Exception:
-                pass
+    # 对焦点检测完成后，始终显示"初始化对焦检测"阶段
+    # 这个阶段包括：等待进程池初始化、准备检测模型等
+    _init_phase_start_ts = time.time()
+    try:
+        if callable(progress_callback):
+            progress_callback("初始化对焦检测", 0, int(len(paths)), float(_init_phase_start_ts))
+    except Exception:
+        pass
 
     # 记录最终的检测配置（使用info级别确保能被看到）
     try:
@@ -1250,10 +1272,24 @@ def detect_focus_batch_for_import(
 
     if use_multiprocess:
         _t_pool0 = time.perf_counter()
+        _pool_init_start_ts = time.time()
         # 如果之前已经异步初始化进程池，等待结果
         if pool_init_future is not None:
             try:
-                pool = pool_init_future.result(timeout=60)  # 最多等待60秒
+                # 带进度反馈的等待进程池初始化
+                _wait_start = time.time()
+                while not pool_init_future.done():
+                    elapsed = time.time() - _wait_start
+                    if elapsed > 60:  # 超时检查
+                        raise TimeoutError("Pool init timeout")
+                    # 每0.5秒更新一次进度
+                    try:
+                        if callable(progress_callback) and int(elapsed * 2) > int((elapsed - 0.1) * 2):
+                            progress_callback("初始化对焦检测", 0, int(len(paths)), float(_pool_init_start_ts))
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                pool = pool_init_future.result(timeout=0)  # 已经done了，不会阻塞
                 try:
                     executor.shutdown(wait=False)
                 except Exception:
@@ -1266,6 +1302,12 @@ def detect_focus_batch_for_import(
 
         # 如果异步初始化失败或未进行，同步创建进程池
         if pool is None:
+            # 同步创建前通知UI
+            try:
+                if callable(progress_callback):
+                    progress_callback("初始化对焦检测", 0, int(len(paths)), float(_pool_init_start_ts))
+            except Exception:
+                pass
             pool = _create_no_window_pool(
                 processes=proc,
                 initializer=_focus_detect_worker_init,

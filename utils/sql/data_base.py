@@ -4,6 +4,7 @@ import threading
 import os
 import time
 import re
+import atexit
 from utils.file.fingerprint import get_unique_id
 from utils.log_manager import LogManager
 from utils.paths import PathManager
@@ -11,6 +12,11 @@ from utils.paths import PathManager
 
 def get_default_db_path():
     return str(PathManager.instance().get_user_db_path())
+
+
+def _get_db_sentinel_path(db_path: str) -> str:
+    """获取数据库运行标志文件路径，用于检测是否正常退出"""
+    return f"{db_path}.running"
 
 class BirdLibraryDB:
     """数据库管理类（单例模式）"""
@@ -708,15 +714,22 @@ class BirdLibraryDB:
         
         return conn
 
-    def _check_database_integrity(self):
-        """检查数据库完整性，如果损坏则备份并重建"""
+    def _check_database_integrity(self, use_quick_check: bool = True):
+        """检查数据库完整性，如果损坏则备份并重建
+        
+        参数:
+            use_quick_check: 是否使用 PRAGMA quick_check（更快，只检查B-tree结构）
+                            为 False 时使用完整的 integrity_check（更慢，扫描所有数据）
+        """
         if not os.path.exists(self.db_path):
             return True
         
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute("PRAGMA integrity_check")
+            # 根据参数选择检查方式：quick_check 更快，integrity_check 更完整但更慢
+            check_sql = "PRAGMA quick_check" if use_quick_check else "PRAGMA integrity_check"
+            cursor.execute(check_sql)
             result = cursor.fetchone()
             conn.close()
             
@@ -728,6 +741,30 @@ class BirdLibraryDB:
         except Exception as e:
             LogManager.instance().warning(f"[DB] Database integrity check error: {e}")
             return False
+    
+    def _is_abnormal_exit(self) -> bool:
+        """检查上次是否非正常退出（通过标志文件判断）"""
+        sentinel_path = _get_db_sentinel_path(self.db_path)
+        return os.path.exists(sentinel_path)
+    
+    def _mark_db_running(self):
+        """标记数据库正在运行（创建标志文件）"""
+        sentinel_path = _get_db_sentinel_path(self.db_path)
+        try:
+            # 创建标志文件，记录当前时间
+            with open(sentinel_path, 'w', encoding='utf-8') as f:
+                f.write(str(time.time()))
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to create running sentinel: {e}")
+    
+    def _mark_db_closed(self):
+        """标记数据库已正常关闭（删除标志文件）"""
+        sentinel_path = _get_db_sentinel_path(self.db_path)
+        try:
+            if os.path.exists(sentinel_path):
+                os.remove(sentinel_path)
+        except Exception as e:
+            LogManager.instance().warning(f"[DB] Failed to remove running sentinel: {e}")
 
     def _backup_and_rebuild_database(self):
         """备份损坏的数据库并尝试修复，如果修复失败则重建"""
@@ -940,15 +977,30 @@ class BirdLibraryDB:
             LogManager.instance().warning(f"[DB] Failed to restore data: {e}")
 
     def _init_db(self):
-        """初始化数据库：创建表结构"""
+        """初始化数据库：创建表结构
+        
+        优化：仅在非正常退出时执行完整的数据库完整性检查，减少启动时间
+        """
         try:
             LogManager.instance().info(f"[DB] Initializing database at {self.db_path}")
         except Exception:
             pass
         
+        # 标记数据库正在运行（用于检测非正常退出）
+        self._mark_db_running()
+        # 注册退出时清理标志文件的钩子
+        atexit.register(self._mark_db_closed)
+        
         needs_restore = False
         if os.path.exists(self.db_path):
-            if not self._check_database_integrity():
+            # 检查上次是否非正常退出
+            is_abnormal = self._is_abnormal_exit()
+            if is_abnormal:
+                LogManager.instance().warning("[DB] 检测到上次非正常退出，执行完整数据库完整性检查")
+            
+            # 正常退出时使用快速检查(quick_check)，非正常退出时使用完整检查(integrity_check)
+            use_quick_check = not is_abnormal
+            if not self._check_database_integrity(use_quick_check=use_quick_check):
                 needs_restore = True
                 self._backup_and_rebuild_database()
         
