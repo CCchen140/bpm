@@ -2287,135 +2287,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
                  pass
              # Auto-locate in tree
              try:
-                # Use standard keys (without _cls suffix) as per Worker data structure
-                o = info.get('order') or info.get('order_cls')
-                f = info.get('family') or info.get('family_cls')
-                g = info.get('genus') or info.get('genus_cls')
-                s = info.get('species') or info.get('species_cls')
-                path = info.get('path')
-                if hasattr(self, 'folder_panel'):
-                     self.folder_panel.locate_taxonomy_node(o, f, g, s, path, emit_signal=False)
-                     
-                     # Check if we are already in taxonomy mode
-                     current_folder = getattr(self, "current_folder_path", "")
-                     if str(current_folder).startswith("virtual://taxonomy"):
-                         # Check if the clicked item's species matches current view
-                         # If we are viewing a higher level (e.g. Family), and user clicks a species, 
-                         # we might want to narrow down? 
-                         # User requirement: "When auto-selected species folder, clicking again should act like manual click -> filter to this species"
-                         
-                         # Construct the virtual path for this species
-                         target_virtual_path = None
-                         if s:
-                              target_virtual_path = f"virtual://taxonomy?order={o}&family={f}&genus={g}&species={s}"
-                         
-                         # If we are NOT already viewing this exact species node
-                         if target_virtual_path and current_folder != target_virtual_path:
-                              # And if the current view actually CONTAINS this species (which it should if we clicked it)
-                              # We trigger a load for this specific species
-                              # But we must be careful not to trigger this on every click if user just wants to browse
-                              # The user said: "When auto-selected ... again click ... like manual click"
-                              # But here we are single clicking a thumbnail.
-                              # If I single click a thumbnail, I expect to see preview.
-                              # The user says "When auto-selected species folder... again click..." 
-                              # This implies the tree node is selected.
-                              # If I click the thumbnail -> tree node selected (auto-locate).
-                              # If the tree node is selected, does the view update? No, we set emit_signal=False.
-                              # So the view remains on the parent folder (e.g. Family).
-                              # The user wants the view to update to the species folder?
-                              # "Like manual click to this folder" -> means load_images_from_taxonomy(species_node)
-                              
-                              # Let's try to update the view IF we are in a different scope
-                              # But wait, if we update view, the grid changes to only show that species.
-                              # This might be jarring if I just wanted to preview.
-                              # "When auto-selected... again click..."
-                              # Maybe the user means: 
-                              # 1. I click a photo of "Egret" in "All Birds" view.
-                              # 2. Tree jumps to "Egret".
-                              # 3. View stays "All Birds".
-                              # 4. I click the photo AGAIN? Or I click the tree node?
-                              # User said: "当自动选中了物种文件夹时，再次点击要像手动点击到这个文件夹一样"
-                              # "再次点击" -> clicking the PHOTO again? or the FOLDER?
-                              # If it means clicking the photo again, we can detect if it's already selected.
-                              # But `on_thumbnail_clicked_proxy` is called on every click.
-                              # If it means clicking the FOLDER node in the tree:
-                              # We already have logic for tree click.
-                              # But `locate_taxonomy_node` uses `emit_signal=False`, so `on_folder_selected` is NOT called.
-                              # This is correct to prevent view refresh on first click.
-                              # So the user is likely saying: "I want the view to refresh to that species ONLY".
-                              # If I click a photo, tree jumps to species. 
-                              # If I want to filter to that species, I should probably double click or something?
-                              # Or maybe the user WANTS the view to jump immediately? 
-                              # "files tree also jumps... " (previous request) -> done.
-                              # "When auto-selected... again click... "
-                              # This phrasing "When auto-selected... again click" suggests a two-step or a confirmation.
-                              # BUT, if I am browsing a huge list, and I click one, and the view suddenly filters to just 10 images, 
-                              # I lost my context of the huge list. That is bad UX usually.
-                              # However, if the user explicitly asked for "like manual click", maybe they want that.
-                              # Let's re-read: "当自动选中了物种文件夹时，再次点击要像手动点击到这个文件夹一样"
-                              # Context: "I click Egret (photo), tree jumps to Egret (folder). (implied: view didn't change)"
-                              # "Again click" -> likely means clicking the PHOTO again.
-                              # So:
-                              # 1. Click photo A (Species S). Tree -> S. View -> Unchanged.
-                              # 2. Click photo A (Species S) AGAIN. View -> S.
-                              
-                              # Let's implement this "Click again to drill down" logic.
-                              
-                              last_clicked_index = getattr(self, "_last_auto_located_index", -1)
-                              if last_clicked_index == index:
-                                  # Clicked the same image again
-                                  if target_virtual_path:
-                                      # Trigger folder selection manually
-                                      # IMPORTANT: We need to ensure that the folder panel is in a state where it can select
-                                      # Use emit_signal=True to trigger view update
-                                      
-                                      # Note: locate_taxonomy_node with emit_signal=True will select the node AND emit the signal.
-                                      # But if the node is already selected (from the previous auto-locate), 
-                                      # QTreeWidget might NOT emit itemSelectionChanged if the selection doesn't actually change.
-                                      # So we might need to FORCE the load.
-                                      
-                                      current_selected_path = None
-                                      try:
-                                          if hasattr(self.folder_panel, "folder_tree"):
-                                              items = self.folder_panel.folder_tree.selectedItems()
-                                              if items:
-                                                  current_selected_path = items[0].data(0, Qt.ItemDataRole.UserRole)
-                                      except Exception:
-                                          pass
-                                      
-                                      # If already selected in tree, we force load
-                                      # Normalize paths for comparison
-                                      norm_target = self._normalize_path_str(target_virtual_path)
-                                      norm_current_tree = self._normalize_path_str(current_selected_path)
-                                      
-                                      if norm_current_tree == norm_target:
-                                          # Tree is already there, force load directly
-                                          self.load_images_from_taxonomy(target_virtual_path)
-                                          # Also update preview stats
-                                          try:
-                                              title = s or g or f or o or "分类"
-                                              try:
-                                                  root_dir = str(self.settings_manager.get("general/root_path", "") or "")
-                                              except Exception:
-                                                  root_dir = ""
-                                              stats = self.db.get_taxonomy_node_stats(
-                                                  order_cls=o or None,
-                                                  family_cls=f or None,
-                                                  genus_cls=g or None,
-                                                  species_cls=s or None,
-                                                  unclassified=False,
-                                                  table_name="bird_results",
-                                                  root_path=root_dir,
-                                              )
-                                              self.preview_panel.show_folder_stats(title, stats)
-                                          except:
-                                              pass
-                                      else:
-                                          # Tree not there yet, normal locate with signal
-                                          self.folder_panel.locate_taxonomy_node(o, f, g, s, path, emit_signal=True)
-                              
-                              self._last_auto_located_index = index
-
+                # 优化：如果是恢复视图状态，不触发 locate_taxonomy_node，避免树自动跳转
+                if not bool(getattr(self, "_restoring_view_state", False)):
+                    # Use standard keys (without _cls suffix) as per Worker data structure
+                    o = info.get('order') or info.get('order_cls')
+                    f = info.get('family') or info.get('family_cls')
+                    g = info.get('genus') or info.get('genus_cls')
+                    s = info.get('species') or info.get('species_cls')
+                    path = info.get('path')
+                    if hasattr(self, 'folder_panel'):
+                        self.folder_panel.locate_taxonomy_node(o, f, g, s, path, emit_signal=False)
              except Exception as e:
                 print(f"Auto-locate error: {e}")
 
@@ -6844,15 +6725,20 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 gv.thumbnails_container.update()
         except Exception:
             pass
+        # 优化：恢复视图状态时，设置标志位，避免触发 locate_taxonomy_node 导致树跳转
+        self._restoring_view_state = True
         def _post():
             try:
                 self.on_thumbnail_clicked_proxy(int(target), Qt.KeyboardModifier.NoModifier)
             except Exception:
                 pass
+            finally:
+                self._restoring_view_state = False
         try:
             QTimer.singleShot(0, _post)
         except Exception:
             _post()
+            self._restoring_view_state = False
         self._pending_restore_applied = True
 
     def _on_fast_scroll_timeout(self):

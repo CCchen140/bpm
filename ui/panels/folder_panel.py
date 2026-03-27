@@ -1835,7 +1835,24 @@ class FolderPanel(QWidget):
                         suppress_auto = bool(getattr(self, "_shortcut_nav_guard", False))
                     except Exception:
                         suppress_auto = False
-                    if not suppress_auto and item.childCount() == 1:
+                    # 优化：对于分类树，不自动展开子节点，避免点击目或科时自动跳转到物种
+                    # 检查父节点是否是分类树的根节点
+                    is_taxonomy = False
+                    try:
+                        parent = item.parent()
+                        if parent:
+                            parent_data = str(parent.data(0, Qt.ItemDataRole.UserRole) or "")
+                            if parent_data.startswith("virtual://taxonomy"):
+                                is_taxonomy = True
+                        else:
+                            # 检查当前节点是否是分类树的根节点
+                            current_data = str(folder_path or "")
+                            if current_data.startswith("virtual://taxonomy"):
+                                is_taxonomy = True
+                    except Exception:
+                        pass
+                    
+                    if not suppress_auto and not is_taxonomy and item.childCount() == 1:
                         single_child = item.child(0)
                         if single_child.childCount() > 0 or single_child.data(0, Qt.ItemDataRole.UserRole) != "__placeholder__":
                             single_child.setExpanded(True)

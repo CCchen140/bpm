@@ -1255,6 +1255,43 @@ class BirdLibraryDB:
         finally:
             conn.close()
 
+    def get_all_species_combinations(self, table_name: str = "bird_results"):
+        """获取所有已有的物种组合（目科属种），用于检测新物种
+        
+        返回:
+            set: 包含 (order_cls, family_cls, genus_cls, species_cls) 元组的集合
+        """
+        if table_name not in ["bird_results", "import_cache"]:
+            table_name = "bird_results"
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                    SELECT DISTINCT order_cls, family_cls, genus_cls, species_cls
+                    FROM {table_name}
+                    WHERE species_cls IS NOT NULL AND species_cls != ''
+                """)
+                rows = cursor.fetchall() or []
+                # 返回包含 (order, family, genus, species) 元组的集合
+                result = set()
+                for r in rows:
+                    order_cls = str(r["order_cls"] or "").strip()
+                    family_cls = str(r["family_cls"] or "").strip()
+                    genus_cls = str(r["genus_cls"] or "").strip()
+                    species_cls = str(r["species_cls"] or "").strip()
+                    if species_cls:
+                        result.add((order_cls, family_cls, genus_cls, species_cls))
+                return result
+            except Exception as e:
+                try:
+                    LogManager.instance().warning(f"获取所有物种组合失败: {e}")
+                except Exception:
+                    pass
+                return set()
+            finally:
+                conn.close()
+
     def get_thumbnail_disk_cache(self, cache_key, variant, scope="library"):
         if not cache_key or not variant:
             return None

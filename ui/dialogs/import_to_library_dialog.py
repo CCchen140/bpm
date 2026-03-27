@@ -2488,6 +2488,12 @@ class ImportToLibraryDialog(BasePopupDialog):
         self._import_req_id += 1
         req_id = int(self._import_req_id)
 
+        # 在导入前获取已有的物种组合，用于检测新物种
+        try:
+            self._existing_species_combinations = self._db.get_all_species_combinations(table_name="bird_results")
+        except Exception:
+            self._existing_species_combinations = set()
+
         meta_map = dict(getattr(self, "_preview_meta_map", {}) or {})
         user_location = ""
         try:
@@ -2498,6 +2504,8 @@ class ImportToLibraryDialog(BasePopupDialog):
         def run():
             moved = []
             db_rows = []
+            # 收集本次导入的物种组合
+            imported_species_combinations = set()
             try:
                 exif_worker = ExifHandleWorker.get_instance()
                 def _same_path(a: str, b: str) -> bool:
@@ -2773,22 +2781,31 @@ class ImportToLibraryDialog(BasePopupDialog):
                             "tags": tags,
                         }
                     )
+                    # 收集本次导入的物种组合
+                    if species_name:
+                        imported_species_combinations.add((order_name, family_name, genus_name, species_name))
 
                 if db_rows:
                     self._db.save_results_batch(db_rows, table_name="bird_results")
                 try:
-                    self._import_done.emit(req_id, True, int(len(db_rows)), "")
+                    # 检测新物种
+                    new_species_list = []
+                    existing = set(getattr(self, "_existing_species_combinations", set()) or set())
+                    for combo in imported_species_combinations:
+                        if combo not in existing:
+                            new_species_list.append(combo)
+                    self._import_done.emit(req_id, True, int(len(db_rows)), "", new_species_list)
                 except Exception:
-                    pass
+                    self._import_done.emit(req_id, True, int(len(db_rows)), "", [])
             except Exception as e:
                 try:
-                    self._import_done.emit(req_id, False, 0, str(e))
+                    self._import_done.emit(req_id, False, 0, str(e), [])
                 except Exception:
                     pass
 
         Thread(target=run, daemon=True).start()
 
-    def _on_import_done(self, req_id: int, ok: bool, count: int, err: str):
+    def _on_import_done(self, req_id: int, ok: bool, count: int, err: str, new_species_list: list = None):
         if int(req_id) != int(getattr(self, "_import_req_id", 0)):
             return
         task_id = self._import_task_id
@@ -2801,6 +2818,9 @@ class ImportToLibraryDialog(BasePopupDialog):
         self._set_busy(False)
         if ok:
             NotificationManager.instance().show_toast(f"导入完成：{int(count)} 张")
+            # 如果有新物种，弹框提醒
+            if new_species_list:
+                self._show_new_species_dialog(new_species_list)
             try:
                 self.import_succeeded.emit(str(self._last_import_target_folder or ""))
             except Exception:
@@ -2808,3 +2828,26 @@ class ImportToLibraryDialog(BasePopupDialog):
             self.accept()
         else:
             NotificationManager.instance().show_warning("错误", f"导入失败: {err}")
+
+    def _show_new_species_dialog(self, new_species_list: list):
+        """显示新物种弹框提醒"""
+        if not new_species_list:
+            return
+        
+        # 构建消息内容
+        msg_lines = ["恭喜加新！"]
+        for order_cls, family_cls, genus_cls, species_cls in new_species_list:
+            # 格式化显示：目科属种
+            parts = []
+            if order_cls:
+                parts.append(order_cls)
+            if family_cls:
+                parts.append(family_cls)
+            if genus_cls:
+                parts.append(genus_cls)
+            if species_cls:
+                parts.append(species_cls)
+            msg_lines.append(" / ".join(parts))
+        
+        msg = "\n".join(msg_lines)
+        NotificationManager.instance().show_info("加新提醒", msg)
