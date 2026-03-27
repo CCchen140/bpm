@@ -108,10 +108,10 @@ class BigImageCacheManager:
                 pass
         try:
             sm = SettingsManager()
-            v = int(sm.get("performance/big_image_cache_long_edge", 2560))
+            v = int(sm.get("performance/big_image_cache_long_edge", 5120))
         except Exception:
-            v = 2560
-        return max(800, min(8192, v))
+            v = 5120
+        return max(1600, min(8192, v))
 
     def clear(self):
         with self._lock:

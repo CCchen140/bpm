@@ -311,10 +311,11 @@ class MagnifierGraphicsView(QGraphicsView):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        
+
         if self.magnifier_enabled:
             painter = QPainter(self.viewport())
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             
             # 获取鼠标在 viewport 中的位置
             if hasattr(self, '_sync_pos') and self._sync_pos:
@@ -376,7 +377,7 @@ class MagnifierGraphicsView(QGraphicsView):
             painter.drawText(mouse_pos.x() - 20, mouse_pos.y() + self.lens_radius + 20, f"x{self.magnification_factor:.1f}")
 
 # 增加对 RAW 原图加载的支持
-def load_full_image_wrapper(file_path, max_edge: int = 2560):
+def load_full_image_wrapper(file_path, max_edge: int = 5120):
     """
     加载完整图片，如果是 RAW 则进行解析
     """
@@ -401,13 +402,13 @@ def load_full_image_wrapper(file_path, max_edge: int = 2560):
                     if p_key:
                         _ORIG_IMAGE_SIZE_BY_PATH[p_key] = (int(width), int(height))
                     try:
-                        max_edge = int(max_edge) if int(max_edge or 0) > 0 else 2560
+                        max_edge = int(max_edge) if int(max_edge or 0) > 0 else 5120
                         long_edge = max(int(width), int(height))
                         if long_edge > max_edge:
                             ratio = float(max_edge) / float(long_edge)
                             nw = max(1, int(round(float(width) * ratio)))
                             nh = max(1, int(round(float(height) * ratio)))
-                            img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+                            img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
                             height, width, channel = img.shape
                     except Exception:
                         pass
@@ -424,19 +425,19 @@ def load_full_image_wrapper(file_path, max_edge: int = 2560):
             if rgb is not None:
                 # 确保内存连续，避免 QImage 显示错乱
                 rgb = np.ascontiguousarray(rgb)
-                
+
                 # numpy array (H, W, 3) RGB -> QImage
                 height, width, channel = rgb.shape
                 if p_key:
                     _ORIG_IMAGE_SIZE_BY_PATH[p_key] = (int(width), int(height))
                 try:
-                    max_edge = int(max_edge) if int(max_edge or 0) > 0 else 2560
+                    max_edge = int(max_edge) if int(max_edge or 0) > 0 else 5120
                     long_edge = max(int(width), int(height))
                     if long_edge > max_edge:
                         ratio = float(max_edge) / float(long_edge)
                         nw = max(1, int(round(float(width) * ratio)))
                         nh = max(1, int(round(float(height) * ratio)))
-                        rgb = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+                        rgb = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
                         height, width, channel = rgb.shape
                 except Exception:
                     pass
@@ -460,7 +461,7 @@ def load_full_image_wrapper(file_path, max_edge: int = 2560):
                     ow = oh = 0
                 if p_key and ow > 0 and oh > 0:
                     _ORIG_IMAGE_SIZE_BY_PATH[p_key] = (int(ow), int(oh))
-                max_edge = int(max_edge) if int(max_edge or 0) > 0 else 2560
+                max_edge = int(max_edge) if int(max_edge or 0) > 0 else 5120
                 if ow > 0 and oh > 0:
                     long_edge = max(ow, oh)
                     if long_edge > max_edge:
@@ -488,13 +489,13 @@ def load_full_image_wrapper(file_path, max_edge: int = 2560):
             if p_key:
                 _ORIG_IMAGE_SIZE_BY_PATH[p_key] = (int(width), int(height))
             try:
-                max_edge = int(max_edge) if int(max_edge or 0) > 0 else 2560
+                max_edge = int(max_edge) if int(max_edge or 0) > 0 else 5120
                 long_edge = max(int(width), int(height))
                 if long_edge > max_edge:
                     ratio = float(max_edge) / float(long_edge)
                     nw = max(1, int(round(float(width) * ratio)))
                     nh = max(1, int(round(float(height) * ratio)))
-                    img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+                    img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
                     height, width, channel = img.shape
             except Exception:
                 pass
@@ -511,10 +512,10 @@ def load_full_image_wrapper(file_path, max_edge: int = 2560):
 class ImageLoaderThread(QThread):
     image_loaded = pyqtSignal(QImage, str) # image, path
 
-    def __init__(self, path, max_edge: int = 2560):
+    def __init__(self, path, max_edge: int = 5120):
         super().__init__()
         self.path = path
-        self.max_edge = int(max_edge) if int(max_edge or 0) > 0 else 2560
+        self.max_edge = int(max_edge) if int(max_edge or 0) > 0 else 5120
 
     def run(self):
         try:
@@ -1080,14 +1081,14 @@ class ImageDetailPanel(QWidget):
         self._big_cache_context = str(big_cache_context or "library")
         self.initial_magnifier_lens_radius = initial_magnifier_lens_radius
         self.big_image_cache = BigImageCacheManager.instance(self._big_cache_context)
-        self._detail_decode_max_edge = 2560
+        self._detail_decode_max_edge = 5120
         if self._big_cache_context.strip().lower() == "import":
             try:
                 self.big_image_cache.set_max_items_override(10)
-                self.big_image_cache.set_max_long_edge_override(1600)
+                self.big_image_cache.set_max_long_edge_override(2560)
             except Exception:
                 pass
-            self._detail_decode_max_edge = 1600
+            self._detail_decode_max_edge = 2560
         self._pending_load_index = None
         self._neighbors_preload_timer = QTimer(self)
         self._neighbors_preload_timer.setSingleShot(True)
@@ -1430,7 +1431,7 @@ class ImageDetailPanel(QWidget):
                 return
         except Exception:
             pass
-        self.left_loader_thread = _track_loader_thread(ImageLoaderThread(path, max_edge=int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)))
+        self.left_loader_thread = _track_loader_thread(ImageLoaderThread(path, max_edge=int(getattr(self, "_detail_decode_max_edge", 5120) or 5120)))
         self.left_loader_thread.image_loaded.connect(self.on_left_image_loaded)
         try:
             self.left_loader_thread.finished.connect(self._on_left_loader_finished)
@@ -2604,6 +2605,7 @@ class ImageDetailPanel(QWidget):
             pass
         
         self.pixmap_item = QGraphicsPixmapItem()
+        self.pixmap_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.scene.addItem(self.pixmap_item)
         
         container_layout.addWidget(self.view)
@@ -2797,6 +2799,7 @@ class ImageDetailPanel(QWidget):
         self.view_left = MagnifierGraphicsView(self.scene_left)
         self._setup_compare_view(self.view_left)
         self.pixmap_item_left = QGraphicsPixmapItem()
+        self.pixmap_item_left.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.scene_left.addItem(self.pixmap_item_left)
         self.view_left.manual_rect_saved.connect(lambda rect: self.save_manual_subject_rect(rect, side="left"))
         self.view_left.ctrl_right_detect_requested.connect(lambda: self.detect_subject(force=False, side="left"))
@@ -2832,6 +2835,7 @@ class ImageDetailPanel(QWidget):
         except Exception:
             pass
         self.pixmap_item_right = QGraphicsPixmapItem()
+        self.pixmap_item_right.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.scene_right.addItem(self.pixmap_item_right)
         
         if self._show_action_overlay:
@@ -4033,13 +4037,13 @@ class ImageDetailPanel(QWidget):
                         pass
             effective_zoom = max(1.0, zoom_scale, max_magnification)
             target_edge = int(max_viewport_size * 2 * effective_zoom)
-            min_edge = 1600
+            min_edge = 2560
             max_edge = 8192
             new_max_edge = max(min_edge, min(target_edge, max_edge))
-            current_edge = int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)
+            current_edge = int(getattr(self, "_detail_decode_max_edge", 5120) or 5120)
             if current_edge <= 0:
-                current_edge = 2560
-            if abs(new_max_edge - current_edge) / current_edge > 0.2:
+                current_edge = 5120
+            if abs(new_max_edge - current_edge) / current_edge > 0.15:
                 self._detail_decode_max_edge = new_max_edge
                 try:
                     if hasattr(self, "big_image_cache") and self.big_image_cache:
@@ -5113,9 +5117,9 @@ class ImageDetailPanel(QWidget):
             cached = None
         if cached is not None and not cached.isNull():
             try:
-                need_edge = int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)
+                need_edge = int(getattr(self, "_detail_decode_max_edge", 5120) or 5120)
             except Exception:
-                need_edge = 2560
+                need_edge = 5120
             try:
                 cw = int(cached.width())
                 ch = int(cached.height())
@@ -5147,7 +5151,7 @@ class ImageDetailPanel(QWidget):
             return
             
         # 启动新线程加载
-        self.loader_thread = _track_loader_thread(ImageLoaderThread(path, max_edge=int(getattr(self, "_detail_decode_max_edge", 2560) or 2560)))
+        self.loader_thread = _track_loader_thread(ImageLoaderThread(path, max_edge=int(getattr(self, "_detail_decode_max_edge", 5120) or 5120)))
         self.loader_thread.image_loaded.connect(self.on_image_loaded)
         try:
             self.loader_thread.finished.connect(self._on_loader_finished)

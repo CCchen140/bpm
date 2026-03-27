@@ -24,7 +24,7 @@ from cache.big_image_cache_manager import BigImageCacheManager
 import json
 
 
-def _decode_image_to_qimage_off_main_thread(image_path: str, max_long_edge: int = 1600) -> "QImage | None":
+def _decode_image_to_qimage_off_main_thread(image_path: str, max_long_edge: int = 3840) -> "QImage | None":
     """在非主线程中解码图片为 QImage，供 PreviewLoadWorker 调用。仅做 I/O 与解码，不触碰任何 Qt 控件。"""
     if not image_path or not os.path.exists(image_path):
         return None
@@ -44,7 +44,7 @@ def _decode_image_to_qimage_off_main_thread(image_path: str, max_long_edge: int 
                 size = reader.size()
             except Exception:
                 size = None
-            max_edge = max(800, min(2048, max(1600, max_long_edge)))
+            max_edge = max(800, min(4096, max(2560, max_long_edge)))
             if size is not None and size.isValid():
                 try:
                     w, h = int(size.width()), int(size.height())
@@ -94,10 +94,10 @@ class PreviewLoadWorker(QRunnable):
         self.generation = generation
         self._cache = cache
         self._signals = signals
-        self._max_long_edge = 1600
+        self._max_long_edge = 3840
 
-    def set_max_long_edge(self, value: int):
-        self._max_long_edge = max(800, min(2048, value))
+    def set_max_long_edge(self, value):
+        self._max_long_edge = max(800, min(4096, value))
 
     def run(self):
         import os
@@ -706,7 +706,7 @@ class PreviewPanel(QWidget):
             self._overlay_bbox = None
             self._overlay_focus_point = None
             self._overlay_orig_size = None
-            max_edge = 1600
+            max_edge = 3840
             try:
                 panel_size = self.size()
                 margins = self.main_layout.contentsMargins()
@@ -714,7 +714,7 @@ class PreviewPanel(QWidget):
                 top_height = self.top_widget.height()
                 available_width = panel_size.width() - margins.left() - margins.right() - 4
                 available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
-                max_edge = int(max(800, min(2048, max(available_width, available_height))))
+                max_edge = int(max(1600, min(4096, max(available_width, available_height) * 2)))
             except Exception:
                 pass
             worker = PreviewLoadWorker(image_path, self._preview_load_gen, self._big_cache, self._preview_load_signals)
