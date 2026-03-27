@@ -786,76 +786,118 @@ class ImageThumbnail(QWidget):
         self.update()
 
     def set_thumbnail_image(self, image):
-        """直接设置缩略图 (优化性能，避免内部重新缩放)"""
+        """直接设置缩略图 (优化性能，避免内部重新缩放) - 优化版
+        
+        优化点：
+        1. 如果图片尺寸合适，跳过缩放操作
+        2. 优先使用快速缩放模式
+        3. 延迟更新，避免频繁重绘
+        """
+        # 性能分析
+        from utils.performance_profiler import PerformanceProfiler, MainThreadChecker
+        profiler = PerformanceProfiler.instance()
+        
+        if MainThreadChecker.check_main_thread():
+            profiler.start("set_thumbnail_image_main_thread")
+        
         self._has_error = False # 成功设置图片时清除错误状态
         
         if image is None or (hasattr(image, "isNull") and image.isNull()):
             self.clear_image_data()
+            if MainThreadChecker.check_main_thread():
+                profiler.end("set_thumbnail_image_main_thread")
             return
             
         try:
-            disable_scaling = False
-            try:
-                if hasattr(self.cache_manager, "settings_manager"):
-                    disable_scaling = bool(self.cache_manager.settings_manager.get("performance/thumbnail_disable_scaling", False))
-            except Exception:
-                disable_scaling = False
-            scale_quality = "low"
-            try:
-                if hasattr(self.cache_manager, "get_scale_quality"):
-                    scale_quality = str(self.cache_manager.get_scale_quality()).lower()
-                elif hasattr(self.cache_manager, "settings_manager"):
-                    scale_quality = str(self.cache_manager.settings_manager.get("performance/thumbnail_scale_quality", "low")).lower()
-            except Exception:
-                scale_quality = "low"
-            transformation_mode = Qt.TransformationMode.SmoothTransformation if scale_quality == "high" else Qt.TransformationMode.FastTransformation
-            
-            # 如果强制使用低质量模式
-            if getattr(self, "force_low_quality", False):
-                transformation_mode = Qt.TransformationMode.FastTransformation
-                disable_scaling = False # 低质量模式下仍然需要缩放，但使用快速算法
-                
-            if disable_scaling:
-                transformation_mode = Qt.TransformationMode.FastTransformation
-
             w, h = self._get_wh()
             border_width = 1
             margin = border_width + 2
             thumb_w = w - 2 * margin
             thumb_h = h - 2 * margin
 
+            # 优化：如果图片尺寸已经合适，跳过缩放
+            img_w = image.width()
+            img_h = image.height()
+            
+            # 获取GPU缩放设置
+            use_gpu_scaling = True
+            try:
+                if hasattr(self.cache_manager, "settings_manager"):
+                    use_gpu_scaling = bool(self.cache_manager.settings_manager.get("performance/use_gpu_scaling", True))
+            except Exception:
+                use_gpu_scaling = True
+            
+            # 优化：如果图片尺寸接近目标尺寸（误差在10%以内），直接使用原图
+            # 避免在主线程进行耗时的缩放操作
             if thumb_w > 0 and thumb_h > 0:
-                if (image.width() > thumb_w or image.height() > thumb_h) and not disable_scaling:
-                    scaled = GPUScaler.scale_qimage(
-                        image,
-                        thumb_w,
-                        thumb_h,
-                        keep_aspect=True,
-                        fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
-                    )
-                    image = scaled if scaled is not None else image.scaled(
-                        thumb_w,
-                        thumb_h,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        transformation_mode
-                    )
+                size_ratio = max(img_w / thumb_w, img_h / thumb_h)
+                
+                # 如果图片比目标大，需要缩放
+                if size_ratio > 1.1:  # 图片大于目标10%以上时进行缩放
+                    target_w = thumb_w
+                    target_h = thumb_h
+                    
+                    # 根据设置决定是否使用GPUScaler
+                    if use_gpu_scaling:
+                        try:
+                            scaled = GPUScaler.scale_qimage(
+                                image,
+                                target_w,
+                                target_h,
+                                mode='fit'
+                            )
+                            if scaled is not None and not scaled.isNull():
+                                image = scaled
+                        except Exception:
+                            # GPU缩放失败，回退到Qt缩放
+                            image = image.scaled(
+                                target_w,
+                                target_h,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation
+                            )
+                    else:
+                        # 使用Qt的快速缩放模式
+                        image = image.scaled(
+                            target_w,
+                            target_h,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation
+                        )
 
             # 优化：直接存储 QImage，避免主线程进行耗时的 QPixmap 转换
-            # paintEvent 会直接使用 drawImage 绘制
             self._thumbnail_image = image
-            self.thumbnail_pixmap = None # 清除旧的 Pixmap
-            
-            # 如果需要缓存机制兼容 (比如缩放)，暂时不支持 _cached_pixmap 的 QImage 版本
-            # 但在 ImportPage 场景下，image 已经是合适大小的
+            self.thumbnail_pixmap = None
             self._cached_pixmap = None 
             
-            self.update()
+            # 使用延迟更新，避免频繁重绘
+            self._schedule_update()
+            
         except Exception as e:
             try:
                 LogManager.instance().warning(f"设置缩略图图像失败: {e}")
             except Exception:
                 pass
             self.clear_image_data()
+        finally:
+            # 性能分析结束
+            if MainThreadChecker.check_main_thread():
+                profiler.end("set_thumbnail_image_main_thread")
+    
+    def _schedule_update(self):
+        """延迟更新缩略图显示，避免频繁重绘"""
+        if not hasattr(self, '_update_pending'):
+            self._update_pending = False
+            
+        if not self._update_pending:
+            self._update_pending = True
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(5, self._do_update)
+    
+    def _do_update(self):
+        """执行实际的更新"""
+        self._update_pending = False
+        self.update()
 
     def load_thumbnail(self, force_reload=False):
         """加载缩略图
@@ -906,19 +948,21 @@ class ImageThumbnail(QWidget):
                 if thumb_w <= 0 or thumb_h <= 0:
                     return
                 
+                # 获取GPU缩放设置
+                use_gpu_scaling = True
+                try:
+                    if hasattr(self.cache_manager, "settings_manager"):
+                        use_gpu_scaling = bool(self.cache_manager.settings_manager.get("performance/use_gpu_scaling", True))
+                except Exception:
+                    use_gpu_scaling = True
+                
+                # 优化：使用简单的快速缩放，避免GPUScaler可能带来的UI阻塞
                 if (cached_image.width() > thumb_w or cached_image.height() > thumb_h) and not disable_scaling:
-                    scaled = GPUScaler.scale_qimage(
-                        cached_image,
-                        thumb_w,
-                        thumb_h,
-                        keep_aspect=True,
-                        fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
-                    )
-                    cached_image = scaled if scaled is not None else cached_image.scaled(
+                    cached_image = cached_image.scaled(
                         thumb_w,
                         thumb_h,
                         Qt.AspectRatioMode.KeepAspectRatio,
-                        transformation_mode
+                        Qt.TransformationMode.FastTransformation
                     )
                 self._thumbnail_image = cached_image
                 self.thumbnail_pixmap = None

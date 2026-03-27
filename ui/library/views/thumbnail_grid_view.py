@@ -180,105 +180,115 @@ class ThumbnailGridView(QWidget):
                 t.setCursor(cursor)
 
     def eventFilter(self, source, event):
-        if isinstance(source, ImageThumbnail):
-            if self.spray_mode_active:
-                # 右键不再强制退出喷漆模式，而是允许透传以唤起菜单
-                # if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
-                #     self.sprayCancelRequested.emit()
-                #     return True
-                # if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton:
-                #     return True
-                # if event.type() == QEvent.Type.ContextMenu:
-                #     self.sprayCancelRequested.emit()
-                #     return True
-                pass
+        """事件过滤器，处理缩略图的鼠标和键盘事件"""
+        try:
+            if isinstance(source, ImageThumbnail):
+                if self.spray_mode_active:
+                    # 右键不再强制退出喷漆模式，而是允许透传以唤起菜单
+                    pass
 
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._thumb_box_select_active = False
-                self._thumb_box_start_pos = source.mapTo(self.thumbnails_container, event.position().toPoint())
-            elif event.type() == QEvent.Type.MouseMove:
-                if (event.buttons() & Qt.MouseButton.LeftButton) and self._thumb_box_start_pos is not None:
-                    from PyQt6.QtWidgets import QApplication
-                    current_pos = source.mapTo(self.thumbnails_container, event.position().toPoint())
-                    if not self._thumb_box_select_active:
-                        if (current_pos - self._thumb_box_start_pos).manhattanLength() >= QApplication.startDragDistance():
-                            self._thumb_box_select_active = True
-                            self.scroll_area.start_box_select(self._thumb_box_start_pos)
+                if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    self._thumb_box_select_active = False
+                    try:
+                        self._thumb_box_start_pos = source.mapTo(self.thumbnails_container, event.position().toPoint())
+                    except Exception:
+                        self._thumb_box_start_pos = None
+                elif event.type() == QEvent.Type.MouseMove:
+                    if (event.buttons() & Qt.MouseButton.LeftButton) and self._thumb_box_start_pos is not None:
+                        try:
+                            from PyQt6.QtWidgets import QApplication
+                            current_pos = source.mapTo(self.thumbnails_container, event.position().toPoint())
+                            if not self._thumb_box_select_active:
+                                if (current_pos - self._thumb_box_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                                    self._thumb_box_select_active = True
+                                    self.scroll_area.start_box_select(self._thumb_box_start_pos)
+                            if self._thumb_box_select_active:
+                                self.scroll_area.update_box_select(current_pos)
+                        except Exception:
+                            pass
+                    if self.spray_mode_active:
+                        try:
+                            viewport_pos = self.scroll_area.viewport().mapFromGlobal(event.globalPosition().toPoint())
+                        except Exception:
+                            try:
+                                viewport_pos = self.scroll_area.viewport().mapFromGlobal(QCursor.pos())
+                            except Exception:
+                                viewport_pos = None
+                        if viewport_pos is not None:
+                            self._update_spray_range_overlay(viewport_pos)
+                elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                     if self._thumb_box_select_active:
-                        self.scroll_area.update_box_select(current_pos)
+                        try:
+                            self.scroll_area.finish_box_select()
+                        except Exception:
+                            pass
+                    self._thumb_box_select_active = False
+                    self._thumb_box_start_pos = None
+
+            if source == self.scroll_area.viewport() and event.type() == QEvent.Type.Resize:
+                # 延迟调用 arrange_thumbnails，避免频繁重绘
+                # 优化：添加防抖动或限流机制
+                # 但这里为了简单，先判断宽度是否发生实质性变化（影响列数）才重排
+                
+                # 假设我们已经有了 _last_viewport_width
+                new_width = self.scroll_area.viewport().width()
+                old_width = getattr(self, "_last_viewport_width", -1)
+                
+                if new_width != old_width:
+                    self._last_viewport_width = new_width
+                    
+                    # 计算新旧列数是否一致，如果不一致才需要重排
+                    thumb_size = self.current_thumb_size
+                    thumb_w = thumb_size
+                    if isinstance(thumb_size, (tuple, list)):
+                        thumb_w = int(thumb_size[0])
+                    
+                    # 预估列数
+                    cols = max(1, new_width // thumb_w)
+                    
+                    # 如果列数变了，或者之前从未布局过
+                    if cols != getattr(self, "_last_cols", -1):
+                        try:
+                            self.arrange_thumbnails()
+                        except Exception:
+                            pass
+                    else:
+                        # 列数没变，但可能宽度微调导致对齐变化（如果使用了居中对齐逻辑，但当前是左对齐）
+                        # 当前布局是左对齐且自适应，列数不变时，QGridLayout 会自动处理拉伸
+                        # 除非我们需要手动调整间距
+                        pass
+                    
+            if source == self.scroll_area.viewport() and event.type() == QEvent.Type.MouseMove:
                 if self.spray_mode_active:
                     try:
-                        viewport_pos = self.scroll_area.viewport().mapFromGlobal(event.globalPosition().toPoint())
+                        self._update_spray_range_overlay(event.position().toPoint())
                     except Exception:
-                        viewport_pos = self.scroll_area.viewport().mapFromGlobal(QCursor.pos())
-                    self._update_spray_range_overlay(viewport_pos)
-            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                if self._thumb_box_select_active:
-                    self.scroll_area.finish_box_select()
-                self._thumb_box_select_active = False
-                self._thumb_box_start_pos = None
-
-        if source == self.scroll_area.viewport() and event.type() == QEvent.Type.Resize:
-            # 延迟调用 arrange_thumbnails，避免频繁重绘
-            # 优化：添加防抖动或限流机制
-            # 但这里为了简单，先判断宽度是否发生实质性变化（影响列数）才重排
-            
-            # 假设我们已经有了 _last_viewport_width
-            new_width = self.scroll_area.viewport().width()
-            old_width = getattr(self, "_last_viewport_width", -1)
-            
-            if new_width != old_width:
-                self._last_viewport_width = new_width
-                
-                # 计算新旧列数是否一致，如果不一致才需要重排
-                thumb_size = self.current_thumb_size
-                thumb_w = thumb_size
-                if isinstance(thumb_size, (tuple, list)):
-                    thumb_w = int(thumb_size[0])
-                
-                # 预估列数
-                cols = max(1, new_width // thumb_w)
-                
-                # 如果列数变了，或者之前从未布局过
-                if cols != getattr(self, "_last_cols", -1):
-                    self.arrange_thumbnails()
-                else:
-                    # 列数没变，但可能宽度微调导致对齐变化（如果使用了居中对齐逻辑，但当前是左对齐）
-                    # 当前布局是左对齐且自适应，列数不变时，QGridLayout 会自动处理拉伸
-                    # 除非我们需要手动调整间距
+                        pass
+            if source == self.scroll_area.viewport() and event.type() == QEvent.Type.Wheel:
+                if self.spray_mode_active:
+                    try:
+                        sm = ShortcutManager.instance()
+                        is_zoom_in = sm.check_library_zoom_in(event)
+                        is_zoom_out = sm.check_library_zoom_out(event)
+                        if is_zoom_in or is_zoom_out:
+                            steps = 1 if is_zoom_in else -1
+                            self._set_spray_range_cells(self.spray_range_cells + steps)
+                            if self.settings_manager:
+                                self.settings_manager.set("library/spray_range_size", int(self.spray_range_cells))
+                            self._update_spray_range_overlay(event.position().toPoint())
+                            event.accept()
+                            return True
+                    except Exception:
+                        pass
+            if (source == self.scroll_area.viewport() or source == self.scroll_area) and event.type() == QEvent.Type.KeyPress:
+                try:
+                    if self._handle_thumbnail_nav_key(event):
+                        event.accept()
+                        return True
+                except Exception:
                     pass
-                    
-        if source == self.scroll_area.viewport() and event.type() == QEvent.Type.MouseMove:
-            if self.spray_mode_active:
-                self._update_spray_range_overlay(event.position().toPoint())
-        # if source == self.scroll_area.viewport() and event.type() == QEvent.Type.MouseButtonPress:
-        #     if self.spray_mode_active and event.button() == Qt.MouseButton.RightButton:
-        #         self.sprayCancelRequested.emit()
-        #         return True
-        # if source == self.scroll_area.viewport() and event.type() == QEvent.Type.MouseButtonRelease:
-        #     if self.spray_mode_active and event.button() == Qt.MouseButton.RightButton:
-        #         return True
-        # if source == self.scroll_area.viewport() and event.type() == QEvent.Type.ContextMenu:
-        #     if self.spray_mode_active:
-        #         self.sprayCancelRequested.emit()
-        #         return True
-        if source == self.scroll_area.viewport() and event.type() == QEvent.Type.Wheel:
-            if self.spray_mode_active:
-                sm = ShortcutManager.instance()
-                is_zoom_in = sm.check_library_zoom_in(event)
-                is_zoom_out = sm.check_library_zoom_out(event)
-                if is_zoom_in or is_zoom_out:
-                    steps = 1 if is_zoom_in else -1
-                    self._set_spray_range_cells(self.spray_range_cells + steps)
-                    if self.settings_manager:
-                        self.settings_manager.set("library/spray_range_size", int(self.spray_range_cells))
-                    self._update_spray_range_overlay(event.position().toPoint())
-                    event.accept()
-                    return True
-        if (source == self.scroll_area.viewport() or source == self.scroll_area) and event.type() == QEvent.Type.KeyPress:
-            if self._handle_thumbnail_nav_key(event):
-                event.accept()
-                return True
+        except Exception:
+            pass
         return super().eventFilter(source, event)
 
     def _handle_thumbnail_nav_key(self, event) -> bool:

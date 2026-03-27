@@ -2505,6 +2505,13 @@ class MainWindow(QMainWindow):
             self._reposition_status_detail_popups()
         except Exception:
             pass
+        # 通知当前页面窗口大小发生变化，触发缩略图重新加载
+        try:
+            current_page = self.pages.currentWidget()
+            if current_page and hasattr(current_page, 'on_window_resized'):
+                current_page.on_window_resized()
+        except Exception:
+            pass
 
     def moveEvent(self, event):
         super().moveEvent(event)

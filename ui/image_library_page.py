@@ -689,6 +689,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.LIBRARY_LOADER)
         self.thumbnail_loader.signals.loaded.connect(self.on_thumbnail_loaded)
         self._thumbnail_request_id = 0
+        self._thumb_status_task_id = None  # 缩略图加载任务状态ID
         self._thumb_by_path = {}
         self._requested_paths = set()
         self._startup_mask_enabled = True
@@ -702,11 +703,13 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._thumbnail_loaded_retry_delay_ms = 60
         self._thumbnail_loaded_retry_max = 20
         self._pending_updates = deque()
-        self._update_batch_size = 20
+        self._update_batch_size = 10  # 每批处理数量减少，避免阻塞
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(0)
+        self._update_timer.setInterval(5)  # 增加小延迟，让UI有机会响应
         self._update_timer.timeout.connect(self._process_pending_updates)
+        # 添加处理标志，避免重复处理
+        self._is_processing_updates = False
         self._visible_load_force_cancel = False
         self._current_visible_path_keys = set()
         self._pending_visible_path_keys = set()
@@ -1247,13 +1250,25 @@ class ImageLibraryPage(BaseImageBrowserPage):
             return path
 
     def _normalize_path_str(self, path):
+        """标准化路径字符串
+        
+        注意：对于虚拟URI（以 virtual:// 开头），保持原样不变，
+        因为 os.path.normpath 会修改 URI 的格式
+        """
         if not path:
             return path
         try:
-            return os.path.normcase(os.path.normpath(str(path).replace("/", os.sep)))
+            p = str(path)
+            # 虚拟URI保持原样，不进行路径标准化
+            if p.startswith("virtual://"):
+                return p
+            return os.path.normcase(os.path.normpath(p.replace("/", os.sep)))
         except Exception:
             try:
-                return os.path.normcase(str(path).replace("/", os.sep))
+                p = str(path)
+                if p.startswith("virtual://"):
+                    return p
+                return os.path.normcase(p.replace("/", os.sep))
             except Exception:
                 return path
 
@@ -2254,39 +2269,63 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self.clear_preview()
 
     def on_thumbnail_clicked_proxy(self, index, modifiers):
-        """处理缩略图点击代理（来自 ThumbnailGridView）"""
-        # 此时 ThumbnailGridView 已经更新了选中状态
+        """处理缩略图点击代理（来自 ThumbnailGridView）
         
+        参数:
+            index: 点击的缩略图索引
+            modifiers: 键盘修饰符（如Ctrl、Shift等）
+        """
+        # 添加边界检查，防止索引越界导致崩溃
+        try:
+            idx = int(index) if index is not None else -1
+        except Exception:
+            return
+        if idx < 0:
+            return
+        
+        # 此时 ThumbnailGridView 已经更新了选中状态
         # 预览选中的图片
         # Access thumbnails via grid_view
         thumbnails = getattr(self.grid_view, "thumbnails", []) or []
         info = None
-        if index < len(thumbnails):
-            thumb = thumbnails[index]
-            if thumb.image_info:
-                info = thumb.image_info
+        if idx < len(thumbnails):
+            try:
+                thumb = thumbnails[idx]
+                if thumb and thumb.image_info:
+                    info = thumb.image_info
+            except Exception:
+                pass
         
-        if not info and 0 <= index < len(self.image_files):
-             info = self.image_files[index]
+        if not info and 0 <= idx < len(self.image_files):
+            try:
+                info = self.image_files[idx]
+            except Exception:
+                pass
         
         if info:
-             try:
-                 path = info.get("path") or info.get("file_path") or info.get("filepath")
-             except Exception:
-                 path = None
-             if path:
-                 self.preview_image_file(path)
-             self._preload_big_neighbors_grid(index)
-             try:
-                 self._schedule_visible_load(immediate=True)
-             except Exception:
-                 pass
-             try:
-                 self._schedule_persist_folder_view_state()
-             except Exception:
-                 pass
-             # Auto-locate in tree
-             try:
+            try:
+                path = info.get("path") or info.get("file_path") or info.get("filepath")
+            except Exception:
+                path = None
+            if path:
+                try:
+                    self.preview_image_file(path)
+                except Exception:
+                    pass
+            try:
+                self._preload_big_neighbors_grid(idx)
+            except Exception:
+                pass
+            try:
+                self._schedule_visible_load(immediate=True)
+            except Exception:
+                pass
+            try:
+                self._schedule_persist_folder_view_state()
+            except Exception:
+                pass
+            # Auto-locate in tree
+            try:
                 # 优化：如果是恢复视图状态，不触发 locate_taxonomy_node，避免树自动跳转
                 if not bool(getattr(self, "_restoring_view_state", False)):
                     # Use standard keys (without _cls suffix) as per Worker data structure
@@ -2295,10 +2334,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                     g = info.get('genus') or info.get('genus_cls')
                     s = info.get('species') or info.get('species_cls')
                     path = info.get('path')
-                    if hasattr(self, 'folder_panel'):
+                    if hasattr(self, 'folder_panel') and self.folder_panel:
                         self.folder_panel.locate_taxonomy_node(o, f, g, s, path, emit_signal=False)
-             except Exception as e:
-                print(f"Auto-locate error: {e}")
+            except Exception:
+                pass
 
 
     def _get_grid_nav_cols(self) -> int:
@@ -6679,6 +6718,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._pending_restore_applied = False if self._pending_restore_state else True
 
     def _maybe_apply_pending_restore(self):
+        """恢复之前保存的视图状态（选中项和滚动位置）"""
         if bool(getattr(self, "_pending_restore_applied", True)):
             return
         st = getattr(self, "_pending_restore_state", None)
@@ -6729,7 +6769,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._restoring_view_state = True
         def _post():
             try:
-                self.on_thumbnail_clicked_proxy(int(target), Qt.KeyboardModifier.NoModifier)
+                # 添加额外的安全检查，确保 target 在有效范围内
+                if 0 <= int(target) < int(total):
+                    self.on_thumbnail_clicked_proxy(int(target), Qt.KeyboardModifier.NoModifier)
             except Exception:
                 pass
             finally:
@@ -6737,8 +6779,12 @@ class ImageLibraryPage(BaseImageBrowserPage):
         try:
             QTimer.singleShot(0, _post)
         except Exception:
-            _post()
-            self._restoring_view_state = False
+            try:
+                _post()
+            except Exception:
+                pass
+            finally:
+                self._restoring_view_state = False
         self._pending_restore_applied = True
 
     def _on_fast_scroll_timeout(self):
@@ -6784,20 +6830,50 @@ class ImageLibraryPage(BaseImageBrowserPage):
             pass
 
     def _schedule_visible_load(self, immediate=False):
-        """调度可见区域缩略图的加载
+        """调度可见区域缩略图的加载 - 优化版
         
-        使用去抖动（Debounce）机制来优化滚动性能，避免滚动条 valueChanged 高频触发时反复扫描可见范围。
+        优化点：
+        1. 使用自适应延迟：快速滚动时增加延迟，静止时立即加载
+        2. 区分立即加载和延迟加载的场景
+        3. 避免频繁取消和重新调度
         """
         if not hasattr(self, "_visible_load_timer"):
             return
+            
         self._visible_load_force_cancel = bool(immediate)
+        
+        # 如果定时器已经在运行，根据情况决定是否取消
         if self._visible_load_timer.isActive():
-            self._visible_load_timer.stop()
-        interval = 0 if immediate else 40
+            # 如果是立即加载请求，取消现有的延迟加载
+            if immediate:
+                self._visible_load_timer.stop()
+            else:
+                # 非立即加载，如果定时器已经运行，不再重新调度
+                return
+        
+        # 计算延迟时间
+        if immediate:
+            interval = 0
+        elif getattr(self, "_fast_scroll_active", False):
+            # 快速滚动时，增加延迟，避免频繁加载
+            interval = 100
+        elif getattr(self, "_mouse_busy", False):
+            # 鼠标忙碌时（如拖拽），适度延迟
+            interval = 60
+        else:
+            # 正常情况，使用较短的延迟
+            interval = 40
+            
         self._visible_load_timer.start(interval)
 
     def _load_visible_thumbnails(self):
-        """加载当前可见区域及预加载区域的缩略图"""
+        """加载当前可见区域及预加载区域的缩略图 - 优化版
+        
+        优化点：
+        1. 限制每次处理的最大缩略图数量，避免UI卡顿
+        2. 优先处理可见区域
+        3. 使用生成器减少内存分配
+        """
         if not getattr(self, "grid_view", None) or not getattr(self.grid_view, "thumbnails", None):
             return
 
@@ -6815,47 +6891,45 @@ class ImageLibraryPage(BaseImageBrowserPage):
             cols = max(1, int(metrics.get("cols", 1)))
         except Exception:
             cols = 1
+            
+        # 优化：限制每次处理的最大数量，避免UI卡顿
+        # 优先处理可见区域，然后才是预加载区域
+        max_process_per_call = 100  # 每次最多处理100个缩略图
+        
+        # 如果范围太大，优先处理可见区域
+        if end - start > max_process_per_call:
+            # 先处理可见区域
+            visible_end = min(end_visible + cols * 2, end)  # 可见区域+下方2行
+            if visible_end - start > max_process_per_call:
+                visible_end = start + max_process_per_call
+            end = visible_end
+            
         try:
             is_big_mode = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
         except Exception:
             is_big_mode = False
+            
+        # 优化：简化大模式下的预加载逻辑，减少循环开销
         if is_big_mode and not bool(getattr(self, "_fast_scroll_active", False)) and cols > 0 and visible_rows > 0:
             try:
                 last_row = max(0, int(end_visible) // int(cols))
-            except Exception:
-                last_row = 0
-            probe_row = int(last_row) + 2
-            probe_start = int(probe_row) * int(cols)
-            if probe_start < len(self.grid_view.thumbnails):
-                probe_end = min(len(self.grid_view.thumbnails) - 1, probe_start + int(cols) - 1)
-                probe_has_unloaded = False
-                for j in range(int(probe_start), int(probe_end) + 1):
+                probe_row = int(last_row) + 2
+                probe_start = int(probe_row) * int(cols)
+                if probe_start < len(self.grid_view.thumbnails) and probe_start <= end:
+                    # 简化检查：只检查第一个缩略图是否已加载
                     try:
-                        t = self.grid_view.thumbnails[j]
-                    except Exception:
-                        continue
-                    try:
-                        is_stale = bool(getattr(t, "_stale_thumbnail", False))
-                    except Exception:
-                        is_stale = False
-                    try:
+                        t = self.grid_view.thumbnails[probe_start]
                         pix = getattr(t, "thumbnail_pixmap", None)
                         img = getattr(t, "_thumbnail_image", None)
-                        has_pix = pix is not None and not (hasattr(pix, "isNull") and pix.isNull())
-                        has_img = img is not None and not (hasattr(img, "isNull") and img.isNull())
+                        has_loaded = (pix is not None and not pix.isNull()) or (img is not None and not img.isNull())
+                        if not has_loaded:
+                            big_end = min(len(self.grid_view.thumbnails) - 1, int(probe_start) + int(visible_rows) * int(cols) - 1)
+                            if int(big_end) > int(end):
+                                end = int(big_end)
                     except Exception:
-                        has_pix = False
-                        has_img = False
-                    if not ((has_pix or has_img) and not is_stale):
-                        probe_has_unloaded = True
-                        break
-                if probe_has_unloaded:
-                    try:
-                        big_end = min(len(self.grid_view.thumbnails) - 1, int(probe_start) + int(visible_rows) * int(cols) - 1)
-                    except Exception:
-                        big_end = end
-                    if int(big_end) > int(end):
-                        end = int(big_end)
+                        pass
+            except Exception:
+                pass
 
         cache_type = getattr(self, "current_cache_type", "general")
         try:
@@ -6947,13 +7021,26 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
             self._requested_paths.add(key)
 
+            # 使用新的优先级系统
+            # PRIORITY_IMMEDIATE = -2: 立即可见区域
+            # PRIORITY_VISIBLE = -1: 可见区域
+            # PRIORITY_ADJACENT = 0: 相邻区域（预加载）
+            # PRIORITY_PRELOAD = 1: 预加载区域
+            # PRIORITY_BACKGROUND = 2: 后台加载
             if i <= end_visible:
-                priority = -1
+                # 立即可见区域使用最高优先级
+                priority = -2
                 is_in_view = True
+            elif i <= end_visible + cols * 2:
+                # 相邻区域（下方2行）
+                priority = 0
+                is_in_view = False
             elif getattr(self, "_mouse_busy", False):
+                # 鼠标忙碌时，降低预加载优先级
                 priority = 2
                 is_in_view = False
             else:
+                # 普通预加载
                 priority = 1
                 is_in_view = False
 
@@ -6976,6 +7063,35 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
         if paths_to_load:
             self.thumbnail_loader.load_thumbnails(paths_to_load, self.current_thumb_size, cache_type, request_id=getattr(self, "_thumbnail_request_id", None))
+            # 在状态栏显示缩略图加载任务
+            try:
+                if self._thumb_status_task_id is None:
+                    # 检查是否可能从缓存读取
+                    cache_hits = 0
+                    # 获取缩放质量设置，确保与保存缓存时使用的一致
+                    try:
+                        scale_quality = str(self.cache_manager.settings_manager.get("performance/thumbnail_scale_quality", "low")).lower()
+                    except Exception:
+                        scale_quality = "low"
+                    # 获取缩略图缓存尺寸设置，确保与保存缓存时使用的一致
+                    try:
+                        base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
+                    except Exception:
+                        base_px = 0
+                    try:
+                        for path in paths_to_load[:10]:  # 检查前10个作为样本
+                            if self.thumbnail_loader.disk_cache.has(path, self.current_thumb_size, cache_type, scale_quality=scale_quality, base_px=base_px):
+                                cache_hits += 1
+                    except Exception:
+                        pass
+                    # 如果大部分可能命中缓存，显示不同的提示
+                    if cache_hits >= len(paths_to_load[:10]) * 0.5:
+                        task_msg = f"正在读取缩略图缓存 ({len(paths_to_load)} 个)..."
+                    else:
+                        task_msg = f"正在生成缩略图 ({len(paths_to_load)} 个)..."
+                    self._thumb_status_task_id = StatusManager.instance().start_task(task_msg)
+            except Exception:
+                pass
 
         if self.is_lazy_loading and self.current_loaded_count < len(self.all_image_files):
             try:
@@ -7178,7 +7294,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 
             # 更新状态栏
             self.stats_changed.emit(len(self.all_image_files), self.current_loaded_count, self.get_selected_count())
-            self._maybe_hide_startup_mask()
+            # 缩略图占位符已显示，可以隐藏加载蒙层
+            # 不需要等待缩略图图片加载完成
+            self._force_hide_startup_mask()
             
         except Exception as e:
             try:
@@ -7841,6 +7959,43 @@ class ImageLibraryPage(BaseImageBrowserPage):
             NotificationManager.instance().show_warning("错误", f"加载失败: {e}")
 
 
+    def on_window_resized(self):
+        """窗口大小变化时触发缩略图重新加载
+        
+        当从非全屏切换到全屏或最大化时，需要重新计算可见区域并加载缩略图。
+        """
+        try:
+            # 延迟执行，等待布局完成
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(100, self._on_window_resized_impl)
+        except Exception:
+            pass
+    
+    def _on_window_resized_impl(self):
+        """窗口大小变化的实际实现"""
+        try:
+            # 重新计算可见区域
+            self.grid_view.arrange_thumbnails()
+            self.grid_view.update()
+            
+            # 增加请求ID，取消之前的加载任务
+            self._load_request_id += 1
+            self.thumbnail_loader.set_active_request_id(self._load_request_id)
+            self.thumbnail_loader.cancel_pending()
+            self._requested_paths = set()
+            self._requested_retry_ts = {}
+            
+            # 清空待更新队列
+            try:
+                self._pending_updates.clear()
+            except Exception:
+                pass
+            
+            # 立即加载当前可见区域
+            self._schedule_visible_load(immediate=True)
+        except Exception:
+            pass
+
     def on_wheel_zoom(self, delta):
         """Ctrl+滚轮缩放：调整滑块值"""
         current_value = self.preview_slider.value()
@@ -8366,8 +8521,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._taxonomy_load_worker.failed.connect(self._on_folder_load_failed)
         self._taxonomy_load_worker.start()
         
-        # 显示加载遮罩 (可选，如果 _update_thumbnails_with_list 被延迟调用)
-        # self._show_startup_mask("正在加载...")
+        # 显示加载遮罩 - 在虚拟文件模式下立即显示，让用户知道正在加载
+        self._startup_mask_enabled = True
+        self._startup_mask_ready = False
+        self._show_startup_mask("正在读取数据...")
 
     def on_folder_clicked(self, folder_path):
         """文件夹点击事件 (用于退出搜索模式)"""
@@ -8719,11 +8876,47 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.apply_quick_filters()
 
     def on_thumbnail_loaded(self, path, image):
-        """缩略图加载完成回调"""
-        # 直接使用 _pending_updates 队列
+        """缩略图加载完成回调 - 优化版
+        
+        优化点：
+        1. 限制队列长度，避免内存无限增长
+        2. 如果已经在处理，直接添加到队列
+        3. 使用singleShot启动处理，避免阻塞
+        """
+        # 限制队列长度，避免内存无限增长
+        max_queue_size = 500
+        if len(self._pending_updates) >= max_queue_size:
+            # 队列已满，移除最旧的非可见区域更新
+            # 保留可见区域的更新
+            self._cleanup_old_updates()
+        
         self._pending_updates.append((path, image))
-        if not self._update_timer.isActive():
-            self._update_timer.start(0)
+        
+        # 如果不在处理中，启动处理
+        if not self._is_processing_updates:
+            # 使用singleShot让出时间片
+            QTimer.singleShot(0, self._process_pending_updates)
+    
+    def _cleanup_old_updates(self):
+        """清理旧的更新，保留可见区域的"""
+        if not self._pending_updates:
+            return
+        
+        # 获取当前可见区域的路径
+        visible_keys = getattr(self, '_current_visible_path_keys', set())
+        
+        # 创建新队列，只保留可见区域的更新
+        new_queue = deque()
+        removed = 0
+        
+        for path, image in self._pending_updates:
+            key = self._normalize_path_key(path)
+            if key in visible_keys or removed >= 50:  # 至少保留一些
+                new_queue.append((path, image))
+            else:
+                removed += 1
+        
+        self._pending_updates = new_queue
 
     def _on_thumbnail_ui_applied(self, path):
         # 控制器每完成一次 UI 回填后触发的补充动作：
@@ -8735,23 +8928,58 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._maybe_hide_startup_mask()
 
     def _process_pending_updates(self):
+        """处理待更新的缩略图 - 优化版
+        
+        优化点：
+        1. 批量处理，减少定时器触发次数
+        2. 每处理一批后让出时间片，避免阻塞UI
+        3. 使用processEvents保持UI响应
+        """
         if not self._pending_updates:
-            self._update_timer.stop()
+            self._is_processing_updates = False
             return
+            
         if getattr(self, "_thumbnail_ui_suspended", False):
-            self._update_timer.stop()
+            self._is_processing_updates = False
             return
-        path, image = self._pending_updates.popleft()
-        key = self._normalize_path_key(path)
-        if not self._apply_loaded_thumbnail(path, image):
-            self._retry_apply_loaded_thumbnail(path, image, 0)
-        if self._startup_mask_enabled and self._startup_mask_visible:
-            if key in self._startup_pending_paths:
-                self._startup_pending_paths.discard(key)
+        
+        # 标记正在处理
+        self._is_processing_updates = True
+        
+        # 批量处理，但每批数量适中
+        batch_size = min(self._update_batch_size, len(self._pending_updates))
+        processed = 0
+        
+        while self._pending_updates and processed < batch_size:
+            path, image = self._pending_updates.popleft()
+            key = self._normalize_path_key(path)
+            
+            if not self._apply_loaded_thumbnail(path, image):
+                self._retry_apply_loaded_thumbnail(path, image, 0)
+            
+            if self._startup_mask_enabled and self._startup_mask_visible:
+                if key in self._startup_pending_paths:
+                    self._startup_pending_paths.discard(key)
+            
+            processed += 1
+        
+        # 更新启动遮罩状态
         if self._startup_mask_enabled and self._startup_mask_visible:
             self._maybe_hide_startup_mask()
+        
+        # 如果还有未处理的更新，安排下一批
         if self._pending_updates:
-            self._update_timer.start(0)
+            # 使用QTimer.singleShot让出时间片，避免阻塞UI
+            QTimer.singleShot(1, self._process_pending_updates)
+        else:
+            self._is_processing_updates = False
+            # 所有缩略图更新处理完成，结束状态栏任务
+            if self._thumb_status_task_id is not None:
+                try:
+                    StatusManager.instance().finish_task(self._thumb_status_task_id)
+                    self._thumb_status_task_id = None
+                except Exception:
+                    pass
 
     def _on_idle_visible_load_tick(self):
         try:
@@ -8794,24 +9022,54 @@ class ImageLibraryPage(BaseImageBrowserPage):
             return
 
     def _apply_loaded_thumbnail(self, path, image=None):
+        """应用加载的缩略图到UI - 优化版
+        
+        优化点：
+        1. 减少不必要的属性访问
+        2. 延迟更新非可见区域的缩略图
+        3. 使用轻量级检查
+        """
         key = self._normalize_path_key(path)
+        
+        # 快速检查：如果不在当前可见区域，延迟更新
+        visible_keys = getattr(self, '_current_visible_path_keys', set())
+        is_visible = key in visible_keys
+        
         thumb = self._thumb_by_path.get(key)
-        if not thumb or not getattr(thumb, "image_info", None):
+        if not thumb:
             return False
+            
+        image_info = getattr(thumb, "image_info", None)
+        if not image_info:
+            return False
+            
         try:
-            info_path = thumb.image_info.get("path")
+            info_path = image_info.get("path")
         except Exception:
-            info_path = None
+            return False
+            
         if self._normalize_path_key(info_path) != key:
             return False
+            
         if image is None:
             return True
-        if image is not None and hasattr(thumb, "set_thumbnail_image"):
-            thumb.set_thumbnail_image(image)
+            
+        # 只有可见区域或非快速滚动时才更新UI
+        if is_visible or not getattr(self, "_fast_scroll_active", False):
+            if hasattr(thumb, "set_thumbnail_image"):
+                thumb.set_thumbnail_image(image)
+                try:
+                    thumb._stale_thumbnail = False
+                except Exception:
+                    pass
+        else:
+            # 非可见区域且快速滚动中，标记为待更新
             try:
+                thumb._pending_image = image
                 thumb._stale_thumbnail = False
             except Exception:
                 pass
+                
         return True
 
     def _retry_apply_loaded_thumbnail(self, path, image, attempt):

@@ -1737,16 +1737,12 @@ class SettingsPage(QWidget):
         use_gpu_scaling = self.settings_manager.get("performance/use_gpu_scaling", True)
         self.use_gpu_scaling_checkbox.setChecked(bool(use_gpu_scaling))
         self.use_gpu_scaling_checkbox.setStyleSheet(checkbox_style)
-        try:
-            from utils.system.gpu_utils import is_gpu_build
-
-            if not bool(is_gpu_build()):
-                self.use_gpu_scaling_checkbox.setChecked(False)
-                self.use_gpu_scaling_checkbox.setEnabled(False)
-        except Exception:
-            pass
+        # 添加提示标签说明GPU缩放的作用
+        gpu_tip_label = QLabel("(使用GPU加速缩略图缩放，提升性能)")
+        gpu_tip_label.setStyleSheet("color: #888; font-size: 11px;")
         gpu_layout = QHBoxLayout()
         gpu_layout.addWidget(self.use_gpu_scaling_checkbox)
+        gpu_layout.addWidget(gpu_tip_label)
         gpu_layout.addStretch()
         general_form_layout.addRow("GPU缩放:", gpu_layout)
 

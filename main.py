@@ -7,6 +7,29 @@ import json
 import traceback
 from datetime import datetime
 
+# 启用 faulthandler 以捕获段错误和崩溃信息
+import faulthandler
+
+# 获取程序根目录
+if getattr(sys, "frozen", False):
+    _root_dir = os.path.dirname(sys.executable)
+else:
+    _root_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 创建崩溃日志目录并启用 faulthandler
+_faulthandler_log_dir = os.path.join(_root_dir, "cache", "logs", "crash")
+os.makedirs(_faulthandler_log_dir, exist_ok=True)
+_faulthandler_log_path = os.path.join(_faulthandler_log_dir, f"faulthandler_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+try:
+    _fh = open(_faulthandler_log_path, "a", encoding="utf-8")
+    faulthandler.enable(file=_fh, all_threads=True)
+except Exception:
+    # 如果文件打开失败，启用输出到标准错误
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:
+        pass
+
 # Windows: 全局 monkey-patch multiprocessing，隐藏子进程控制台窗口
 if sys.platform == "win32":
     try:

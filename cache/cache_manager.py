@@ -795,6 +795,7 @@ class ImageCacheManager:
                         transformation_mode = Qt.TransformationMode.SmoothTransformation if scale_quality == "high" else Qt.TransformationMode.FastTransformation
                         if disable_scaling:
                             transformation_mode = Qt.TransformationMode.FastTransformation
+                        # 根据设置决定是否使用GPUScaler
                         if target_size > 0 and (image.width() > target_size or image.height() > target_size):
                             if use_gpu_scaling:
                                 scaled = GPUScaler.scale_qimage(

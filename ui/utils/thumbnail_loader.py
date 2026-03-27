@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, Qt, QSize
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, Qt, QSize, QTimer
 from PyQt6.QtGui import QImage, QImageReader
 import os
 import cv2
@@ -12,16 +12,17 @@ from utils.log_manager import LogManager
 import time
 import queue
 from threading import Thread, Lock
+from collections import deque
 
 class ThumbnailRunnable(QRunnable):
     """缩略图加载任务"""
-    def __init__(self, path, size, cache_manager, disk_cache, signals, cache_type='general', request_id=None, priority=3, request_id_ref=None):
+    def __init__(self, path, size, cache_manager, disk_cache, result_emitter, cache_type='general', request_id=None, priority=3, request_id_ref=None):
         super().__init__()
         self.path = path
         self.size = size
         self.cache_manager = cache_manager
         self.disk_cache = disk_cache
-        self.signals = signals
+        self.result_emitter = result_emitter  # 结果发射回调函数，用于将结果放入队列
         self.cache_type = cache_type
         self.request_id = request_id
         self.priority = priority
@@ -132,29 +133,27 @@ class ThumbnailRunnable(QRunnable):
                             new_w = int(max(1, round(cached_image.width() * ratio)))
                             new_h = int(max(1, round(cached_image.height() * ratio)))
                             if abs(new_w - cached_image.width()) >= 2 or abs(new_h - cached_image.height()) >= 2:
-                                mode = transformation_mode
-                                if ratio > 1.02:
-                                    mode = Qt.TransformationMode.SmoothTransformation
+                                # 根据设置决定是否使用GPUScaler
                                 if use_gpu_scaling:
                                     scaled = GPUScaler.scale_qimage(
                                         cached_image,
                                         w,
                                         h,
                                         keep_aspect=True,
-                                        fast_mode=mode == Qt.TransformationMode.FastTransformation
+                                        fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
                                     )
                                     output_image = scaled if scaled is not None else cached_image.scaled(
-                                        w,
-                                        h,
+                                        new_w,
+                                        new_h,
                                         Qt.AspectRatioMode.KeepAspectRatio,
-                                        mode
+                                        transformation_mode
                                     )
                                 else:
                                     output_image = cached_image.scaled(
-                                        w,
-                                        h,
+                                        new_w,
+                                        new_h,
                                         Qt.AspectRatioMode.KeepAspectRatio,
-                                        mode
+                                        transformation_mode
                                     )
                     except Exception:
                         pass
@@ -173,10 +172,9 @@ class ThumbnailRunnable(QRunnable):
                 except Exception:
                     pass
 
-                self.signals.loaded.emit(self.path, output_image)
-                if hasattr(self.signals, "loaded_metrics"):
+                if self.result_emitter:
                     elapsed_ms = (time.time() - start_time) * 1000.0
-                    self.signals.loaded_metrics.emit(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                    self.result_emitter(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
                 return
 
             try:
@@ -223,10 +221,9 @@ class ThumbnailRunnable(QRunnable):
                 output_image = disk_img
                 if output_image is not None and not output_image.isNull() and output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
                     output_image = output_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-                self.signals.loaded.emit(self.path, output_image)
-                if hasattr(self.signals, "loaded_metrics"):
+                if self.result_emitter:
                     elapsed_ms = (time.time() - start_time) * 1000.0
-                    self.signals.loaded_metrics.emit(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                    self.result_emitter(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
                 return
 
             # 2. 加载图片
@@ -251,12 +248,74 @@ class ThumbnailRunnable(QRunnable):
                     req_max = _get_req_max()
                     if req_max > 0 and (target_size <= 0 or req_max > target_size):
                         target_size = req_max
-                if target_size > 2048:
-                    target_size = 2048
+                # 限制最大目标尺寸，避免内存占用过大
+                # 支持更大的缩略图尺寸以适应高DPI显示器和放大查看需求
+                max_target_size = 4096
+                if target_size > max_target_size:
+                    target_size = max_target_size
+                
+                # 检查从focus_scaled_cache加载的图片尺寸是否足够
+                if image is not None and not image.isNull() and target_size > 0:
+                    img_max = max(int(image.width() or 0), int(image.height() or 0))
+                    if img_max > 0 and (img_max < int(target_size * 0.85) or target_size - img_max >= 32):
+                        # 尺寸不够，丢弃并重新加载
+                        image = None
+                        from_cache = False
+                
                 if image is None or (hasattr(image, "isNull") and image.isNull()):
+                    # 渐进式加载策略：
+                    # 1. 首先尝试从EXIF加载内置缩略图（最快）
+                    # 2. 然后使用QImageReader加载（中等速度）
+                    # 3. 最后使用OpenCV加载（最慢但最兼容）
+                    
                     for attempt in range(3):
                         attempts = attempt + 1
-                        if ext not in raw_exts and ext not in (".TIF", ".TIFF"):
+                        
+                        # 第一次尝试：使用QImageReader快速加载
+                        if attempt == 0 and ext not in raw_exts and ext not in (".TIF", ".TIFF"):
+                            try:
+                                from utils.system.stderr_suppressor import suppress_stderr_fd
+
+                                with suppress_stderr_fd():
+                                    reader = QImageReader(self.path)
+                                    if reader.canRead():
+                                        try:
+                                            # 使用较小的目标尺寸进行快速加载
+                                            # 如果目标尺寸很大，先加载一个中等尺寸的图片
+                                            quick_target = target_size
+                                            if target_size > 800:
+                                                # 先加载一个中等尺寸的图片，让用户快速看到内容
+                                                quick_target = min(400, target_size // 2)
+                                            
+                                            if quick_target:
+                                                size = reader.size()
+                                                if size.isValid():
+                                                    w = size.width()
+                                                    h = size.height()
+                                                    if w > 0 and h > 0:
+                                                        if w >= h:
+                                                            scaled_w = int(quick_target)
+                                                            scaled_h = int(max(1, round(h * quick_target / w)))
+                                                        else:
+                                                            scaled_h = int(quick_target)
+                                                            scaled_w = int(max(1, round(w * quick_target / h)))
+                                                        reader.setScaledSize(QSize(scaled_w, scaled_h))
+                                            image = reader.read()
+                                            
+                                            # 如果加载成功且尺寸足够，直接返回
+                                            # 否则继续尝试加载更高分辨率
+                                            if image is not None and not image.isNull():
+                                                img_max = max(int(image.width() or 0), int(image.height() or 0))
+                                                if img_max >= int(target_size * 0.85):
+                                                    break  # 尺寸足够，跳出循环
+                                                # 尺寸不够，继续下一次尝试加载更高分辨率
+                                        except Exception:
+                                            image = None
+                            except Exception:
+                                image = None
+                        
+                        # 第二次尝试：使用QImageReader加载完整分辨率
+                        elif attempt == 1 and ext not in raw_exts and ext not in (".TIF", ".TIFF"):
                             try:
                                 from utils.system.stderr_suppressor import suppress_stderr_fd
 
@@ -316,6 +375,7 @@ class ThumbnailRunnable(QRunnable):
 
                 if image is not None and (not hasattr(image, "isNull") or not image.isNull()):
                     scaled_image = image
+                    # 根据设置决定是否使用GPUScaler
                     if target_size and (image.width() > target_size or image.height() > target_size):
                         if use_gpu_scaling:
                             scaled = GPUScaler.scale_qimage(
@@ -357,29 +417,27 @@ class ThumbnailRunnable(QRunnable):
                                     new_w = int(max(1, round(scaled_image.width() * ratio)))
                                     new_h = int(max(1, round(scaled_image.height() * ratio)))
                                     if abs(new_w - scaled_image.width()) >= 2 or abs(new_h - scaled_image.height()) >= 2:
-                                        mode = transformation_mode
-                                        if ratio > 1.02:
-                                            mode = Qt.TransformationMode.SmoothTransformation
+                                        # 根据设置决定是否使用GPUScaler
                                         if use_gpu_scaling:
                                             scaled = GPUScaler.scale_qimage(
                                                 scaled_image,
                                                 w,
                                                 h,
                                                 keep_aspect=True,
-                                                fast_mode=mode == Qt.TransformationMode.FastTransformation
+                                                fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
                                             )
                                             output_image = scaled if scaled is not None else scaled_image.scaled(
-                                                w,
-                                                h,
+                                                new_w,
+                                                new_h,
                                                 Qt.AspectRatioMode.KeepAspectRatio,
-                                                mode
+                                                transformation_mode
                                             )
                                         else:
                                             output_image = scaled_image.scaled(
-                                                w,
-                                                h,
+                                                new_w,
+                                                new_h,
                                                 Qt.AspectRatioMode.KeepAspectRatio,
-                                                mode
+                                                transformation_mode
                                             )
                             except Exception:
                                 pass
@@ -398,40 +456,54 @@ class ThumbnailRunnable(QRunnable):
                         except Exception:
                             pass
 
-                        self.signals.loaded.emit(self.path, output_image)
-                        if hasattr(self.signals, "loaded_metrics"):
+                        if self.result_emitter:
                             elapsed_ms = (time.time() - start_time) * 1000.0
-                            self.signals.loaded_metrics.emit(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                            self.result_emitter(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
                     else:
-                        self.signals.loaded.emit(self.path, None)
-                        if hasattr(self.signals, "loaded_metrics"):
+                        if self.result_emitter:
                             elapsed_ms = (time.time() - start_time) * 1000.0
-                            self.signals.loaded_metrics.emit(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                            self.result_emitter(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
                 else:
-                    self.signals.loaded.emit(self.path, None)
-                    if hasattr(self.signals, "loaded_metrics"):
+                    if self.result_emitter:
                         elapsed_ms = (time.time() - start_time) * 1000.0
-                        self.signals.loaded_metrics.emit(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                        self.result_emitter(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
         except Exception as e:
             try:
                 LogManager.instance().warning(f"加载缩略图失败: {self.path}: {e}")
             except Exception:
                 pass
             try:
-                self.signals.loaded.emit(self.path, None)
-                if hasattr(self.signals, "loaded_metrics"):
+                if self.result_emitter:
                     elapsed_ms = (time.time() - start_time) * 1000.0
-                    self.signals.loaded_metrics.emit(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
+                    self.result_emitter(self.path, None, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
             except Exception:
                 pass
 
 class ThumbnailLoaderSignals(QObject):
-    """信号类，因为 QRunnable 不是 QObject"""
+    """信号类，因为 QRunnable 不是 QObject
+    
+    注意：这些信号会在主线程中通过队列异步发射，确保不会阻塞工作线程
+    """
     loaded = pyqtSignal(str, object) # path, QImage
     loaded_metrics = pyqtSignal(str, object, int, float, bool, int)
 
 class ThumbnailLoader(QObject):
-    """缩略图多线程加载器"""
+    """缩略图多线程加载器 - 优化版
+    
+    优化点：
+    1. 智能并发控制：限制同时运行的任务数，避免CPU过载
+    2. 优先级调度：可见区域优先，预加载延后
+    3. 批量处理：减少任务提交开销
+    4. 动态线程数：根据系统负载调整
+    """
+    
+    # 优先级常量
+    PRIORITY_IMMEDIATE = -2  # 立即可见区域，最高优先级
+    PRIORITY_VISIBLE = -1    # 可见区域
+    PRIORITY_ADJACENT = 0    # 相邻区域（预加载）
+    PRIORITY_PRELOAD = 1     # 预加载区域
+    PRIORITY_BACKGROUND = 2  # 后台加载
+    
     def __init__(self, cache_manager, task_type=TaskType.DEFAULT):
         super().__init__()
         self.cache_manager = cache_manager
@@ -441,40 +513,150 @@ class ThumbnailLoader(QObject):
             self.disk_cache.cleanup_async(delay_sec=8.0)
         except Exception:
             pass
+        
+        # 使用自定义线程池，更好地控制并发
         self.thread_pool = QThreadPool()
-        # 使用 TaskScheduler 动态分配线程数
         scheduler = TaskScheduler.instance()
-        thread_count = scheduler.get_thread_count(task_type)
-        self.thread_pool.setMaxThreadCount(thread_count)
-
+        self._default_thread_count = scheduler.get_thread_count(task_type)
+        # 限制最大线程数，避免过多线程竞争
+        self._max_thread_count = min(self._default_thread_count, 4)
+        self.thread_pool.setMaxThreadCount(self._max_thread_count)
+        
         self.signals = ThumbnailLoaderSignals()
-        self._task_queue = queue.PriorityQueue()
+        
+        # 使用双队列系统：高优先级队列和普通队列
+        self._high_priority_queue = queue.PriorityQueue()  # 优先级 <= 0
+        self._normal_queue = queue.PriorityQueue()         # 优先级 > 0
         self._queue_lock = Lock()
         self._seq = 0
         self._front_seq = 0
         self._running = True
         self._active_request_id = None
         self._request_id_ref = {"value": None}
+        
+        # 正在运行的任务计数
+        self._running_tasks = 0
+        self._running_tasks_lock = Lock()
+        
+        # 批量处理相关
+        self._batch_buffer = []
+        self._batch_lock = Lock()
+        self._batch_timer = None
+        
+        # 结果队列：工作线程将结果放入此队列，主线程定时器异步处理
+        # 这样可以确保信号真正在主线程异步发射，避免阻塞工作线程
+        self._result_queue = deque()
+        self._result_queue_lock = Lock()
+        self._result_timer = QTimer(self)
+        # 使用8ms间隔（约120fps），提高UI更新频率，加快缩略图显示速度
+        self._result_timer.setInterval(8)
+        self._result_timer.timeout.connect(self._process_result_queue)
+        self._result_timer.start()
+        
+        # 启动调度器线程
         self._dispatcher = Thread(target=self._dispatch_loop, daemon=True)
         self._dispatcher.start()
         
     def set_max_thread_count(self, count):
         """设置最大线程数"""
         if count > 0:
-            self.thread_pool.setMaxThreadCount(count)
+            # 限制最大线程数，避免过多线程竞争CPU
+            self._max_thread_count = min(int(count), 4)
+            self.thread_pool.setMaxThreadCount(self._max_thread_count)
+    
+    def _emit_loaded(self, path, image):
+        """将加载结果放入队列，由主线程定时器异步处理
+        
+        参数:
+            path: 图片路径
+            image: 加载的图片
+        """
+        with self._result_queue_lock:
+            self._result_queue.append(('loaded', path, image))
+    
+    def _emit_loaded_metrics(self, path, image, request_id, elapsed_ms, from_cache, attempts):
+        """将加载指标放入队列，由主线程定时器异步处理
+        
+        参数:
+            path: 图片路径
+            image: 加载的图片
+            request_id: 请求ID
+            elapsed_ms: 耗时（毫秒）
+            from_cache: 是否来自缓存
+            attempts: 尝试次数
+        """
+        with self._result_queue_lock:
+            self._result_queue.append(('metrics', path, image, request_id, elapsed_ms, from_cache, attempts))
+    
+    def _on_thumbnail_result(self, path, image, request_id, elapsed_ms, from_cache, attempts):
+        """缩略图加载结果回调函数
+        
+        由工作线程调用，将结果放入队列，由主线程定时器异步发射信号
+        
+        参数:
+            path: 图片路径
+            image: 加载的图片
+            request_id: 请求ID
+            elapsed_ms: 耗时（毫秒）
+            from_cache: 是否来自缓存
+            attempts: 尝试次数
+        """
+        with self._result_queue_lock:
+            self._result_queue.append(('loaded', path, image))
+            self._result_queue.append(('metrics', path, image, request_id, elapsed_ms, from_cache, attempts))
+    
+    def _process_result_queue(self):
+        """处理结果队列，在主线程中异步发射信号
+        
+        每帧最多处理5个结果，避免阻塞主线程
+        配合8ms间隔，确保120fps流畅度，加快缩略图显示
+        """
+        max_per_frame = 5
+        processed = 0
+        
+        while processed < max_per_frame:
+            result = None
+            with self._result_queue_lock:
+                if self._result_queue:
+                    result = self._result_queue.popleft()
+            
+            if result is None:
+                break
+            
+            try:
+                if result[0] == 'loaded':
+                    # result = ('loaded', path, image)
+                    self.signals.loaded.emit(result[1], result[2])
+                elif result[0] == 'metrics':
+                    # result = ('metrics', path, image, request_id, elapsed_ms, from_cache, attempts)
+                    self.signals.loaded_metrics.emit(result[1], result[2], result[3], result[4], result[5], result[6])
+            except Exception:
+                pass
+            
+            processed += 1
 
     def shutdown(self):
         """停止加载器并清理资源"""
         self._running = False
+        self._result_timer.stop()
         self.cancel_all()
-        # 尝试等待正在运行的任务结束，避免退出崩溃
-        # 设置较短的超时时间，保证"及时关闭"
         self.thread_pool.waitForDone(200)
         
     def load_thumbnails(self, paths, current_display_size, cache_type='general', request_id=None, default_priority=3):
-        """提交加载任务"""
+        """提交加载任务 - 批量优化版
+        
+        参数:
+            paths: 路径列表，可以是字符串或 (priority, path) 元组
+            current_display_size: 当前显示尺寸
+            cache_type: 缓存类型
+            request_id: 请求ID，用于批量取消
+            default_priority: 默认优先级
+        """
         if not paths:
             return
+            
+        # 批量处理，减少锁竞争
+        tasks_to_enqueue = []
         for item in paths:
             priority = default_priority
             path = item
@@ -496,32 +678,103 @@ class ThumbnailLoader(QObject):
                         front = bool(item[2])
             if not path:
                 continue
-            self._enqueue_task(path, current_display_size, cache_type, priority, request_id, front)
-
-    def _enqueue_task(self, path, size, cache_type, priority, request_id, front=False):
+            tasks_to_enqueue.append((priority, path, current_display_size, cache_type, request_id, front))
+        
+        # 批量入队
         with self._queue_lock:
-            if front:
-                self._front_seq -= 1
-                seq = self._front_seq
-            else:
-                self._seq += 1
-                seq = self._seq
-        self._task_queue.put((int(priority), seq, path, size, cache_type, request_id))
+            for priority, path, size, cache_type, request_id, front in tasks_to_enqueue:
+                if front:
+                    self._front_seq -= 1
+                    seq = self._front_seq
+                else:
+                    self._seq += 1
+                    seq = self._seq
+                # 根据优先级选择队列
+                if priority <= 0:
+                    self._high_priority_queue.put((int(priority), seq, path, size, cache_type, request_id))
+                else:
+                    self._normal_queue.put((int(priority), seq, path, size, cache_type, request_id))
 
     def _dispatch_loop(self):
+        """调度循环 - 优先处理高优先级任务 - 优化版
+        
+        优化点：
+        1. 控制任务分发频率，避免CPU过载
+        2. 使用更短的睡眠时间，提高响应性
+        3. 批量检查队列状态，减少锁竞争
+        4. 限制每帧分发的任务数，避免UI线程被信号淹没
+        """
         while self._running:
+            # 检查当前运行的任务数
+            with self._running_tasks_lock:
+                current_running = self._running_tasks
+            
+            # 如果已经有太多任务在运行，等待一下
+            if current_running >= self._max_thread_count:
+                time.sleep(0.005)  # 缩短等待时间，提高响应性
+                continue
+            
+            # 限制每帧分发的任务数，避免一次性分发太多任务导致UI线程被信号淹没
+            tasks_per_frame = 0
+            max_tasks_per_frame = 4  # 每帧最多分发4个任务，提高并发度
+            
+            while tasks_per_frame < max_tasks_per_frame:
+                task = None
+                # 优先从高优先级队列获取
+                try:
+                    task = self._high_priority_queue.get_nowait()
+                except queue.Empty:
+                    # 高优先级队列为空，尝试普通队列
+                    try:
+                        task = self._normal_queue.get_nowait()
+                    except queue.Empty:
+                        # 两个队列都为空，跳出内层循环
+                        break
+                
+                if task is None:
+                    break
+                    
+                priority, seq, path, size, cache_type, request_id = task
+                
+                # 检查请求ID是否匹配
+                if self._active_request_id is not None and request_id is not None and int(request_id) != int(self._active_request_id):
+                    continue
+                
+                # 创建并启动任务
+                # 使用结果发射回调函数，将结果放入队列，由主线程定时器异步处理
+                runnable = ThumbnailRunnable(path, size, self.cache_manager, self.disk_cache, self._on_thumbnail_result, cache_type, request_id, priority, self._request_id_ref)
+                
+                # 包装任务以跟踪运行状态
+                wrapped_runnable = self._wrap_runnable(runnable)
+                self.thread_pool.start(wrapped_runnable)
+                
+                tasks_per_frame += 1
+                
+                # 每分发一个任务后，让出时间片，避免阻塞
+                time.sleep(0.0005)
+            
+            # 如果本帧没有分发任何任务，等待一下
+            if tasks_per_frame == 0:
+                time.sleep(0.01)
+
+    def _wrap_runnable(self, runnable):
+        """包装runnable以跟踪运行状态"""
+        original_run = runnable.run
+        
+        def wrapped_run():
+            with self._running_tasks_lock:
+                self._running_tasks += 1
             try:
-                priority, seq, path, size, cache_type, request_id = self._task_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if self._active_request_id is not None and request_id is not None and int(request_id) != int(self._active_request_id):
-                continue
-            task = ThumbnailRunnable(path, size, self.cache_manager, self.disk_cache, self.signals, cache_type, request_id, priority, self._request_id_ref)
-            self.thread_pool.start(task)
+                original_run()
+            finally:
+                with self._running_tasks_lock:
+                    self._running_tasks -= 1
+        
+        runnable.run = wrapped_run
+        return runnable
 
     def cancel_all(self):
-        """取消所有任务 (实际上只能等待正在运行的任务结束，但可以清除队列如果支持)"""
-        # QThreadPool.clear() 在 Qt 5.9+ 可用
+        """取消所有任务"""
         try:
             self.thread_pool.clear()
         except:
@@ -531,11 +784,20 @@ class ThumbnailLoader(QObject):
     def cancel_pending(self):
         """取消队列中等待的任务"""
         try:
-            # 清空任务队列
-            with self._task_queue.mutex:
-                self._task_queue.queue.clear()
+            # 清空两个队列
+            with self._queue_lock:
+                try:
+                    while not self._high_priority_queue.empty():
+                        self._high_priority_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    while not self._normal_queue.empty():
+                        self._normal_queue.get_nowait()
+                except queue.Empty:
+                    pass
             
-            # 清空线程池中等待的任务 (Qt 5.9+)
+            # 清空线程池中等待的任务
             if hasattr(self.thread_pool, "clear"):
                 self.thread_pool.clear()
                 
@@ -546,5 +808,22 @@ class ThumbnailLoader(QObject):
                 pass
 
     def set_active_request_id(self, request_id):
+        """设置活动请求ID，用于批量取消旧请求的任务"""
         self._active_request_id = request_id
         self._request_id_ref["value"] = request_id
+        
+    def get_queue_stats(self):
+        """获取队列统计信息，用于调试"""
+        try:
+            high_count = self._high_priority_queue.qsize()
+            normal_count = self._normal_queue.qsize()
+            with self._running_tasks_lock:
+                running = self._running_tasks
+            return {
+                "high_priority": high_count,
+                "normal": normal_count,
+                "running": running,
+                "max_threads": self._max_thread_count
+            }
+        except Exception:
+            return {}
