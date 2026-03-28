@@ -742,6 +742,9 @@ def detect_focus_batch_for_import(
     # 获取任务数量
     task_count = len(paths)
     
+    # 是否跳过单线程处理（当使用多进程时为True）
+    skip_single_thread = bool(use_multiprocess)
+    
     # 获取显存信息（用于GPU模式下的worker计算）
     vram_info = None
     focus_trace(

@@ -14139,6 +14139,7 @@ class ImportPage(BaseImageBrowserPage):
         def _apply_post_action(done_paths: list[str], results_by_src: dict) -> tuple[list[str], str, dict]:
             action = ""
             dest_root = ""
+            rename_rule = ""
             try:
                 action = str((options or {}).get("post_action") or "").strip().lower()
             except Exception:
@@ -14147,6 +14148,10 @@ class ImportPage(BaseImageBrowserPage):
                 dest_root = str((options or {}).get("post_dir") or "").strip()
             except Exception:
                 dest_root = ""
+            try:
+                rename_rule = str((options or {}).get("rename_rule") or "").strip()
+            except Exception:
+                rename_rule = ""
             if action not in ("copy", "move", "copy_by_status", "move_by_status", "copy_by_status_to_source", "move_by_status_to_source"):
                 try:
                     self._focus_detect_virtual_roots = None
@@ -14335,6 +14340,88 @@ class ImportPage(BaseImageBrowserPage):
                         return cand
                 return path0
 
+            def _get_exif_iso(image_path: str) -> str:
+                """获取图片的ISO值"""
+                try:
+                    from utils.exif.exif_manager import ExifManager
+                    em = ExifManager.instance()
+                    exif_data = em.read_exif(image_path, tag_type=2)  # READ_PICTURE_METADATA_TAG = 2
+                    if isinstance(exif_data, dict):
+                        iso_val = exif_data.get("ISO") or exif_data.get("ISOSpeedRatings")
+                        if iso_val:
+                            return str(iso_val)
+                except Exception:
+                    pass
+                return ""
+
+            def _generate_new_filename(src_path: str, idx: int, result: dict | None) -> str:
+                """根据重命名规则生成新文件名"""
+                if not rename_rule:
+                    return os.path.basename(src_path)
+
+                try:
+                    original_name, ext = os.path.splitext(os.path.basename(src_path))
+                except Exception:
+                    original_name = os.path.basename(src_path)
+                    ext = ""
+
+                # 获取日期和时间
+                date_str = ""
+                time_str = ""
+                try:
+                    stat = os.stat(src_path)
+                    dt = datetime.fromtimestamp(stat.st_mtime)
+                    date_str = dt.strftime("%Y%m%d")
+                    time_str = dt.strftime("%H%M%S")
+                except Exception:
+                    pass
+
+                # 从结果中获取评分、标准分、鸟占比
+                score = ""
+                norm_score = ""
+                area_ratio = ""
+                if isinstance(result, dict):
+                    try:
+                        score_val = result.get("score")
+                        if score_val is not None:
+                            score = str(int(float(score_val)))
+                    except Exception:
+                        pass
+                    try:
+                        norm_val = result.get("norm_score")
+                        if norm_val is not None:
+                            norm_score = str(int(float(norm_val)))
+                    except Exception:
+                        pass
+                    try:
+                        area_val = result.get("area")
+                        if area_val is not None:
+                            area_ratio = f"{float(area_val):.3f}"
+                    except Exception:
+                        pass
+
+                # 获取ISO
+                iso_str = _get_exif_iso(src_path)
+
+                # 序号格式化（4位数字）
+                index_str = f"{idx:04d}"
+
+                # 替换规则中的占位符
+                new_name = rename_rule
+                new_name = new_name.replace("{Date}", date_str)
+                new_name = new_name.replace("{Time}", time_str)
+                new_name = new_name.replace("{Index}", index_str)
+                new_name = new_name.replace("{Original}", original_name)
+                new_name = new_name.replace("{Score}", score)
+                new_name = new_name.replace("{NormScore}", norm_score)
+                new_name = new_name.replace("{AreaRatio}", area_ratio)
+                new_name = new_name.replace("{ISO}", iso_str)
+
+                # 清理非法字符
+                new_name = re.sub(r'[\\/*?:"<>|]', "_", new_name)
+
+                return new_name + ext
+
             import shutil
 
             post_paths: list[str] = []
@@ -14419,7 +14506,7 @@ class ImportPage(BaseImageBrowserPage):
                     rel = os.path.relpath(src, base) if base else os.path.basename(src)
                 except Exception:
                     rel = os.path.basename(src)
-                
+
                 current_dest_root = dest_root
                 if is_to_source:
                     try:
@@ -14427,14 +14514,34 @@ class ImportPage(BaseImageBrowserPage):
                     except Exception:
                         current_dest_root = dest_root
 
+                # 根据重命名规则生成新文件名
+                src_result = (results_by_src or {}).get(src)
+                new_filename = _generate_new_filename(src, idx + 1, src_result)
+
                 if action in ("copy_by_status", "move_by_status", "copy_by_status_to_source", "move_by_status_to_source"):
-                    st = _status_for_result((results_by_src or {}).get(src))
+                    st = _status_for_result(src_result)
                     if is_to_source:
-                         dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), os.path.basename(src)))
+                         dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), new_filename))
                     else:
-                         dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), rel))
+                         # 保留目录结构，但使用新文件名
+                         try:
+                             rel_dir = os.path.dirname(rel)
+                             if rel_dir:
+                                 dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), rel_dir, new_filename))
+                             else:
+                                 dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), new_filename))
+                         except Exception:
+                             dest = os.path.normpath(os.path.join(current_dest_root, status_folder.get(st, st), new_filename))
                 else:
-                    dest = os.path.normpath(os.path.join(current_dest_root, rel))
+                    # 保留目录结构，但使用新文件名
+                    try:
+                        rel_dir = os.path.dirname(rel)
+                        if rel_dir:
+                            dest = os.path.normpath(os.path.join(current_dest_root, rel_dir, new_filename))
+                        else:
+                            dest = os.path.normpath(os.path.join(current_dest_root, new_filename))
+                    except Exception:
+                        dest = os.path.normpath(os.path.join(current_dest_root, new_filename))
 
                 try:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -14486,14 +14593,10 @@ class ImportPage(BaseImageBrowserPage):
                                         rr["orig_h"] = src_meta.get("orig_h")
                                 except Exception:
                                     pass
-                            # 只有 move 操作才将新文件添加到 post_results
-                            # copy 操作不应该将新文件插入数据库
-                            if action in ("move", "move_by_status", "move_by_status_to_source"):
-                                rr["path"] = dest
-                                post_results[dest] = rr
-                            else:
-                                # copy 操作保持原文件路径
-                                post_results[src] = rr
+                            # move 和 copy 操作都将新文件路径添加到 post_results
+                            # 使用目标路径作为 key，确保数据库保存时使用修改后的文件名
+                            rr["path"] = dest
+                            post_results[dest] = rr
                     except Exception:
                         pass
                 except Exception as e:
@@ -14517,6 +14620,7 @@ class ImportPage(BaseImageBrowserPage):
                                         rr2["orig_h"] = src_meta.get("orig_h")
                                 except Exception:
                                     pass
+                            # 使用原始路径作为 key（失败情况下）
                             post_results[src] = rr2
                     except Exception:
                         pass
@@ -14877,6 +14981,63 @@ class ImportPage(BaseImageBrowserPage):
                             NotificationManager.instance().show_warning("错误", f"启动脚本失败: {e}")
                         except Exception:
                             pass
+            elif action == "open_dest_dir":
+                # 打开目标目录
+                try:
+                    opts = getattr(self, "_focus_detect_last_options", {}) or {}
+                    post_action = str(opts.get("post_action") or "").strip().lower()
+                    dest_dir = ""
+
+                    # 根据文件处理选项确定目标目录
+                    if post_action in ("copy", "move", "copy_by_status", "move_by_status"):
+                        dest_dir = str(opts.get("post_dir") or "").strip()
+                    elif post_action in ("copy_by_status_to_source", "move_by_status_to_source"):
+                        # 对于"到原目录"选项，使用虚拟文件根目录（第一个检测文件夹）
+                        try:
+                            virtual_roots = getattr(self, "_focus_detect_virtual_roots", None)
+                            if virtual_roots and isinstance(virtual_roots, list) and len(virtual_roots) > 0:
+                                dest_dir = str(virtual_roots[0])
+                        except Exception:
+                            pass
+
+                    # 调试日志
+                    try:
+                        from utils.log_manager import LogManager
+                        LogManager.instance().info(f"[FocusDetectUI] open_dest_dir: post_action={post_action}, dest_dir={dest_dir}, exists={os.path.isdir(dest_dir) if dest_dir else False}")
+                    except Exception:
+                        pass
+
+                    if dest_dir and os.path.isdir(dest_dir):
+                        # 使用与软件其他部分相同的方式打开文件夹
+                        try:
+                            import platform
+                            if platform.system() == "Windows":
+                                os.startfile(dest_dir)
+                            elif platform.system() == "Darwin":
+                                import subprocess
+                                subprocess.Popen(["open", dest_dir])
+                            else:
+                                import subprocess
+                                subprocess.Popen(["xdg-open", dest_dir])
+                            try:
+                                NotificationManager.instance().show_toast(f"已打开目标目录: {os.path.basename(dest_dir)}")
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                NotificationManager.instance().show_warning("错误", f"无法打开文件夹: {e}")
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            NotificationManager.instance().show_warning("提示", f"目标目录不存在或无效: {dest_dir}")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    try:
+                        NotificationManager.instance().show_warning("错误", f"打开目标目录失败: {e}")
+                    except Exception:
+                        pass
         except Exception:
             pass
 

@@ -727,11 +727,76 @@ class FocusDetectDialog(BasePopupDialog):
         post_dir_row_layout.addWidget(self.post_dir_clear_btn)
         post_layout.addRow("目标目录:", post_dir_row)
 
+        # 文件重命名规则
+        self.rename_rule_widget = QWidget()
+        rename_rule_layout = QVBoxLayout(self.rename_rule_widget)
+        rename_rule_layout.setContentsMargins(0, 0, 0, 0)
+        rename_rule_layout.setSpacing(6)
+
+        self.rename_rule_edit = QLineEdit("{Original}_{Index}")
+        self.rename_rule_edit.setPlaceholderText("例如: {Original}_{Index} 或 {Date}_{Index}")
+        self.rename_rule_edit.setStyleSheet(f"""
+            QLineEdit {{
+                padding: 6px;
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                font-size: 12px;
+                background-color: {control_bg};
+                color: {text_color};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {primary_color};
+            }}
+        """)
+        rename_rule_layout.addWidget(self.rename_rule_edit)
+
+        # 快捷命名按钮
+        tags_layout = QHBoxLayout()
+        tags_layout.setContentsMargins(0, 0, 0, 0)
+        tags_layout.setSpacing(6)
+
+        tags = [
+            ("{Date}", "日期"),
+            ("{Time}", "时间"),
+            ("{Index}", "序号"),
+            ("{Original}", "原名"),
+            ("{Score}", "评分"),
+            ("{NormScore}", "标准分"),
+            ("{AreaRatio}", "鸟占比"),
+            ("{ISO}", "ISO"),
+        ]
+
+        for tag, name in tags:
+            btn = QPushButton(name)
+            btn.setToolTip(f"插入 {tag}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {control_bg};
+                    border: 1px solid {border_color};
+                    border-radius: 3px;
+                    padding: 3px 6px;
+                    font-size: 11px;
+                    color: {text_color};
+                }}
+                QPushButton:hover {{
+                    background-color: {hover_bg};
+                    border: 1px solid {primary_color};
+                }}
+            """)
+            btn.clicked.connect(lambda checked, t=tag: self._insert_rename_tag(t))
+            tags_layout.addWidget(btn)
+
+        tags_layout.addStretch()
+        rename_rule_layout.addLayout(tags_layout)
+        post_layout.addRow("重命名规则:", self.rename_rule_widget)
+
         self.finish_action_combo = ThemedComboBox(font_size=12, padding="6px 10px")
         self.finish_action_combo.addItem("无操作", "none")
         self.finish_action_combo.addItem("关闭程序", "quit_app")
         self.finish_action_combo.addItem("关闭计算机", "shutdown_pc")
         self.finish_action_combo.addItem("执行脚本", "run_script")
+        self.finish_action_combo.addItem("打开目标目录", "open_dest_dir")
         post_layout.addRow("检测结束执行:", self.finish_action_combo)
 
         finish_script_row = QWidget()
@@ -850,11 +915,27 @@ class FocusDetectDialog(BasePopupDialog):
 
     def _update_post_action_ui(self):
         action = self._get_post_action()
-        enabled = action in ("copy", "move", "copy_by_status", "move_by_status")
+        enabled = action in ("copy", "move", "copy_by_status", "move_by_status", "copy_by_status_to_source", "move_by_status_to_source")
         try:
             self.post_dir_choose_btn.setEnabled(bool(enabled))
             self.post_dir_clear_btn.setEnabled(bool(enabled))
             self.post_dir_label.setEnabled(bool(enabled))
+        except Exception:
+            pass
+        # 只有在选择了"不处理"以外的选项时才显示重命名规则
+        show_rename = action != "none"
+        try:
+            self.rename_rule_widget.setVisible(bool(show_rename))
+        except Exception:
+            pass
+        # 更新"检测结束执行"下拉框中"打开目标目录"选项的可用性
+        self._update_open_dest_dir_availability()
+
+    def _insert_rename_tag(self, tag: str):
+        """在重命名规则输入框中插入标签"""
+        try:
+            self.rename_rule_edit.insert(tag)
+            self.rename_rule_edit.setFocus()
         except Exception:
             pass
 
@@ -873,6 +954,39 @@ class FocusDetectDialog(BasePopupDialog):
             self.finish_script_choose_btn.setEnabled(bool(enabled))
             self.finish_script_clear_btn.setEnabled(bool(enabled))
             self.finish_script_label.setEnabled(bool(enabled))
+        except Exception:
+            pass
+
+    def _update_open_dest_dir_availability(self):
+        """更新'打开目标目录'选项的可用性：只有在文件处理不是'不处理'时才可用"""
+        try:
+            post_action = self._get_post_action()
+            # 只有在选择了文件处理选项（不是'不处理'）时，才能选择"打开目标目录"
+            can_open_dest = post_action != "none"
+
+            # 找到"打开目标目录"选项的索引
+            open_dest_idx = -1
+            for i in range(self.finish_action_combo.count()):
+                if str(self.finish_action_combo.itemData(i) or "") == "open_dest_dir":
+                    open_dest_idx = i
+                    break
+
+            if open_dest_idx >= 0:
+                # 获取当前选中的项
+                current_data = str(self.finish_action_combo.currentData() or "")
+
+                if can_open_dest:
+                    # 启用该选项
+                    self.finish_action_combo.model().item(open_dest_idx).setEnabled(True)
+                else:
+                    # 禁用该选项：如果当前选中的是"打开目标目录"，则切换到"无操作"
+                    if current_data == "open_dest_dir":
+                        for i in range(self.finish_action_combo.count()):
+                            if str(self.finish_action_combo.itemData(i) or "") == "none":
+                                self.finish_action_combo.setCurrentIndex(i)
+                                break
+                    # 置灰该选项
+                    self.finish_action_combo.model().item(open_dest_idx).setEnabled(False)
         except Exception:
             pass
 
@@ -1370,7 +1484,7 @@ class FocusDetectDialog(BasePopupDialog):
             fa = str(self.settings_manager.get("focus_detect/finish_action", "none") or "none").strip().lower()
         except Exception:
             fa = "none"
-        if fa not in ("none", "quit_app", "shutdown_pc", "run_script"):
+        if fa not in ("none", "quit_app", "shutdown_pc", "run_script", "open_dest_dir"):
             fa = "none"
         try:
             if hasattr(self, "finish_action_combo"):
@@ -1397,6 +1511,16 @@ class FocusDetectDialog(BasePopupDialog):
         try:
             self.post_dir_label.setText(post_dir)
             self.post_dir_label.setToolTip(post_dir)
+        except Exception:
+            pass
+        # 加载重命名规则
+        try:
+            rename_rule = str(self.settings_manager.get("focus_detect/rename_rule", "") or "").strip()
+        except Exception:
+            rename_rule = ""
+        try:
+            if rename_rule and hasattr(self, "rename_rule_edit"):
+                self.rename_rule_edit.setText(rename_rule)
         except Exception:
             pass
         try:
@@ -1789,6 +1913,7 @@ class FocusDetectDialog(BasePopupDialog):
             "finish_action": str(self.finish_action_combo.currentData() if hasattr(self, "finish_action_combo") else "none" or "none"),
             "finish_script": str(self.finish_script_label.text() if hasattr(self, "finish_script_label") else "" or "").strip(),
             "file_extensions": self._collect_selected_extensions(),
+            "rename_rule": str(self.rename_rule_edit.text() if hasattr(self, "rename_rule_edit") else "{Original}_{Index}" or "{Original}_{Index}").strip(),
         }
 
         try:

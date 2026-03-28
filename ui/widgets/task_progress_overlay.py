@@ -105,17 +105,34 @@ class TaskProgressOverlay(QFrame):
 
         max_w = 560
         width = min(max_w, max(1, int(rect.width()) - 24))
+        
+        # 计算文本需要的行数
         try:
-            # 基础高度
-            if "\n" in str(self._full_text or ""):
-                h = 78
+            fm = QFontMetrics(self.label.font())
+            line_height = fm.height()
+            # 估算每行能显示的字符数（基于平均字符宽度）
+            avg_char_width = fm.averageCharWidth()
+            chars_per_line = max(1, int(width - 24) // max(1, int(avg_char_width)))
+            
+            text = str(self._full_text or "")
+            # 计算需要的行数
+            if "\n" in text:
+                lines = text.split("\n")
+                line_count = len(lines)
             else:
-                h = 56
+                # 根据字符数估算行数
+                line_count = max(1, (len(text) + chars_per_line - 1) // chars_per_line)
+            
+            # 基础高度：进度条 + 间距 + 文本行数
+            text_height = max(1, int(line_count)) * int(line_height) + 10
+            h = 8 + 6 + text_height  # 进度条高度 + 间距 + 文本高度
+            
             # 如果有设备信息，增加高度
             if str(self._device_text or "").strip():
-                h += 20
+                h += int(line_height) + 4
         except Exception:
             h = 56
+            
         x = int((int(rect.width()) - int(width)) / 2)
         try:
             y = int((int(rect.height()) - int(h)) / 2 + int(self._margin or 0))
@@ -136,19 +153,11 @@ class TaskProgressOverlay(QFrame):
             pass
 
     def _update_elided_text(self):
+        # 直接显示完整文本，不截断
         try:
-            if "\n" in str(self._full_text or ""):
-                self.label.setText(str(self._full_text or ""))
-                return
-            fm = QFontMetrics(self.label.font())
-            w = max(1, int(self.label.width() or 1))
-            txt = fm.elidedText(str(self._full_text or ""), Qt.TextElideMode.ElideRight, int(w))
-            self.label.setText(txt)
+            self.label.setText(str(self._full_text or ""))
         except Exception:
-            try:
-                self.label.setText(str(self._full_text or ""))
-            except Exception:
-                pass
+            pass
 
     def resizeEvent(self, event):
         try:

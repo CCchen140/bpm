@@ -681,7 +681,11 @@ class ImageCacheManager:
         """
         if not paths:
             return
-            
+
+        # 如果没有启用预加载线程，不启动任务
+        if not self._worker_threads:
+            return
+
         # 确定优先级
         if priority is None:
             if cache_type == 'fav':
@@ -690,12 +694,12 @@ class ImageCacheManager:
                 priority = self.PRIORITY_SPECIES
             else:
                 priority = self.PRIORITY_GENERAL
-        
+
         with self._lock:
             self._preload_total += len(paths)
             if self._preload_task_id is None:
                 self._preload_task_id = StatusManager.instance().start_task("正在加载缓存...")
-            
+
         for path in paths:
             # 放入优先级队列: (priority, path, cache_type, retry_count)
             self._task_queue.put((priority, self._normalize_path(path), cache_type, 0))
