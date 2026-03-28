@@ -20,11 +20,33 @@ def _project_root() -> str:
 
 
 def get_cache_dir(scope: str = "import_focus") -> str:
-    base = os.path.join(_project_root(), "cache")
-    s = str(scope or "import_focus").lower()
-    if s in ["import_focus", "focus_scaled", "focus"]:
-        return os.path.join(base, "focus_scaled")
-    return os.path.join(base, f"focus_scaled_{s}")
+    """获取对焦检测缩略图缓存目录
+
+    使用绝对路径，避免多进程环境下工作目录不同导致的问题
+    """
+    try:
+        # 获取当前文件所在目录，然后上一级到项目根目录
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_file_dir, os.pardir))
+        base = os.path.join(project_root, "cache")
+        s = str(scope or "import_focus").lower()
+        if s in ["import_focus", "focus_scaled", "focus"]:
+            cache_dir = os.path.join(base, "focus_scaled")
+        else:
+            cache_dir = os.path.join(base, f"focus_scaled_{s}")
+        # 确保目录存在
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            pass
+        return cache_dir
+    except Exception:
+        # 如果失败，使用基于当前工作目录的路径（兼容旧逻辑）
+        base = os.path.join(_project_root(), "cache")
+        s = str(scope or "import_focus").lower()
+        if s in ["import_focus", "focus_scaled", "focus"]:
+            return os.path.join(base, "focus_scaled")
+        return os.path.join(base, f"focus_scaled_{s}")
 
 
 def _max_count_from_settings(default: int = 500) -> int:

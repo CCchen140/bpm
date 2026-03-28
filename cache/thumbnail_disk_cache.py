@@ -230,6 +230,7 @@ class ThumbnailDiskCache:
         查询并读取磁盘缓存：
         - 查询条件只使用稳定键 + 变体，不使用 file_path 作为查找条件
         - 通过 mtime/size 校验文件是否变化，避免返回过时缓存
+        - 如果无法获取文件 stat（如文件暂时不可访问），仍然尝试返回缓存的图片
         """
         if not self.is_enabled():
             return None
@@ -240,22 +241,32 @@ class ThumbnailDiskCache:
         if not w or not h:
             return None
         variant = self._variant_key(w, h, cache_type, scale_quality, base_px)
+        
+        # 尝试获取文件 stat 信息用于校验
+        src_size = None
+        src_mtime = None
         try:
             st = os.stat(file_path)
             src_size = int(st.st_size)
             src_mtime = float(st.st_mtime)
         except Exception:
-            return None
+            # 文件暂时无法访问（如被移动或锁定），仍然尝试使用缓存
+            pass
+            
         row = self.db.get_thumbnail_disk_cache(cache_key, variant, scope=self.scope)
         if not row:
             return None
-        try:
-            if int(row.get("source_size") or 0) != src_size:
+            
+        # 如果成功获取了文件 stat 信息，进行校验
+        if src_size is not None and src_mtime is not None:
+            try:
+                if int(row.get("source_size") or 0) != src_size:
+                    return None
+                if float(row.get("source_mtime") or 0.0) != src_mtime:
+                    return None
+            except Exception:
                 return None
-            if float(row.get("source_mtime") or 0.0) != src_mtime:
-                return None
-        except Exception:
-            return None
+                
         rel = row.get("cache_rel_path")
         if not rel:
             return None

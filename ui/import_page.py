@@ -1124,19 +1124,16 @@ class ImportPage(BaseImageBrowserPage):
     def _maybe_hide_startup_mask(self):
         """尝试隐藏启动遮罩
         
-        检查是否还有待加载的初始缩略图，如果没有了，则隐藏遮罩。
+        当缩略图控件创建完成并显示占位符后，即可隐藏遮罩。
+        不需要等待实际图片加载完成，占位符显示后用户即可交互。
         """
         if not self._startup_mask_visible:
             return
         
         if not self._startup_initial_load_processed:
             return
-        if not self._startup_first_page_ready:
-            return
-        if self._startup_pending_paths:
-            return
             
-        # 延迟一小段时间隐藏，确保渲染完成，避免画面闪烁
+        # 延迟一小段时间隐藏，确保占位符渲染完成，避免画面闪烁
         QTimer.singleShot(50, self._force_hide_startup_mask)
 
 
@@ -10267,10 +10264,25 @@ class ImportPage(BaseImageBrowserPage):
                             base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
                         except Exception:
                             base_px = 0
+                        # 获取对焦检测缩略图的目标尺寸
                         try:
+                            focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
+                        except Exception:
+                            focus_target = 640
+                        try:
+                            from cache.focus_scaled_cache import try_load_qimage
                             for _, path, _ in paths_to_load[:10]:  # 检查前10个作为样本
+                                # 检查 thumbnail_disk_cache
                                 if self.thumbnail_loader.disk_cache.has(path, load_thumb_size, cache_type, scale_quality=scale_quality, base_px=base_px):
                                     cache_hits += 1
+                                else:
+                                    # 检查 focus_scaled_cache（对焦检测时生成的缩略图缓存）
+                                    try:
+                                        img, _meta = try_load_qimage(path, focus_target, scope="import_focus")
+                                        if img is not None and not img.isNull():
+                                            cache_hits += 1
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
                         # 如果大部分可能命中缓存，显示不同的提示
@@ -10308,17 +10320,12 @@ class ImportPage(BaseImageBrowserPage):
         
         # 标记初始可视区域计算已完成
         if not self._startup_initial_load_processed:
-            # 收集初始可见区域的路径，用于判断遮罩隐藏时机
-            if self._startup_mask_visible:
-                 # 将 pending_visible 中的路径加入 _startup_pending_paths
-                 # 这样只有当这些图片加载完成后，遮罩才会消失
-                 self._startup_pending_paths.update(pending_visible)
-                 
-                 # 如果没有任何待加载的（例如全部缓存命中），则立即隐藏
-                 if not self._startup_pending_paths:
-                     self._maybe_hide_startup_mask()
-            
             self._startup_initial_load_processed = True
+            
+            # 缩略图控件已创建并显示占位符，可以隐藏启动蒙层
+            # 不需要等待实际图片加载完成，占位符显示后即可交互
+            if self._startup_mask_visible:
+                self._maybe_hide_startup_mask()
             
         # 如果遮罩仍可见，检查是否所有可视图片都已显示占位符或已加载
         # 其实只要触发了 update，paintEvent 就会绘制占位符

@@ -151,10 +151,27 @@ def _get_project_root() -> str:
 
 
 def get_focus_scaled_cache_dir() -> str:
+    """获取对焦检测缩略图缓存目录
+
+    使用绝对路径，避免多进程环境下工作目录不同导致的问题
+    """
     try:
-        return os.path.join(_get_project_root(), "cache", "focus_scaled")
+        # 获取当前文件所在目录，然后上两级到项目根目录
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_file_dir, os.pardir, os.pardir))
+        cache_dir = os.path.join(project_root, "cache", "focus_scaled")
+        # 确保目录存在
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            pass
+        return cache_dir
     except Exception:
-        return ""
+        # 如果失败，使用基于当前工作目录的路径（兼容旧逻辑）
+        try:
+            return os.path.join(_get_project_root(), "cache", "focus_scaled")
+        except Exception:
+            return ""
 
 
 def _is_focus_save_output_enabled() -> bool:

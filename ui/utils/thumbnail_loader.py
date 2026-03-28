@@ -230,19 +230,20 @@ class ThumbnailRunnable(QRunnable):
             if os.path.exists(self.path):
                 ext = os.path.splitext(self.path)[1].upper()
                 image = None
-                if is_import_ctx:
-                    try:
-                        focus_target = 640
-                        if hasattr(self.cache_manager, "settings_manager") and self.cache_manager.settings_manager:
-                            focus_target = int(self.cache_manager.settings_manager.get("focus_detect/target_size", 640) or 640)
-                        from cache.focus_scaled_cache import try_load_qimage
+                # 尝试从 focus_scaled_cache 加载缩略图（对焦检测时生成的缓存）
+                # 不仅限于导入页面，图库页面也可以使用这个缓存
+                try:
+                    focus_target = 640
+                    if hasattr(self.cache_manager, "settings_manager") and self.cache_manager.settings_manager:
+                        focus_target = int(self.cache_manager.settings_manager.get("focus_detect/target_size", 640) or 640)
+                    from cache.focus_scaled_cache import try_load_qimage
 
-                        img2, _meta2 = try_load_qimage(self.path, int(focus_target), scope="import_focus")
-                        if img2 is not None and not img2.isNull():
-                            image = img2
-                            from_cache = True
-                    except Exception:
-                        pass
+                    img2, _meta2 = try_load_qimage(self.path, int(focus_target), scope="import_focus")
+                    if img2 is not None and not img2.isNull():
+                        image = img2
+                        from_cache = True
+                except Exception:
+                    pass
                 target_size = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
                 if not disable_scaling:
                     req_max = _get_req_max()

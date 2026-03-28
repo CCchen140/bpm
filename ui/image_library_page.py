@@ -1308,18 +1308,18 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self.grid_container.setStyleSheet(self._grid_container_style_default)
 
     def _maybe_hide_startup_mask(self):
+        """尝试隐藏启动遮罩
+        
+        当缩略图控件创建完成并显示占位符后，即可隐藏遮罩。
+        不需要等待实际图片加载完成，占位符显示后用户即可交互。
+        """
         if not self._startup_mask_enabled:
             return
         if not self._startup_mask_visible:
             return
-        if self.current_loaded_count <= 0:
-            return
-        if self._startup_pending_paths:
-            return
+            
         def _hide():
             if not self._startup_mask_enabled or not self._startup_mask_visible:
-                return
-            if self._startup_pending_paths:
                 return
             self._startup_mask.hide()
             self._startup_mask_visible = False
@@ -1328,6 +1328,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._startup_mask_timeout_timer.stop()
             if hasattr(self, "_grid_container_style_default") and self._grid_container_style_default is not None:
                 self.grid_container.setStyleSheet(self._grid_container_style_default)
+        # 延迟一小段时间隐藏，确保占位符渲染完成，避免画面闪烁
         QTimer.singleShot(60, _hide)
 
     def _apply_theme_styles(self):
@@ -7078,10 +7079,25 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
                     except Exception:
                         base_px = 0
+                    # 获取对焦检测缩略图的目标尺寸
                     try:
-                        for path in paths_to_load[:10]:  # 检查前10个作为样本
+                        focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
+                    except Exception:
+                        focus_target = 640
+                    try:
+                        from cache.focus_scaled_cache import try_load_qimage
+                        for _priority, path, _is_in_view in paths_to_load[:10]:  # 检查前10个作为样本
+                            # 检查 thumbnail_disk_cache
                             if self.thumbnail_loader.disk_cache.has(path, self.current_thumb_size, cache_type, scale_quality=scale_quality, base_px=base_px):
                                 cache_hits += 1
+                            else:
+                                # 检查 focus_scaled_cache（对焦检测时生成的缩略图缓存）
+                                try:
+                                    img, _meta = try_load_qimage(path, focus_target, scope="import_focus")
+                                    if img is not None and not img.isNull():
+                                        cache_hits += 1
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                     # 如果大部分可能命中缓存，显示不同的提示
@@ -7296,7 +7312,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self.stats_changed.emit(len(self.all_image_files), self.current_loaded_count, self.get_selected_count())
             # 缩略图占位符已显示，可以隐藏加载蒙层
             # 不需要等待缩略图图片加载完成
-            self._force_hide_startup_mask()
+            if self._startup_mask_enabled and self._startup_mask_visible:
+                self._maybe_hide_startup_mask()
             
         except Exception as e:
             try:
