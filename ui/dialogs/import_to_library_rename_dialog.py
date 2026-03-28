@@ -154,6 +154,49 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
         self.index_width_spin.setStyleSheet(self.start_index_spin.styleSheet())
         top_layout.addWidget(self.index_width_spin, 0)
 
+        # 快捷命名按钮行
+        tags_layout = QHBoxLayout()
+        tags_layout.setContentsMargins(0, 0, 0, 0)
+        tags_layout.setSpacing(8)
+        layout.addLayout(tags_layout)
+
+        tags = [
+            ("{Species}", "物种"),
+            ("{Date}", "日期"),
+            ("{Time}", "时间"),
+            ("{Index}", "序号"),
+            ("{Original}", "原名"),
+            ("{Order}", "目"),
+            ("{Family}", "科"),
+            ("{Genus}", "属"),
+            ("{Score}", "评分"),
+            ("{Label}", "色标"),
+            ("{Position}", "位置"),
+        ]
+
+        for tag, name in tags:
+            btn = QPushButton(name)
+            btn.setToolTip(f"插入 {tag}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {control_bg};
+                    border: 1px solid {border_color};
+                    border-radius: 3px;
+                    padding: 4px 8px;
+                    font-size: 12px;
+                    color: {text_color};
+                }}
+                QPushButton:hover {{
+                    background-color: {hover_bg};
+                    border: 1px solid {primary_color};
+                }}
+            """)
+            btn.clicked.connect(lambda checked, t=tag: self._insert_tag(t))
+            tags_layout.addWidget(btn)
+
+        tags_layout.addStretch()
+
         meta_row = QWidget()
         meta_layout = QHBoxLayout(meta_row)
         meta_layout.setContentsMargins(0, 0, 0, 0)
@@ -823,12 +866,33 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
             return ""
         return os.path.join(root, order_name, family_name, genus_name, species_name)
 
+    def _parse_date_time(self, shot_time: str) -> tuple[str, str]:
+        """解析拍摄时间，返回日期和时间字符串"""
+        s = str(shot_time or "").strip()
+        if not s:
+            return "", ""
+        try:
+            clean = s.replace(":", "").replace("-", "").replace(" ", "")
+            date_str = clean[:8] if len(clean) >= 8 else ""
+            time_str = clean[8:14] if len(clean) >= 14 else ""
+            return date_str, time_str
+        except Exception:
+            return "", ""
+
     def _sanitize_filename_base(self, name: str) -> str:
         s = str(name or "").strip()
         s = re.sub(r'[<>:"/\\\\|?*]', "_", s)
         s = re.sub(r"\s+", " ", s).strip()
         s = s.rstrip(".")
         return s
+
+    def _insert_tag(self, tag: str):
+        """在命名规则输入框中插入标签"""
+        try:
+            self.rule_edit.insert(tag)
+            self.rule_edit.setFocus()
+        except Exception:
+            pass
 
     def _build_candidate_name(self, file_info: dict, current_index: int, meta: dict[str, str]) -> tuple[str, int]:
         old_path = str(file_info.get("path") or "")
@@ -838,12 +902,26 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
         if not pattern:
             pattern = "{Original}_{Index}"
 
+        # 从 file_info 中获取日期时间信息
+        shot_time = str(file_info.get("shot_time") or file_info.get("create_time") or "")
+        date_str, time_str = self._parse_date_time(shot_time)
+
+        # 从 file_info 和 meta 中获取评分、色标、位置信息
+        score = str(file_info.get("score") or meta.get("score") or "").strip()
+        label = str(file_info.get("label") or meta.get("label") or "").strip()
+        position = str(file_info.get("position") or meta.get("position") or "").strip()
+
         name_base = pattern
         name_base = name_base.replace("{Species}", str(meta.get("species") or ""))
         name_base = name_base.replace("{Genus}", str(meta.get("genus") or ""))
         name_base = name_base.replace("{Family}", str(meta.get("family") or ""))
         name_base = name_base.replace("{Order}", str(meta.get("order") or ""))
         name_base = name_base.replace("{Original}", str(old_no_ext))
+        name_base = name_base.replace("{Date}", str(date_str))
+        name_base = name_base.replace("{Time}", str(time_str))
+        name_base = name_base.replace("{Score}", str(score))
+        name_base = name_base.replace("{Label}", str(label))
+        name_base = name_base.replace("{Position}", str(position))
 
         if "{Index}" in name_base:
             width = int(self.index_width_spin.value())
