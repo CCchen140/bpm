@@ -3658,6 +3658,11 @@ class ImportPage(BaseImageBrowserPage):
                     gv.setFocus()
         except Exception:
             pass
+        # 退出大图模式后重新加载可见缩略图，避免窗口大小变化后缩略图不加载
+        try:
+            QTimer.singleShot(150, self._load_visible_thumbnails)
+        except Exception:
+            pass
 
     def _sync_focus_overlay_toolbar_buttons_from_settings(self):
         sm = getattr(self, "settings_manager", None)

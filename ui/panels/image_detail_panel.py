@@ -531,6 +531,8 @@ class ImageLoaderThread(QThread):
 class ImageInfoOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 设置窗口大小策略为根据内容调整
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setup_ui()
 
     def setup_ui(self):
@@ -540,6 +542,8 @@ class ImageInfoOverlay(QWidget):
         
         # 背景容器，半透明圆角
         self.container = QWidget()
+        # 设置容器大小策略为根据内容调整
+        self.container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         cm = ColorManager.instance()
         overlay_bg = cm.to_qss_color("image_detail.overlay.background", default="#00000064")
         self.container.setStyleSheet(f"""
@@ -560,7 +564,10 @@ class ImageInfoOverlay(QWidget):
         # 详细信息 (ISO, 光圈等)
         self.lbl_details = QLabel()
         self.lbl_details.setStyleSheet("color: white; font-size: 12px; background: transparent;")
-        self.lbl_details.setWordWrap(True)
+        # 禁用自动换行，让文本在一行显示
+        self.lbl_details.setWordWrap(False)
+        # 设置大小策略为根据内容调整
+        self.lbl_details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         container_layout.addWidget(self.lbl_details)
         
         layout.addWidget(self.container)
@@ -574,7 +581,15 @@ class ImageInfoOverlay(QWidget):
         self.lbl_filename.setText(filename)
         self.lbl_details.setText(details_text)
         
+        # 调整 QLabel 大小以适应内容，避免文本被截断
+        try:
+            self.lbl_filename.adjustSize()
+            self.lbl_details.adjustSize()
+        except Exception:
+            pass
+        
         self.container.show()
+        self.container.adjustSize()
         self.adjustSize()
         self.show()
 
@@ -1341,6 +1356,216 @@ class ImageDetailPanel(QWidget):
         # 所有重试都失败，返回 None
         return None
 
+    def _extract_focus_context_from_record(self, record: dict) -> dict:
+        """
+        从数据库记录中提取对焦分类信息，用于信息面板显示
+        
+        参数:
+            record: 数据库记录字典
+            
+        返回:
+            包含 focus_status、focus_reason、score、norm_score、area_ratio 的字典
+        """
+        if not isinstance(record, dict):
+            return {}
+        
+        context = {}
+        
+        # 从记录中获取基本分数信息
+        try:
+            score = record.get("score")
+            if score is not None:
+                context["score"] = float(score)
+        except Exception:
+            pass
+            
+        try:
+            norm_score = record.get("norm_score")
+            if norm_score is not None:
+                context["norm_score"] = float(norm_score)
+        except Exception:
+            pass
+            
+        try:
+            area_ratio = record.get("area_ratio")
+            if area_ratio is not None:
+                context["area_ratio"] = float(area_ratio)
+        except Exception:
+            pass
+        
+        # 从 focus_detect_json 解析对焦分类信息
+        fdj = record.get("focus_detect_json")
+        fd = None
+        if isinstance(fdj, str) and fdj.strip():
+            try:
+                fd = json.loads(fdj.strip())
+            except Exception:
+                fd = None
+        elif isinstance(fdj, dict):
+            fd = fdj
+            
+        if isinstance(fd, dict):
+            # 如果 focus_detect_json 中有这些字段，优先使用
+            try:
+                if "score" in fd:
+                    context["score"] = float(fd["score"])
+            except Exception:
+                pass
+            try:
+                if "norm_score" in fd:
+                    context["norm_score"] = float(fd["norm_score"])
+            except Exception:
+                pass
+            try:
+                if "area" in fd:
+                    context["area_ratio"] = float(fd["area"])
+            except Exception:
+                pass
+                
+            # 计算对焦分类状态
+            focus_status, focus_reason = self._compute_focus_status_from_fd(fd, context.get("area_ratio", 0))
+            if focus_status:
+                context["focus_status"] = focus_status
+            if focus_reason:
+                context["focus_reason"] = focus_reason
+                
+        return context
+    
+    def _compute_focus_status_from_fd(self, fd: dict, area_ratio: float = 0) -> tuple:
+        """
+        根据 focus_detect_json 数据计算对焦分类状态
+        
+        参数:
+            fd: focus_detect_json 解析后的字典
+            area_ratio: 鸟占比
+            
+        返回:
+            (focus_status, focus_reason) 元组
+        """
+        if not isinstance(fd, dict):
+            return "", ""
+            
+        try:
+            has_bird = bool(fd.get("has_bird", True))
+        except Exception:
+            has_bird = True
+            
+        try:
+            score = float(fd.get("score") or 0.0)
+        except Exception:
+            score = 0.0
+            
+        try:
+            norm_score = float(fd.get("norm_score") or 0.0)
+        except Exception:
+            norm_score = 0.0
+            
+        try:
+            area = float(fd.get("area") or area_ratio or 0.0)
+        except Exception:
+            area = 0.0
+            
+        # 获取阈值设置
+        try:
+            sm = SettingsManager.instance()
+            minimal_th = float(sm.get("focus_classification/minimal_area_threshold", 0.001) or 0.001)
+            blurry_th = float(sm.get("focus_classification/blurry_norm_score_threshold", 0.35) or 0.35)
+            normal_th = float(sm.get("focus_classification/normal_norm_score_threshold", 0.6) or 0.6)
+        except Exception:
+            minimal_th = 0.001
+            blurry_th = 0.35
+            normal_th = 0.6
+            
+        # 判断分类
+        if not has_bird or (score <= 0.0 and norm_score <= 0.0):
+            return "无鸟", "未检测到鸟或得分为0"
+            
+        if area > 0.0 and area < minimal_th:
+            return "极小", f"鸟占比{area*100:.2f}% < 阈值{minimal_th*100:.2f}%"
+            
+        # 根据 norm_score 判断清晰度
+        if norm_score < blurry_th:
+            return "虚焦", f"标准分{norm_score:.4f} < 虚焦阈值{blurry_th}"
+        elif norm_score < normal_th:
+            return "普通", f"标准分{norm_score:.4f} 在普通范围[{blurry_th}, {normal_th})"
+        else:
+            return "锐利", f"标准分{norm_score:.4f} >= 锐利阈值{normal_th}"
+
+    def _extract_focus_context_from_image_info(self, img_info: dict) -> dict:
+        """
+        从 image_list 中的图片信息字典提取对焦分类信息
+        
+        参数:
+            img_info: 图片信息字典，包含 focus_detect_json、score、norm_score 等字段
+            
+        返回:
+            包含 focus_status、focus_reason、score、norm_score、area_ratio 的字典
+        """
+        if not isinstance(img_info, dict):
+            return {}
+        
+        context = {}
+        
+        # 从 img_info 中获取基本分数信息
+        try:
+            score = img_info.get("score")
+            if score is not None:
+                context["score"] = float(score)
+        except Exception:
+            pass
+            
+        try:
+            norm_score = img_info.get("norm_score")
+            if norm_score is not None:
+                context["norm_score"] = float(norm_score)
+        except Exception:
+            pass
+            
+        try:
+            area_ratio = img_info.get("area_ratio")
+            if area_ratio is not None:
+                context["area_ratio"] = float(area_ratio)
+        except Exception:
+            pass
+        
+        # 从 focus_detect_json 解析对焦分类信息
+        fdj = img_info.get("focus_detect_json")
+        fd = None
+        if isinstance(fdj, str) and fdj.strip():
+            try:
+                fd = json.loads(fdj.strip())
+            except Exception:
+                fd = None
+        elif isinstance(fdj, dict):
+            fd = fdj
+            
+        if isinstance(fd, dict):
+            # 如果 focus_detect_json 中有这些字段，优先使用
+            try:
+                if "score" in fd:
+                    context["score"] = float(fd["score"])
+            except Exception:
+                pass
+            try:
+                if "norm_score" in fd:
+                    context["norm_score"] = float(fd["norm_score"])
+            except Exception:
+                pass
+            try:
+                if "area" in fd:
+                    context["area_ratio"] = float(fd["area"])
+            except Exception:
+                pass
+                
+            # 计算对焦分类状态
+            focus_status, focus_reason = self._compute_focus_status_from_fd(fd, context.get("area_ratio", 0))
+            if focus_status:
+                context["focus_status"] = focus_status
+            if focus_reason:
+                context["focus_reason"] = focus_reason
+                
+        return context
+
     def _prefetch_compare_subject_state(self):
         if not self.compare_mode:
             return
@@ -1547,7 +1772,30 @@ class ImageDetailPanel(QWidget):
         except Exception:
             focal_suffix = ""
 
-        return f"尺寸 {dims}\nISO {iso_disp}  |  光圈 {aperture_disp}  |  快门 {shutter_disp}{shutter_suffix}  |  焦距 {focal_disp}{focal_suffix}"
+        # 第一行显示尺寸
+        line1 = f"尺寸 {dims}" if dims != "-" else ""
+        
+        # 第二行显示 ISO、光圈、快门、焦距
+        parts = []
+        if iso_disp != "-":
+            parts.append(f"ISO {iso_disp}")
+        if aperture_disp != "-":
+            parts.append(f"光圈 {aperture_disp}")
+        if shutter_disp != "-":
+            parts.append(f"快门 {shutter_disp}{shutter_suffix}")
+        if focal_disp != "-":
+            parts.append(f"焦距 {focal_disp}{focal_suffix}")
+        line2 = "  |  ".join(parts) if parts else ""
+        
+        # 组合两行
+        if line1 and line2:
+            return f"{line1}\n{line2}"
+        elif line1:
+            return line1
+        elif line2:
+            return line2
+        else:
+            return "-"
 
     def _extract_overlay_exif_brief(self, meta: object) -> dict:
         brief = {
@@ -1956,14 +2204,41 @@ class ImageDetailPanel(QWidget):
                         mirror = getattr(self, "_all_info_mirror_panel", None)
                         if mirror is None:
                             try:
-                                show_ext = bool(getattr(self, "_db_table_name", "bird_results") != "import_cache")
+                                # 虚拟文件模式下也显示对焦分类等扩展信息
+                                show_ext = True
                                 mirror = InfoPanel(show_extended_info=show_ext)
                                 mirror.hide()
                                 self._all_info_mirror_panel = mirror
                             except Exception:
                                 mirror = None
                         if mirror is not None:
-                            mirror.update_info(path, context=None)
+                            # 从数据库记录中提取对焦分类信息作为上下文传递
+                            focus_context = None
+                            try:
+                                record = self._get_record_for_path(path)
+                                if isinstance(record, dict):
+                                    focus_context = self._extract_focus_context_from_record(record)
+                            except Exception:
+                                focus_context = None
+                            
+                            # 如果数据库中没有找到记录，尝试从 image_list 中获取对焦信息
+                            if focus_context is None or not focus_context.get("focus_status"):
+                                try:
+                                    for img_info in (self.image_list or []):
+                                        if isinstance(img_info, dict) and img_info.get("path") == path:
+                                            # 从 image_list 的项中提取对焦信息
+                                            fd_context = self._extract_focus_context_from_image_info(img_info)
+                                            if fd_context:
+                                                if focus_context is None:
+                                                    focus_context = fd_context
+                                                else:
+                                                    # 合并信息
+                                                    focus_context.update(fd_context)
+                                            break
+                                except Exception:
+                                    pass
+                            
+                            mirror.update_info(path, context=focus_context)
                             
                             # 启动后台线程获取 EXIF 信息并更新浮层
                             def _load_exif_and_update():
@@ -2680,7 +2955,8 @@ class ImageDetailPanel(QWidget):
         except Exception:
             pass
         try:
-            show_ext = bool(getattr(self, "_db_table_name", "bird_results") != "import_cache")
+            # 所有模式下都显示对焦分类等扩展信息
+            show_ext = True
             self._all_info_mirror_panel = InfoPanel(show_extended_info=show_ext)
             self._all_info_mirror_panel.hide()
         except Exception:
