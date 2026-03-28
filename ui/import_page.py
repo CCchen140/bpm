@@ -236,11 +236,8 @@ class ImportPage(BaseImageBrowserPage):
     - 底部：信息面板 (InfoPanel)
     """
     def __init__(self):
-        # 初始化依赖
         self.db = BirdLibraryDB()
         self.settings_manager = SettingsManager()
-        
-        # 读取配置
         cache_size = int(self.settings_manager.get("import/cache_size", 500))
         self._event_filter_installed = False
         self._suspend_filter_panel_auto_hide = False
@@ -254,9 +251,7 @@ class ImportPage(BaseImageBrowserPage):
         # 禁用预加载线程，减少启动开销
         self.cache_manager = ImageCacheManager(context="import", enable_preload=False)
         self.big_image_cache = BigImageCacheManager.instance("import")
-        # 设置最大缓存数量
         self.cache_manager.max_cache_size = cache_size
-        
         self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.IMPORT_LOADER)
         self.thumbnail_loader.set_max_thread_count(loader_threads)
         
@@ -315,6 +310,12 @@ class ImportPage(BaseImageBrowserPage):
         self._scroll_direction = 0
         self._last_visible_start = None
         self._last_visible_end = None
+        self._last_scroll_value_for_direction = None  # 用于检测滚动方向
+        # 滚动条拖动状态跟踪
+        self._scrollbar_dragging = False  # 是否正在拖动滚动条
+        self._scrollbar_drag_timer = None  # 拖动检测定时器
+        self._scrollbar_pause_timer = None  # 拖动停顿检测定时器
+        self._scrollbar_last_value = None  # 拖动时上次滚动值
         self._thumb_build_request_id = 0
         self._thumb_build_pending_files = []
         self._thumb_build_index = 0
@@ -325,13 +326,34 @@ class ImportPage(BaseImageBrowserPage):
         self._cache_warmup_deferred = False
 
         super().__init__()
+
+        # 核心定时器 - 立即创建（缩略图加载相关）
         self._thumb_build_timer = QTimer(self)
         self._thumb_build_timer.setSingleShot(True)
         self._thumb_build_timer.timeout.connect(self._build_thumbnail_batch)
 
-        self._focus_progress_timer = QTimer(self)
-        self._focus_progress_timer.setInterval(300)
-        self._focus_progress_timer.timeout.connect(self._refresh_focus_progress_ui)
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(5)
+        self._update_timer.timeout.connect(self._process_pending_updates)
+
+        self._startup_mask_timeout_timer = QTimer(self)
+        self._startup_mask_timeout_timer.setSingleShot(True)
+        self._startup_mask_timeout_timer.timeout.connect(self._force_hide_startup_mask)
+
+        # 延迟创建的定时器 - 初始化为None，首次使用时创建
+        self._focus_progress_timer = None
+        self._focus_db_poll_timer = None
+        self._focus_threshold_debounce_timer = None
+        self._mouse_busy_timer = None
+        self._cache_warmup_timer = None
+        self._fast_scroll_timer = None
+        self._thumb_resize_timer = None
+        self._preview_debounce_timer = None
+        self._info_debounce_timer = None
+        self._detail_debounce_timer = None
+        self._big_preload_timer = None
+
+        # 对焦检测相关状态
         self._focus_progress_operation = ""
         self._focus_progress_done = 0
         self._focus_progress_total = 0
@@ -341,78 +363,42 @@ class ImportPage(BaseImageBrowserPage):
         self._focus_eta_last_done = 0
         self._focus_eta_seconds = None
         self._focus_eta_last_update_ts = 0.0
-
-        self._focus_db_poll_timer = QTimer(self)
-        self._focus_db_poll_timer.setInterval(3000)
-        self._focus_db_poll_timer.timeout.connect(self._poll_focus_db_results)
         self._focus_db_last_poll_ts = 0.0
-        self._focus_threshold_debounce_timer = QTimer(self)
-        self._focus_threshold_debounce_timer.setSingleShot(True)
-        self._focus_threshold_debounce_timer.setInterval(180)
-        self._focus_threshold_debounce_timer.timeout.connect(self._apply_focus_thresholds_change)
-        
+
+        # 启动蒙层状态
         self._startup_mask_enabled = True
         self._startup_mask_visible = False
         self._startup_pending_paths = set()
         self._startup_first_page_ready = False
-        self._startup_initial_load_processed = False  # 标记是否已完成初始可视区域计算
-        self._startup_mask_timeout_timer = QTimer(self)
-        self._startup_mask_timeout_timer.setSingleShot(True)
-        self._startup_mask_timeout_timer.timeout.connect(self._force_hide_startup_mask)
-        
-        # 批量更新加载完成的图片，避免主线程阻塞
+        self._startup_initial_load_processed = False
+
+        # 批量更新
         self._pending_updates = deque()
-        # 允许每帧处理更多图片，但受时间限制控制
-        # 之前为 1，会导致每张图片都需要一次事件循环，效率极低
         self._update_batch_size = 10
-        self._update_timer = QTimer(self)
-        self._update_timer.setInterval(5) 
-        self._update_timer.timeout.connect(self._process_pending_updates)
         self._visible_load_force_cancel = False
         self._mouse_busy = False
         try:
             self._mouse_busy_loader_threads = max(2, min(int(getattr(self, "_default_loader_threads", 2) or 2), 6))
         except Exception:
             self._mouse_busy_loader_threads = 2
-        self._mouse_busy_timer = QTimer(self)
-        self._mouse_busy_timer.setSingleShot(True)
-        self._mouse_busy_timer.timeout.connect(lambda: (setattr(self, "_mouse_busy", False), self.thumbnail_loader.set_max_thread_count(self._default_loader_threads), self.thumbnail_loader.cancel_pending(), setattr(self, "_requested_paths", set()), self._schedule_visible_load(immediate=True)))
+
+        # 缓存预热
         self._cache_warmup_paths = []
         self._cache_warmup_index = 0
         self._cache_warmup_request_id = 0
-        self._cache_warmup_timer = QTimer(self)
-        self._cache_warmup_timer.setInterval(10)
-        self._cache_warmup_timer.timeout.connect(self._process_cache_warmup)
+
+        # 快速滚动
         self._fast_scroll_active = False
-        self._fast_scroll_timer = QTimer(self)
-        self._fast_scroll_timer.setSingleShot(True)
-        self._fast_scroll_timer.timeout.connect(self._end_fast_scroll)
-        self._thumb_resize_timer = QTimer(self)
-        self._thumb_resize_timer.setSingleShot(True)
-        self._thumb_resize_timer.setInterval(30)
-        self._thumb_resize_timer.timeout.connect(self._apply_thumbnail_resize)
+
+        # 缩略图调整大小
         self._is_slider_dragging = False
         self._pending_thumb_size = None
+
+        # 预览和信息面板
         self._pending_preview_path = None
-        self._preview_debounce_timer = QTimer(self)
-        self._preview_debounce_timer.setSingleShot(True)
-        self._preview_debounce_timer.setInterval(60)
-        self._preview_debounce_timer.timeout.connect(self._apply_pending_preview)
         self._pending_info_path = None
-        self._info_debounce_timer = QTimer(self)
-        self._info_debounce_timer.setSingleShot(True)
-        self._info_debounce_timer.setInterval(50)
-        self._info_debounce_timer.timeout.connect(self._apply_pending_info)
         self._pending_detail_nav = None
-        self._detail_debounce_timer = QTimer(self)
-        self._detail_debounce_timer.setSingleShot(True)
-        self._detail_debounce_timer.setInterval(80)
-        self._detail_debounce_timer.timeout.connect(self._apply_pending_detail_nav)
         self._pending_big_preload_range = None
-        self._big_preload_timer = QTimer(self)
-        self._big_preload_timer.setSingleShot(True)
-        self._big_preload_timer.setInterval(120)
-        self._big_preload_timer.timeout.connect(self._apply_pending_big_preload)
         try:
             self._debug_import_virtual_exif = bool(self.settings_manager.get("debug/import_virtual_exif", True))
         except Exception:
@@ -426,7 +412,7 @@ class ImportPage(BaseImageBrowserPage):
         self._stash_save_timer.setInterval(800)
         self._stash_save_timer.timeout.connect(self._save_stash_state_now)
         self._load_stash_state()
-        
+
         # 连接加载器信号
         # 使用QueuedConnection确保信号异步处理，避免阻塞UI线程
         from PyQt6.QtCore import Qt
@@ -435,12 +421,13 @@ class ImportPage(BaseImageBrowserPage):
             self.thumbnail_loader.signals.loaded_metrics.connect(self.on_thumbnail_metrics, Qt.ConnectionType.QueuedConnection)
         self.scanResultsReady.connect(self._apply_scan_results)
         self.exifDetailsReady.connect(self._apply_exif_details_updates)
-        
+
         # 注册主题监听器
         ColorManager.instance().register_listener(self._update_mode_switch_theme)
-        
+
         # 初始化主题颜色
         self._update_mode_switch_theme()
+
         try:
             QTimer.singleShot(300, self.load_settings)
         except Exception:
@@ -457,6 +444,71 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             root = os.getcwd()
         return os.path.join(root, "data", "cache", "import_stash.json")
+
+    def _on_mouse_busy_timeout(self):
+        """鼠标忙碌状态超时处理
+
+        当鼠标停止活动一段时间后，恢复缩略图加载器的线程数
+        """
+        try:
+            self._mouse_busy = False
+            if hasattr(self, "thumbnail_loader"):
+                self.thumbnail_loader.set_max_thread_count(self._default_loader_threads)
+        except Exception:
+            pass
+
+    def _start_cache_warmup_delayed(self):
+        """延迟启动缓存预热
+
+        在启动后延迟一段时间再开始预热，避免启动时UI卡顿
+        """
+        try:
+            # 检查是否还在拖动滚动条或鼠标忙碌
+            if bool(getattr(self, "_scrollbar_dragging", False)):
+                # 如果还在拖动，继续延迟
+                QTimer.singleShot(500, self._start_cache_warmup_delayed)
+                return
+            if bool(getattr(self, "_mouse_busy", False)):
+                # 如果鼠标忙碌，继续延迟
+                QTimer.singleShot(500, self._start_cache_warmup_delayed)
+                return
+            # 启动缓存预热
+            if hasattr(self, "_cache_warmup_timer") and self._cache_warmup_timer is not None:
+                if not self._cache_warmup_timer.isActive():
+                    self._cache_warmup_timer.start()
+        except Exception:
+            pass
+
+    def _on_cache_warmup_timeout(self):
+        """缓存预热定时器超时处理
+
+        在后台预热缩略图缓存，提高用户浏览时的响应速度
+        """
+        try:
+            self._process_cache_warmup()
+        except Exception:
+            pass
+
+    def _ensure_timer(self, timer_name, single_shot=True, interval=0, callback=None):
+        """确保定时器已创建，延迟创建非必要的定时器以优化启动性能
+
+        参数:
+            timer_name: 定时器属性名（如 '_focus_progress_timer'）
+            single_shot: 是否为单次触发
+            interval: 默认间隔（毫秒）
+            callback: 超时回调函数
+        """
+        timer = getattr(self, timer_name, None)
+        if timer is None:
+            timer = QTimer(self)
+            if single_shot:
+                timer.setSingleShot(True)
+            if interval > 0:
+                timer.setInterval(interval)
+            if callback is not None:
+                timer.timeout.connect(callback)
+            setattr(self, timer_name, timer)
+        return timer
 
     def _load_stash_state(self):
         path = self._get_stash_store_path()
@@ -902,9 +954,11 @@ class ImportPage(BaseImageBrowserPage):
                 self._mouse_busy = True
                 if hasattr(self, "thumbnail_loader"):
                     self.thumbnail_loader.set_max_thread_count(self._mouse_busy_loader_threads)
-                if self._mouse_busy_timer.isActive():
-                    self._mouse_busy_timer.stop()
-                self._mouse_busy_timer.start(60)
+                # 确保定时器已创建后再使用
+                timer = self._ensure_timer("_mouse_busy_timer", single_shot=True, interval=0, callback=self._on_mouse_busy_timeout)
+                if timer.isActive():
+                    timer.stop()
+                timer.start(60)
         try:
             if hasattr(self, "_focus_progress_show_btn") and self._focus_progress_show_btn is not None:
                 if self._focus_progress_show_btn.isVisible():
@@ -1515,6 +1569,14 @@ class ImportPage(BaseImageBrowserPage):
         # 安装事件过滤器以处理遮罩大小调整
         self.grid_view.installEventFilter(self)
         self.grid_view.scroll_area.viewport().installEventFilter(self)
+        # 连接滚动条拖动事件，优化拖动时的加载性能
+        try:
+            scrollbar = self.grid_view.scroll_area.verticalScrollBar()
+            if scrollbar is not None:
+                scrollbar.sliderPressed.connect(self._on_scrollbar_pressed)
+                scrollbar.sliderReleased.connect(self._on_scrollbar_released)
+        except Exception:
+            pass
         try:
             if hasattr(self, "toolbar") and self.toolbar is not None:
                 self.toolbar.installEventFilter(self)
@@ -1970,14 +2032,14 @@ class ImportPage(BaseImageBrowserPage):
         self._save_import_root_paths(roots)
 
     def load_settings(self):
-        """加载页面设置"""
+        """加载页面设置 - 优化版：延迟非必要的初始化操作"""
         # 0. 恢复模式设置 (如果有)
         # 这里假设默认从 Settings 恢复，或者如果之前没有保存模式，则默认为真实模式
         # 注意：__init__ 中默认 self.is_virtual_mode = False
         # 如果需要持久化模式，可以在 on_mode_switch_toggled 中保存，在此处读取
         # 目前根据用户需求，主要是"进入页面时检查"
-        
-        # 尝试恢复上次导入的路径并自动加载
+
+        # 尝试恢复上次导入的路径，但不立即加载（延迟加载以优化启动性能）
         last_path = self.settings_manager.get("import/last_path")
         root_paths = self.settings_manager.get("import/root_paths", []) or []
         try:
@@ -2009,78 +2071,86 @@ class ImportPage(BaseImageBrowserPage):
                     self.settings_manager.sync()
                 except Exception:
                     pass
-        
+
         # 检查当前模式 (这里简单起见，假设每次启动应用默认是真实模式，或者我们应该保存模式状态)
         # 如果要完全响应"检查是否处于真实文件模式"，我们应该确信当前的 self.is_virtual_mode 是正确的
         # 由于我们没有保存 is_virtual_mode 到设置，它总是 False (真实模式)
         if not self.is_virtual_mode:
             self.folder_panel.set_override_strict_mode(False)
+            # 只添加根文件夹到树，不立即加载图片（延迟加载）
             if root_paths:
                 self.folder_panel.add_root_folders(root_paths)
                 self._save_import_root_paths(self._get_import_root_paths_from_tree())
             elif last_path and os.path.exists(last_path):
                 self.folder_panel.add_root_folders([last_path])
                 self._save_import_root_paths(self._get_import_root_paths_from_tree())
-            def _auto_select_and_load(p: str):
-                path = str(p or "")
-                if not path or not os.path.exists(path):
-                    return
-                state = {"tries": 0, "loaded": False}
 
-                def _try_select():
-                    state["tries"] += 1
-                    ok = False
+            # 延迟自动加载：等待UI完全初始化后再加载，避免启动时卡顿
+            def _delayed_auto_load():
+                auto_folder = self.settings_manager.get("import/last_folder", "") or ""
+                if temp_root:
                     try:
-                        if hasattr(self, "folder_panel") and hasattr(self.folder_panel, "navigate_to_folder"):
-                            ok = bool(self.folder_panel.navigate_to_folder(path))
+                        auto_norm = os.path.normcase(os.path.normpath(str(auto_folder)))
                     except Exception:
+                        auto_norm = str(auto_folder)
+                    if auto_norm.startswith(temp_root + os.sep) or auto_norm == temp_root:
+                        auto_folder = ""
+                        try:
+                            self.settings_manager.set("import/last_folder", "")
+                            self.settings_manager.sync()
+                        except Exception:
+                            pass
+
+                def _auto_select_and_load(p: str):
+                    path = str(p or "")
+                    if not path or not os.path.exists(path):
+                        return
+                    state = {"tries": 0, "loaded": False}
+
+                    def _try_select():
+                        state["tries"] += 1
                         ok = False
-
-                    if ok and not state["loaded"]:
-                        state["loaded"] = True
                         try:
-                            self.load_images(path, recursive=True)
+                            if hasattr(self, "folder_panel") and hasattr(self.folder_panel, "navigate_to_folder"):
+                                ok = bool(self.folder_panel.navigate_to_folder(path))
                         except Exception:
-                            pass
-                        return
+                            ok = False
 
-                    if state["tries"] >= 6 and not state["loaded"]:
-                        state["loaded"] = True
-                        try:
-                            self.load_images(path, recursive=True)
-                        except Exception:
-                            pass
-                        return
+                        if ok and not state["loaded"]:
+                            state["loaded"] = True
+                            try:
+                                self.load_images(path, recursive=True)
+                            except Exception:
+                                pass
+                            return
 
-                    QTimer.singleShot(120, _try_select)
+                        if state["tries"] >= 6 and not state["loaded"]:
+                            state["loaded"] = True
+                            try:
+                                self.load_images(path, recursive=True)
+                            except Exception:
+                                pass
+                            return
 
-                _try_select()
+                        QTimer.singleShot(120, _try_select)
 
-            auto_folder = self.settings_manager.get("import/last_folder", "") or ""
-            if temp_root:
-                try:
-                    auto_norm = os.path.normcase(os.path.normpath(str(auto_folder)))
-                except Exception:
-                    auto_norm = str(auto_folder)
-                if auto_norm.startswith(temp_root + os.sep) or auto_norm == temp_root:
-                    auto_folder = ""
+                    _try_select()
+
+                if auto_folder and os.path.exists(auto_folder):
                     try:
-                        self.settings_manager.set("import/last_folder", "")
-                        self.settings_manager.sync()
+                        self._show_startup_mask("正在加载...")
                     except Exception:
                         pass
-            if auto_folder and os.path.exists(auto_folder):
-                try:
-                    self._show_startup_mask("正在加载...")
-                except Exception:
-                    pass
-                QTimer.singleShot(80, lambda p=str(auto_folder): _auto_select_and_load(p))
-            elif last_path and os.path.exists(last_path):
-                try:
-                    self._show_startup_mask("正在加载...")
-                except Exception:
-                    pass
-                QTimer.singleShot(80, lambda p=str(last_path): _auto_select_and_load(p))
+                    _auto_select_and_load(auto_folder)
+                elif last_path and os.path.exists(last_path):
+                    try:
+                        self._show_startup_mask("正在加载...")
+                    except Exception:
+                        pass
+                    _auto_select_and_load(last_path)
+
+            # 延迟500ms后再自动加载，确保UI已经响应
+            QTimer.singleShot(500, _delayed_auto_load)
 
         # 1. 恢复缩略图大小
         thumb_size = self.settings_manager.get("import/thumbnail_size")
@@ -2951,12 +3021,130 @@ class ImportPage(BaseImageBrowserPage):
             self._pending_thumb_size = self.calculate_thumb_size(self.toolbar.preview_slider.value())
             self._apply_thumbnail_resize()
 
+    def _on_scrollbar_pressed(self):
+        """处理滚动条按下（开始拖动）
+
+        当用户按下滚动条准备拖动时，暂停缩略图加载，
+        避免拖动过程中频繁加载导致卡顿
+        """
+        try:
+            self._scrollbar_dragging = True
+            # 记录当前滚动值，用于检测停顿
+            try:
+                self._scrollbar_last_value = int(self.grid_view.scroll_area.verticalScrollBar().value())
+            except Exception:
+                self._scrollbar_last_value = None
+            # 取消当前的可见区域加载定时器
+            if hasattr(self, "_visible_load_timer") and self._visible_load_timer is not None:
+                self._visible_load_timer.stop()
+            # 取消缩略图构建定时器
+            if hasattr(self, "_thumb_build_timer") and self._thumb_build_timer is not None:
+                self._thumb_build_timer.stop()
+            # 取消大图预加载定时器
+            if hasattr(self, "_big_preload_timer") and self._big_preload_timer is not None:
+                self._big_preload_timer.stop()
+            # 取消缓存预热定时器
+            if hasattr(self, "_cache_warmup_timer") and self._cache_warmup_timer is not None:
+                self._cache_warmup_timer.stop()
+            # 设置拖动检测定时器，如果一段时间内没有释放，确认为拖动状态
+            if self._scrollbar_drag_timer is None:
+                from PyQt6.QtCore import QTimer
+                self._scrollbar_drag_timer = QTimer(self)
+                self._scrollbar_drag_timer.setSingleShot(True)
+                self._scrollbar_drag_timer.timeout.connect(self._on_scrollbar_drag_timeout)
+            self._scrollbar_drag_timer.start(100)  # 100ms后确认拖动状态
+            # 启动停顿检测定时器，检测拖动过程中是否停下
+            if self._scrollbar_pause_timer is None:
+                from PyQt6.QtCore import QTimer
+                self._scrollbar_pause_timer = QTimer(self)
+                self._scrollbar_pause_timer.timeout.connect(self._on_scrollbar_pause_check)
+            self._scrollbar_pause_timer.start(200)  # 每200ms检查一次是否停顿
+        except Exception:
+            pass
+
+    def _on_scrollbar_released(self):
+        """处理滚动条释放（结束拖动）
+
+        当用户释放滚动条时，立即加载当前可见区域的缩略图
+        """
+        try:
+            self._scrollbar_dragging = False
+            # 停止拖动检测定时器
+            if self._scrollbar_drag_timer is not None:
+                self._scrollbar_drag_timer.stop()
+            # 停止停顿检测定时器
+            if self._scrollbar_pause_timer is not None:
+                self._scrollbar_pause_timer.stop()
+            # 延迟一帧后加载当前可见区域，确保滚动位置已稳定
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, lambda: self._schedule_visible_load(immediate=True))
+            # 延迟加载大图预加载
+            QTimer.singleShot(100, self._trigger_big_preload_after_scroll)
+        except Exception:
+            pass
+
+    def _on_scrollbar_pause_check(self):
+        """检查滚动条是否在拖动过程中停顿
+
+        如果滚动值一段时间没有变化，认为鼠标停下了，开始加载缩略图
+        """
+        try:
+            if not bool(getattr(self, "_scrollbar_dragging", False)):
+                return
+            current_value = int(self.grid_view.scroll_area.verticalScrollBar().value())
+            last_value = getattr(self, "_scrollbar_last_value", None)
+            if last_value is not None and current_value == last_value:
+                # 滚动值没有变化，说明停下了，开始加载
+                # 临时设置为False，让加载能够执行
+                self._scrollbar_dragging = False
+                try:
+                    self._schedule_visible_load(immediate=True)
+                finally:
+                    # 恢复拖动状态（如果还在拖动的话）
+                    # 注意：如果用户已经释放，_on_scrollbar_released 会将其设为False
+                    pass
+            else:
+                # 更新上次滚动值
+                self._scrollbar_last_value = current_value
+        except Exception:
+            pass
+
+    def _trigger_big_preload_after_scroll(self):
+        """滚动结束后触发大图预加载"""
+        try:
+            if bool(getattr(self, "_scrollbar_dragging", False)):
+                return
+            start, end, _ = self._get_visible_index_range_for_loading(extra_rows=1)
+            if end >= start:
+                self._schedule_big_preload(start, end)
+        except Exception:
+            pass
+
+    def _on_scrollbar_drag_timeout(self):
+        """滚动条拖动超时处理
+
+        确认用户正在拖动滚动条，可以在此期间执行一些轻量级操作
+        """
+        # 拖动期间可以显示占位符，但不加载实际缩略图
+        pass
+
     def on_thumbnail_clicked_proxy(self, index, modifiers):
         """处理缩略图点击"""
         import time
         thumbnails = self.grid_view.thumbnails
         if index < len(thumbnails):
             thumb = thumbnails[index]
+            # 添加调试日志：排查信息面板不显示的问题
+            try:
+                from utils.log_manager import LogManager
+                has_image_info = hasattr(thumb, 'image_info') and thumb.image_info is not None
+                image_info_type = type(thumb.image_info).__name__ if has_image_info else 'None'
+                path_val = None
+                if has_image_info and isinstance(thumb.image_info, dict):
+                    path_val = thumb.image_info.get("path") or thumb.image_info.get("file_path")
+                LogManager.instance().debug(f"[ClickDebug] index={index}, has_image_info={has_image_info}, image_info_type={image_info_type}, path={path_val}")
+            except Exception:
+                pass
             if thumb.image_info:
                 try:
                     p = None
@@ -4346,9 +4534,15 @@ class ImportPage(BaseImageBrowserPage):
                     pass
             if not p1:
                 self._pending_info_path = p1
+                # 确保定时器已创建
+                if self._info_debounce_timer is None:
+                    from PyQt6.QtCore import QTimer
+                    self._info_debounce_timer = QTimer(self)
+                    self._info_debounce_timer.setSingleShot(True)
+                    self._info_debounce_timer.timeout.connect(self._apply_pending_info)
                 if self._info_debounce_timer.isActive():
                     self._info_debounce_timer.stop()
-                self._info_debounce_timer.start()
+                self._info_debounce_timer.start(50)
                 return
             cur = str(getattr(self, "_current_folder_path", "") or "")
             is_virtual = bool(getattr(self, "is_virtual_mode", False)) and isinstance(cur, str) and (
@@ -4373,9 +4567,15 @@ class ImportPage(BaseImageBrowserPage):
                         except Exception:
                             pass
             self._pending_info_path = p1
+            # 确保定时器已创建
+            if self._info_debounce_timer is None:
+                from PyQt6.QtCore import QTimer
+                self._info_debounce_timer = QTimer(self)
+                self._info_debounce_timer.setSingleShot(True)
+                self._info_debounce_timer.timeout.connect(self._apply_pending_info)
             if self._info_debounce_timer.isActive():
                 self._info_debounce_timer.stop()
-            self._info_debounce_timer.start()
+            self._info_debounce_timer.start(50)
         except Exception:
             pass
 
@@ -4809,6 +5009,49 @@ class ImportPage(BaseImageBrowserPage):
                         thresholds = {}
                     status_sel = str(status or "All") or "All"
 
+                    # 第一步：立即快速查询文件路径列表并显示占位符
+                    try:
+                        quick_rows = self.db.list_import_cache_by_burst_first_in_folder(folder, first_name, limit=100000)
+                    except Exception:
+                        quick_rows = []
+                    
+                    # 快速创建占位符数据（包含路径、文件名和对焦检测数据）
+                    # 需要包含 focus_detect_json 以便 _filter_files_for_display 能正确计算状态
+                    placeholder_items = []
+                    for r in (quick_rows or []):
+                        try:
+                            fp = str(r.get("file_path") or "")
+                            if not fp:
+                                continue
+                            # 计算初始状态（使用默认阈值）
+                            try:
+                                st = self._compute_focus_status_for_item(r, thresholds)
+                            except Exception:
+                                st = "NoBird"
+                            placeholder_items.append({
+                                "path": fp,
+                                "name": str(r.get("file_name") or os.path.basename(fp)),
+                                "focus_status": str(st),  # 使用计算出的状态，而不是"Loading"
+                                "focus_detect_json": r.get("focus_detect_json") or "",
+                                "score": r.get("score"),
+                                "norm_score": r.get("norm_score"),
+                                "area_ratio": r.get("area_ratio"),
+                                "bbox": r.get("bbox"),
+                                "focus_point": r.get("focus_point"),
+                                "eye_coordinates": r.get("eye_coordinates"),
+                                "position": r.get("position"),
+                                "object": r.get("object"),
+                                "rating": r.get("rating", 0),
+                                "is_favorite": int(r.get("is_favorite") or 0),
+                                "favorite": int(r.get("is_favorite") or 0),
+                            })
+                        except Exception:
+                            continue
+                    
+                    # 立即显示占位符
+                    if placeholder_items:
+                        self.scanResultsReady.emit(request_id, placeholder_items)
+
                     def run_scan():
                         import time
                         t_start = time.time()
@@ -5071,6 +5314,76 @@ class ImportPage(BaseImageBrowserPage):
                         thresholds = {}
                     status_sel = str(status or "All") or "All"
                     sub_sel = str(sub or "").strip()
+
+                    # 第一步：立即快速查询文件路径列表并显示占位符
+                    # 这样用户能立即看到界面响应，而不是等待完整数据查询
+                    try:
+                        quick_rows = self.db.list_import_cache_by_folder(folder, limit=100000)
+                    except Exception:
+                        quick_rows = []
+                    
+                    # 快速创建占位符数据（只包含路径和文件名）
+                    placeholder_items = []
+                    for r in (quick_rows or []):
+                        try:
+                            fp = str(r.get("file_path") or "")
+                            if not fp:
+                                continue
+                            # 检查子文件夹筛选
+                            if sub_sel:
+                                try:
+                                    base = self._normalize_folder_key(folder)
+                                    if base and not base.endswith(os.sep):
+                                        base = base + os.sep
+                                    d0 = self._normalize_folder_key(os.path.dirname(fp))
+                                    if not base or not d0 or (not d0.startswith(base)):
+                                        continue
+                                    rel = d0[len(base):]
+                                    rel = "" if rel in (".", os.curdir) else rel
+                                    first = rel.split(os.sep)[0] if rel else ""
+                                    if first != sub_sel:
+                                        continue
+                                except Exception:
+                                    continue
+                            else:
+                                # 检查文件是否在子文件夹中（无sub_sel时跳过子文件夹）
+                                try:
+                                    fp_dir = self._normalize_folder_key(os.path.dirname(fp))
+                                    folder_norm = self._normalize_folder_key(folder)
+                                    if folder_norm and not folder_norm.endswith(os.sep):
+                                        folder_norm = folder_norm + os.sep
+                                    if fp_dir != folder_norm.rstrip(os.sep):
+                                        continue
+                                except Exception:
+                                    pass
+                            # 计算初始状态（使用默认阈值）
+                            try:
+                                st = self._compute_focus_status_for_item(r, thresholds)
+                            except Exception:
+                                st = "NoBird"
+                            placeholder_items.append({
+                                "path": fp,
+                                "name": str(r.get("file_name") or os.path.basename(fp)),
+                                "focus_status": str(st),  # 使用计算出的状态，而不是"Loading"
+                                "focus_detect_json": r.get("focus_detect_json") or "",
+                                "score": r.get("score"),
+                                "norm_score": r.get("norm_score"),
+                                "area_ratio": r.get("area_ratio"),
+                                "bbox": r.get("bbox"),
+                                "focus_point": r.get("focus_point"),
+                                "eye_coordinates": r.get("eye_coordinates"),
+                                "position": r.get("position"),
+                                "object": r.get("object"),
+                                "rating": r.get("rating", 0),
+                                "is_favorite": int(r.get("is_favorite") or 0),
+                                "favorite": int(r.get("is_favorite") or 0),
+                            })
+                        except Exception:
+                            continue
+
+                    # 立即显示占位符
+                    if placeholder_items:
+                        self.scanResultsReady.emit(request_id, placeholder_items)
 
                     def _burst_first_file(row: dict) -> str:
                         try:
@@ -5434,6 +5747,48 @@ class ImportPage(BaseImageBrowserPage):
         self.settings_manager.set("import/last_folder", path)
         self.load_images(path, recursive=True)
 
+    def _cancel_folder_loading(self):
+        """取消正在进行的文件夹加载操作
+        
+        通过递增请求ID使所有正在进行的加载操作失效，
+        用于快速切换模式时立即中断真实文件夹的加载
+        """
+        try:
+            # 递增文件夹加载请求ID，使旧的加载操作失效
+            self._folder_load_request_id = int(getattr(self, "_folder_load_request_id", 0)) + 1
+        except Exception:
+            pass
+        try:
+            # 同时递增缩略图加载请求ID
+            self._load_request_id = int(getattr(self, "_load_request_id", 0)) + 1
+        except Exception:
+            pass
+        try:
+            # 取消缩略图加载器的待处理任务
+            if hasattr(self, "thumbnail_loader") and self.thumbnail_loader:
+                self.thumbnail_loader.cancel_pending()
+        except Exception:
+            pass
+        try:
+            # 停止文件夹扫描工作线程
+            if hasattr(self, "_folder_scan_worker") and self._folder_scan_worker:
+                self._folder_scan_worker.stop()
+                self._folder_scan_worker = None
+        except Exception:
+            pass
+        try:
+            # 停止后台缩略图构建
+            if hasattr(self, "_thumb_build_timer") and self._thumb_build_timer:
+                self._thumb_build_timer.stop()
+        except Exception:
+            pass
+        try:
+            # 停止可见区域加载
+            if hasattr(self, "_visible_load_timer") and self._visible_load_timer:
+                self._visible_load_timer.stop()
+        except Exception:
+            pass
+
     def load_images(self, folder_path, recursive=False):
         if not folder_path or not os.path.exists(folder_path):
             self.has_valid_folder = False
@@ -5730,12 +6085,16 @@ class ImportPage(BaseImageBrowserPage):
             request_id: 请求标识
             image_files: 扫描得到的图片信息列表
         """
+        import time
+        t_start = time.perf_counter()
+        
         if request_id != self._folder_load_request_id:
             return
         try:
             self._all_image_files = list(image_files or [])
         except Exception:
             self._all_image_files = []
+        
         files = self._filter_files_for_display(self._all_image_files)
         self._apply_files_view(request_id, files)
         try:
@@ -5824,74 +6183,98 @@ class ImportPage(BaseImageBrowserPage):
 
         self._startup_initial_load_processed = False
         self._startup_first_page_ready = False
-        try:
-            self._sort_image_files_in_place()
-        except Exception:
+        
+        # 将耗时的排序和缩略图构建操作延迟到蒙层隐藏后执行
+        # 这样可以避免在加载弹窗显示期间阻塞UI
+        def _delayed_build_thumbnails():
+            """延迟构建缩略图，在蒙层隐藏后执行"""
             try:
-                self.image_files.sort(key=lambda x: x['name'].lower())
+                # 排序操作
+                try:
+                    self._sort_image_files_in_place()
+                except Exception:
+                    try:
+                        self.image_files.sort(key=lambda x: x['name'].lower())
+                    except Exception:
+                        pass
+
+                self.loaded_count = 0
+                self.selected_count = 0
+                self._loaded_paths = set()
+                if self.has_valid_folder:
+                    self.stats_changed.emit(len(self.image_files), self.loaded_count, self.selected_count)
+
+                # 清空并准备构建缩略图
+                self.grid_view.clear_thumbnails()
+
+                self._thumb_by_path.clear()
+                self._thumb_build_request_id = request_id
+                self._thumb_build_pending_files = self.image_files
+                try:
+                    if bool(getattr(self, "is_virtual_mode", False)):
+                        self._virtual_overlay_backfill_rid = -1
+                except Exception:
+                    pass
+
+                self._startup_pending_paths = set()
+
+                self._thumb_build_index = 0
+                self._thumb_build_target_count = 0
+                total_count = len(self._thumb_build_pending_files)
+                if total_count > 0:
+                    try:
+                        available_width = self.grid_view.get_available_width()
+                    except Exception:
+                        available_width = 800
+                    thumb_size = self.grid_view.current_thumb_size
+                    if isinstance(thumb_size, (tuple, list)):
+                        thumb_w = int(thumb_size[0])
+                        thumb_h = int(thumb_size[1])
+                    else:
+                        thumb_w = int(thumb_size)
+                        thumb_h = int(thumb_size)
+                    cols = max(1, int(available_width // max(1, thumb_w)))
+                    try:
+                        viewport_h = int(self.grid_view.scroll_area.viewport().height())
+                    except Exception:
+                        viewport_h = 600
+                    rows = max(1, int(viewport_h // max(1, thumb_h)))
+                    initial_rows = max(1, rows + 1)
+                    initial_count = min(total_count, cols * initial_rows)
+                    self._thumb_build_target_count = initial_count
+                    self._full_build_total_count = total_count
+                    self._full_build_deferred = total_count > initial_count
+
+                if self._thumb_build_timer.isActive():
+                    self._thumb_build_timer.stop()
+                self._thumb_build_timer.start(0)
+
+                # 设置缓存预热
+                self._cache_warmup_request_id = request_id
+                self._cache_warmup_index = 0
+                self._cache_warmup_paths = [img.get("path") for img in self.image_files if img.get("path")]
+                # 确保定时器已创建
+                self._ensure_timer("_cache_warmup_timer", single_shot=False, interval=50, callback=self._on_cache_warmup_timeout)
+                if self._cache_warmup_timer.isActive():
+                    self._cache_warmup_timer.stop()
+                self._cache_warmup_deferred = bool(self._full_build_deferred)
+                # 延迟启动缓存预热，避免启动时UI卡顿
+                if self._cache_warmup_paths and not self._cache_warmup_deferred:
+                    QTimer.singleShot(2000, self._start_cache_warmup_delayed)
+
+                # 虚拟文件模式下的额外处理
+                try:
+                    if bool(getattr(self, "is_virtual_mode", False)):
+                        QTimer.singleShot(0, self._refresh_current_preview_overlays_from_import_cache)
+                        QTimer.singleShot(0, self._backfill_visible_thumbnails_from_import_cache)
+                except Exception:
+                    pass
+
             except Exception:
                 pass
-        self.loaded_count = 0
-        self.selected_count = 0
-        self._loaded_paths = set()
-        if self.has_valid_folder:
-            self.stats_changed.emit(len(self.image_files), self.loaded_count, self.selected_count)
-        self.grid_view.clear_thumbnails()
-        self._thumb_by_path.clear()
-        self._thumb_build_request_id = request_id
-        self._thumb_build_pending_files = self.image_files
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                self._virtual_overlay_backfill_rid = -1
-        except Exception:
-            pass
         
-        self._startup_pending_paths = set()
-        
-        self._thumb_build_index = 0
-        self._thumb_build_target_count = 0
-        total_count = len(self._thumb_build_pending_files)
-        if total_count > 0:
-            try:
-                available_width = self.grid_view.get_available_width()
-            except Exception:
-                available_width = 800
-            thumb_size = self.grid_view.current_thumb_size
-            if isinstance(thumb_size, (tuple, list)):
-                thumb_w = int(thumb_size[0])
-                thumb_h = int(thumb_size[1])
-            else:
-                thumb_w = int(thumb_size)
-                thumb_h = int(thumb_size)
-            cols = max(1, int(available_width // max(1, thumb_w)))
-            try:
-                viewport_h = int(self.grid_view.scroll_area.viewport().height())
-            except Exception:
-                viewport_h = 600
-            rows = max(1, int(viewport_h // max(1, thumb_h)))
-            initial_rows = max(1, rows + 1)
-            initial_count = min(total_count, cols * initial_rows)
-            self._thumb_build_target_count = initial_count
-            self._full_build_total_count = total_count
-            self._full_build_deferred = total_count > initial_count
-        if self._thumb_build_timer.isActive():
-            self._thumb_build_timer.stop()
-        self._thumb_build_timer.start(0)
-
-        self._cache_warmup_request_id = request_id
-        self._cache_warmup_index = 0
-        self._cache_warmup_paths = [img.get("path") for img in self.image_files if img.get("path")]
-        if self._cache_warmup_timer.isActive():
-            self._cache_warmup_timer.stop()
-        self._cache_warmup_deferred = bool(self._full_build_deferred)
-        if self._cache_warmup_paths and not self._cache_warmup_deferred:
-            self._cache_warmup_timer.start()
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                QTimer.singleShot(0, self._refresh_current_preview_overlays_from_import_cache)
-                QTimer.singleShot(0, self._backfill_visible_thumbnails_from_import_cache)
-        except Exception:
-            pass
+        # 延迟执行缩略图构建，让加载蒙层先显示
+        QTimer.singleShot(100, _delayed_build_thumbnails)
 
     def _schedule_focus_point_backfill(self, file_list):
         return
@@ -9167,6 +9550,7 @@ class ImportPage(BaseImageBrowserPage):
                             info = {"path": "", "name": "", "create_time": ""}
                         info["index"] = int(i)
                         self.grid_view.add_thumbnail(info)
+
                 force_low_quality = bool(self.settings_manager.get("import/force_low_quality", True))
                 self._thumb_by_path = {}
                 for item in getattr(self.grid_view, "thumbnails", []) or []:
@@ -9181,6 +9565,7 @@ class ImportPage(BaseImageBrowserPage):
                         path_key = None
                     if path_key:
                         self._thumb_by_path.setdefault(self._normalize_path_key(path_key), []).append(item)
+
                 self._thumb_build_pending_files = []
                 self._thumb_build_index = len(files)
                 self._thumb_build_target_count = len(files)
@@ -9206,7 +9591,7 @@ class ImportPage(BaseImageBrowserPage):
                     pass
                 self._force_hide_startup_mask()
             return
-        
+
         try:
             start = self._thumb_build_index
             max_batch = 200
@@ -9215,7 +9600,7 @@ class ImportPage(BaseImageBrowserPage):
 
             # 获取低质量设置
             force_low_quality = bool(self.settings_manager.get("import/force_low_quality", True))
-            
+
             i = start
             t_start = time.perf_counter()
             while i < end and (time.perf_counter() - t_start) < t_budget:
@@ -9289,7 +9674,10 @@ class ImportPage(BaseImageBrowserPage):
         if not self._cache_warmup_paths:
             self._cache_warmup_timer.stop()
             return
+        # 如果鼠标忙碌或正在拖动滚动条，跳过本次预热
         if getattr(self, "_mouse_busy", False):
+            return
+        if getattr(self, "_scrollbar_dragging", False):
             return
         cache_info = self.cache_manager.get_cache_info()
         if cache_info.get("general_cached", 0) >= cache_info.get("max_size", 0):
@@ -9297,8 +9685,8 @@ class ImportPage(BaseImageBrowserPage):
             return
         t0 = time.perf_counter()
         batch = []
-        batch_limit = 20
-        t_budget = 0.0025
+        batch_limit = 10  # 减少每批处理数量，降低CPU占用
+        t_budget = 0.005  # 增加时间预算，避免过于频繁
         total = len(self._cache_warmup_paths)
         while self._cache_warmup_index < total and len(batch) < batch_limit:
             if len(batch) > 0 and (time.perf_counter() - t0) > t_budget:
@@ -9461,17 +9849,22 @@ class ImportPage(BaseImageBrowserPage):
 
     def _process_pending_updates(self):
         """批量处理待更新的图片 - 完全非阻塞优化版
-        
+
         优化点：
         1. 每批只处理1个缩略图，最大化UI响应性
         2. 使用QTimer.singleShot让出时间片，避免阻塞UI线程
         3. 优先处理可见区域的缩略图
         4. 使用processEvents确保UI事件被及时处理
         """
-        # 性能分析
-        from utils.performance_profiler import PerformanceProfiler
-        profiler = PerformanceProfiler.instance()
-        profiler.start("_process_pending_updates")
+        # 性能分析（仅在调试模式下启用，避免影响性能）
+        profiler = None
+        if getattr(self, '_debug_perf_enabled', False):
+            try:
+                from utils.performance_profiler import PerformanceProfiler
+                profiler = PerformanceProfiler.instance()
+                profiler.start("_process_pending_updates")
+            except Exception:
+                pass
         
         try:
             if bool(getattr(self, "_thumb_ui_suspended", False)):
@@ -9562,8 +9955,12 @@ class ImportPage(BaseImageBrowserPage):
                 StatusManager.instance().finish_task(self._thumb_status_task_id)
                 self._thumb_status_task_id = None
         
-        # 性能分析结束
-        profiler.end("_process_pending_updates")
+        # 性能分析结束（仅在调试模式下）
+        if profiler is not None:
+            try:
+                profiler.end("_process_pending_updates")
+            except Exception:
+                pass
         
         # 如果还有未处理的更新，使用singleShot让出时间片
         # 这样UI线程可以处理其他事件（鼠标、键盘、重绘等）
@@ -9612,6 +10009,21 @@ class ImportPage(BaseImageBrowserPage):
         #   1) 仅计算可见范围（不做额外动作）
         #   2) 根据可见范围估算需要补建的缩略图控件数量（增量构建），但在快滚暂停期间不建
         t0 = time.perf_counter()
+        
+        # 更新滚动方向检测的基准值，确保预加载方向正确
+        try:
+            current_scroll = int(value)
+            if hasattr(self, '_last_scroll_value_for_direction') and self._last_scroll_value_for_direction is not None:
+                if current_scroll > self._last_scroll_value_for_direction:
+                    self._scroll_direction = 1  # 向下
+                elif current_scroll < self._last_scroll_value_for_direction:
+                    self._scroll_direction = -1  # 向上
+                else:
+                    self._scroll_direction = 0  # 无方向
+            self._last_scroll_value_for_direction = current_scroll
+        except Exception:
+            pass
+        
         try:
             # 兜底：没有控制器时仅计算可见范围（不做额外动作）
             start, end, visible_rows = self.grid_view.get_visible_index_range()
@@ -9805,6 +10217,12 @@ class ImportPage(BaseImageBrowserPage):
                 return
         except Exception:
             return
+        # 如果正在拖动滚动条，跳过加载（避免拖动卡顿）
+        try:
+            if bool(getattr(self, "_scrollbar_dragging", False)):
+                return
+        except Exception:
+            pass
         if not self.image_files or not self.grid_view.thumbnails:
             return
             
@@ -9844,30 +10262,34 @@ class ImportPage(BaseImageBrowserPage):
         preload_count = preload_rows * cols
         
         # 检测滚动方向
-        scroll_direction = 0  # 0: 无方向, 1: 向下, -1: 向上
-        try:
-            current_scroll = int(self.grid_view.scroll_area.verticalScrollBar().value())
-            if hasattr(self, '_last_scroll_value_for_direction'):
-                if current_scroll > self._last_scroll_value_for_direction:
-                    scroll_direction = 1
-                elif current_scroll < self._last_scroll_value_for_direction:
-                    scroll_direction = -1
-            self._last_scroll_value_for_direction = current_scroll
-        except Exception:
-            pass
+        # 优先使用 on_grid_scroll 中计算的滚动方向，更及时准确
+        scroll_direction = int(getattr(self, '_scroll_direction', 0) or 0)
+        # 如果 on_grid_scroll 中没有计算，则在这里计算
+        if scroll_direction == 0:
+            try:
+                current_scroll = int(self.grid_view.scroll_area.verticalScrollBar().value())
+                if hasattr(self, '_last_scroll_value_for_direction') and self._last_scroll_value_for_direction is not None:
+                    if current_scroll > self._last_scroll_value_for_direction:
+                        scroll_direction = 1
+                    elif current_scroll < self._last_scroll_value_for_direction:
+                        scroll_direction = -1
+                self._last_scroll_value_for_direction = current_scroll
+            except Exception:
+                pass
         
         # 根据滚动方向调整预加载范围
-        # 可见区域优先，只预加载滚动方向上的下一屏
+        # 快速滚动时增加预加载范围，确保流畅性
+        # 向下滑动时：预加载上方一屏 + 下方两屏（优先下方）
+        # 向上滑动时：预加载上方两屏 + 下方一屏（优先上方）
         if scroll_direction > 0:  # 向下滑动
-            preload_start = start  # 不预加载上方
-            preload_end = min(len(self.image_files) - 1, end + preload_count)  # 预加载下方一屏
+            preload_start = max(0, start - preload_count)  # 上方一屏
+            preload_end = min(len(self.image_files) - 1, end + preload_count * 2)  # 下方两屏
         elif scroll_direction < 0:  # 向上滑动
-            preload_start = max(0, start - preload_count)  # 预加载上方一屏
-            preload_end = end  # 不预加载下方
-        else:  # 无明确方向（初始加载或停止滚动）
-            # 只预加载可见区域，减少初始加载压力
-            preload_start = start
-            preload_end = end
+            preload_start = max(0, start - preload_count * 2)  # 上方两屏
+            preload_end = min(len(self.image_files) - 1, end + preload_count)  # 下方一屏
+        else:  # 无明确方向
+            preload_start = max(0, start - preload_count)  # 上方一屏
+            preload_end = min(len(self.image_files) - 1, end + preload_count)  # 下方一屏
 
         try:
             is_big_mode = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
@@ -10087,17 +10509,34 @@ class ImportPage(BaseImageBrowserPage):
         
         # 限制每次处理的缩略图数量，避免阻塞UI线程
         # 但优先保证可见区域的缩略图被加载
-        max_process_per_frame = 200
+        # 增加预加载处理数量，确保快速滚动时的流畅性
+        max_process_per_frame = 300
         processed_count = 0
         has_more_to_process = False
         
-        for idx in target_indices:
+        # 将 target_indices 转换为列表
+        target_indices_list = list(target_indices)
+        
+        # 分离可见区域和预加载区域
+        visible_indices = [idx for idx in target_indices_list if idx >= start and idx <= end]
+        preload_indices = [idx for idx in target_indices_list if idx < start or idx > end]
+
+        # 根据滚动方向调整预加载优先级
+        if scroll_direction > 0:  # 向下滑动，优先加载下方的缩略图
+            preload_indices.sort(reverse=True)  # 按索引从大到小排序（下方优先）
+        elif scroll_direction < 0:  # 向上滑动，优先加载上方的缩略图
+            preload_indices.sort(reverse=False)  # 按索引从小到大排序（上方优先）
+        
+        # 合并列表：可见区域优先，然后是预加载区域
+        target_indices_list = visible_indices + preload_indices
+        
+        for idx in target_indices_list:
             if idx >= len(self.image_files):
                 break
             
             # 限制处理数量，让出时间片
             # 但可见区域的缩略图必须全部处理
-            is_visible = idx <= end
+            is_visible = idx >= start and idx <= end
             if not is_visible:
                 processed_count += 1
                 if processed_count > max_process_per_frame:
@@ -10118,7 +10557,7 @@ class ImportPage(BaseImageBrowserPage):
             if not path:
                 continue
 
-            is_visible = idx <= end  # 在可视区域内
+            is_visible = idx >= start and idx <= end  # 在可视区域内
             if is_visible:
                 current_visible_paths.add(path)
                 
@@ -10206,7 +10645,13 @@ class ImportPage(BaseImageBrowserPage):
         # 合并加载任务：先加载可见区域，再限制加载预加载区域
         paths_to_load = visible_paths_to_load
         # 预加载区域限制数量，避免加载过多非可见缩略图
-        max_preload = cols * 2  # 最多预加载2行
+        # 根据滚动方向调整预加载数量，确保流畅性
+        if scroll_direction > 0:  # 向下滑动，多预加载下方
+            max_preload = cols * visible_rows * 2  # 预加载2屏
+        elif scroll_direction < 0:  # 向上滑动，多预加载上方
+            max_preload = cols * visible_rows * 2  # 预加载2屏
+        else:  # 无明确方向
+            max_preload = cols * visible_rows  # 预加载1屏
         if len(preload_paths_to_load) > max_preload:
             # 只取前max_preload个预加载任务
             preload_paths_to_load = preload_paths_to_load[:max_preload]
@@ -10234,6 +10679,7 @@ class ImportPage(BaseImageBrowserPage):
 
         if paths_to_load:
             # 批量提交加载任务
+            # 添加日志：排查虚拟文件模式下的缩略图加载问题
             self.thumbnail_loader.load_thumbnails(paths_to_load, load_thumb_size, request_id=self._load_request_id)
             # 在状态栏显示缩略图加载任务
             visible_count = len(visible_paths_to_load)
@@ -10243,53 +10689,7 @@ class ImportPage(BaseImageBrowserPage):
                     # 如果已有任务，更新进度；否则启动新任务
                     if self._thumb_status_task_id is None:
                         total = visible_count + preload_count
-                        # 检查是否可能从缓存读取（根据disk_cache的has方法）
-                        cache_hits = 0
-                        # 定义缓存类型，用于检查磁盘缓存
-                        cache_type = "general"
-                        # 获取缩放质量设置，确保与保存缓存时使用的一致
-                        try:
-                            scale_quality = str(self.cache_manager.settings_manager.get("performance/thumbnail_scale_quality", "low")).lower()
-                        except Exception:
-                            scale_quality = "low"
-                        # 导入页面强制使用低质量缩略图（与保存缓存时的逻辑一致）
-                        try:
-                            force_low_quality = bool(self.cache_manager.settings_manager.get("import/force_low_quality", True))
-                            if force_low_quality:
-                                scale_quality = "low"
-                        except Exception:
-                            pass
-                        # 获取缩略图缓存尺寸设置，确保与保存缓存时使用的一致
-                        try:
-                            base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
-                        except Exception:
-                            base_px = 0
-                        # 获取对焦检测缩略图的目标尺寸
-                        try:
-                            focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                        except Exception:
-                            focus_target = 640
-                        try:
-                            from cache.focus_scaled_cache import try_load_qimage
-                            for _, path, _ in paths_to_load[:10]:  # 检查前10个作为样本
-                                # 检查 thumbnail_disk_cache
-                                if self.thumbnail_loader.disk_cache.has(path, load_thumb_size, cache_type, scale_quality=scale_quality, base_px=base_px):
-                                    cache_hits += 1
-                                else:
-                                    # 检查 focus_scaled_cache（对焦检测时生成的缩略图缓存）
-                                    try:
-                                        img, _meta = try_load_qimage(path, focus_target, scope="import_focus")
-                                        if img is not None and not img.isNull():
-                                            cache_hits += 1
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                        # 如果大部分可能命中缓存，显示不同的提示
-                        if cache_hits >= len(paths_to_load[:10]) * 0.5:
-                            task_msg = f"正在读取缩略图缓存 ({total} 个)..."
-                        else:
-                            task_msg = f"正在生成缩略图 ({total} 个)..."
+                        task_msg = f"正在加载缩略图 ({total} 个)..."
                         self._thumb_status_task_id = StatusManager.instance().start_task(task_msg)
                 except Exception:
                     pass
@@ -13224,13 +13624,16 @@ class ImportPage(BaseImageBrowserPage):
             pass
         _focus_log("set _focus_detect_running=True and start timers")
         try:
-            if not self._focus_progress_timer.isActive():
-                self._focus_progress_timer.start()
+            # 确保定时器已创建并启动
+            timer = self._ensure_timer('_focus_progress_timer', single_shot=False, interval=300, callback=self._refresh_focus_progress_ui)
+            if not timer.isActive():
+                timer.start()
         except Exception:
             pass
         try:
-            if getattr(self, "_focus_db_poll_timer", None) is not None and not self._focus_db_poll_timer.isActive():
-                self._focus_db_poll_timer.start()
+            db_timer = self._ensure_timer('_focus_db_poll_timer', single_shot=False, interval=3000, callback=self._poll_focus_db_results)
+            if not db_timer.isActive():
+                db_timer.start()
         except Exception:
             pass
         try:
@@ -13706,11 +14109,8 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                self._build_focus_detect_virtual_folders()
-        except Exception:
-            pass
+        # 注意：_build_focus_detect_virtual_folders 和 _reload_virtual_focus_detect_view
+        # 会在 _save_focus_detect_results 完成后调用，避免重复刷新导致闪烁
         try:
             from utils.log_manager import LogManager
 
@@ -14354,20 +14754,11 @@ class ImportPage(BaseImageBrowserPage):
             self._pending_virtual_focus_reload = True
         except Exception:
             pass
+        # 只调用一次视图刷新，避免闪烁
         try:
             if bool(getattr(self, "is_virtual_mode", False)):
                 self._build_focus_detect_virtual_folders()
-        except Exception:
-            pass
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)):
                 QTimer.singleShot(0, self._reload_virtual_focus_detect_view)
-        except Exception:
-            pass
-        try:
-            if bool(getattr(self, "is_virtual_mode", False)):
-                QTimer.singleShot(600, self._build_focus_detect_virtual_folders)
-                QTimer.singleShot(800, self._reload_virtual_focus_detect_view)
         except Exception:
             pass
         try:
@@ -14846,14 +15237,9 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             current_role = None
 
+        # 清空整个文件夹树，避免同时显示虚拟文件和真实文件
         try:
-            for i in range(tree.topLevelItemCount() - 1, -1, -1):
-                it = tree.topLevelItem(i)
-                if it is None:
-                    continue
-                p = it.data(0, Qt.ItemDataRole.UserRole)
-                if p == "virtual://focus_detect_root":
-                    tree.takeTopLevelItem(i)
+            tree.clear()
         except Exception:
             pass
 
@@ -17832,118 +18218,146 @@ class ImportPage(BaseImageBrowserPage):
             pass
         
         if self.is_virtual_mode:
-            # 切换到虚拟模式
-            self.folder_panel.set_override_strict_mode(None) # Use settings
-            self.folder_panel.folder_tree.clear()
+            # 切换到虚拟模式 - 优化版：立即响应UI，延迟加载数据
+            # 第一步：立即取消所有正在进行的真实文件夹加载操作
+            try:
+                self._cancel_folder_loading()
+            except Exception:
+                pass
             try:
                 if hasattr(self, "thumbnail_loader"):
                     self.thumbnail_loader.cancel_pending()
             except Exception:
                 pass
             try:
-                if hasattr(self, "grid_view") and hasattr(self.grid_view, "clear_thumbnails"):
-                    self.grid_view.clear_thumbnails()
+                if hasattr(self, "_folder_scan_worker") and self._folder_scan_worker:
+                    self._folder_scan_worker.stop()
+                    self._folder_scan_worker = None
             except Exception:
                 pass
-            try:
-                self.clear_preview()
-            except Exception:
-                pass
-            try:
-                self.image_files = []
-                self._all_image_files = []
-                self._thumb_by_path = {}
-                self.loaded_count = 0
-                self.selected_count = 0
-                self._requested_paths = set()
-                self._requested_exif_paths = set()
-                self._loaded_paths = set()
-            except Exception:
-                pass
-            try:
-                self._build_focus_detect_virtual_folders()
-            except Exception:
-                pass
-            try:
-                QTimer.singleShot(0, self._reload_virtual_focus_detect_view)
-            except Exception:
-                pass
-            try:
-                if bool(getattr(self, "_pending_virtual_focus_reload", False)):
-                    self._pending_virtual_focus_reload = False
-                    QTimer.singleShot(0, self._reload_virtual_focus_detect_view)
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "grid_view") and self.grid_view is not None:
-                    if getattr(self.grid_view, "is_virtualized", False) and hasattr(self.grid_view, "list_view"):
-                        QTimer.singleShot(0, self.grid_view.list_view.setFocus)
-                    else:
-                        QTimer.singleShot(0, self.grid_view.scroll_area.setFocus)
-            except Exception:
-                pass
+
+            # 第二步：保留当前显示，先构建虚拟文件夹树
+            # 不清空显示，避免闪烁
+            self.folder_panel.set_override_strict_mode(None)  # Use settings
+            
+            # 第三步：立即构建虚拟文件夹树并加载视图
+            # 使用单次定时器确保UI先响应点击事件
+            def _build_and_load_virtual_mode():
+                """构建虚拟文件夹树并加载视图"""
+                try:
+                    # 先清空数据但不刷新UI
+                    self.image_files = []
+                    self._all_image_files = []
+                    self._thumb_by_path = {}
+                    self.loaded_count = 0
+                    self.selected_count = 0
+                    self._requested_paths = set()
+                    self._requested_exif_paths = set()
+                    self._loaded_paths = set()
+                except Exception:
+                    pass
+                
+                # 构建文件夹树
+                try:
+                    self._build_focus_detect_virtual_folders()
+                except Exception:
+                    pass
+                
+                # 加载视图
+                try:
+                    self._reload_virtual_focus_detect_view()
+                except Exception:
+                    pass
+                
+                # 处理待处理的重载请求
+                try:
+                    if bool(getattr(self, "_pending_virtual_focus_reload", False)):
+                        self._pending_virtual_focus_reload = False
+                        QTimer.singleShot(100, self._reload_virtual_focus_detect_view)
+                except Exception:
+                    pass
+                
+                # 设置焦点
+                try:
+                    if hasattr(self, "grid_view") and self.grid_view is not None:
+                        if getattr(self.grid_view, "is_virtualized", False) and hasattr(self.grid_view, "list_view"):
+                            self.grid_view.list_view.setFocus()
+                        else:
+                            self.grid_view.scroll_area.setFocus()
+                except Exception:
+                    pass
+            
+            # 延迟一帧执行，确保UI先响应点击事件
+            QTimer.singleShot(0, _build_and_load_virtual_mode)
         else:
             # 切换回真实模式
             self.folder_panel.set_override_strict_mode(False) # Disable strict for real files
-            try:
-                if hasattr(self, "folder_panel") and self.folder_panel is not None and hasattr(self.folder_panel, "folder_tree"):
-                    self.folder_panel.folder_tree.clear()
-            except Exception:
-                pass
-
-            root_paths = self.settings_manager.get("import/root_paths", []) or []
-            root_paths = [p for p in root_paths if p and os.path.exists(str(p))]
-            try:
-                import tempfile
-                temp_root = os.path.normcase(os.path.normpath(tempfile.gettempdir()))
-            except Exception:
-                temp_root = ""
-            if temp_root:
-                filtered = []
-                changed = False
-                for p in root_paths:
-                    s = str(p)
-                    try:
-                        norm = os.path.normcase(os.path.normpath(s))
-                    except Exception:
-                        norm = s
-                    if norm.startswith(temp_root + os.sep) or norm == temp_root:
-                        changed = True
-                        continue
-                    filtered.append(s)
-                if changed:
-                    root_paths = filtered
-                    try:
-                        self.settings_manager.set("import/root_paths", root_paths)
-                        self.settings_manager.sync()
-                    except Exception:
-                        pass
-            if root_paths:
-                self.folder_panel.add_root_folders(root_paths)
-                self._save_import_root_paths(self._get_import_root_paths_from_tree())
-
-            auto_folder = self.settings_manager.get("import/last_folder", "") or ""
-            if temp_root:
+            
+            # 延迟加载真实文件夹数据，避免闪烁
+            def _load_real_mode():
+                # 先清空文件夹树，避免同时显示虚拟文件和真实文件
                 try:
-                    auto_norm = os.path.normcase(os.path.normpath(str(auto_folder)))
+                    if hasattr(self, "folder_panel") and self.folder_panel is not None and hasattr(self.folder_panel, "folder_tree"):
+                        self.folder_panel.folder_tree.clear()
                 except Exception:
-                    auto_norm = str(auto_folder)
-                if auto_norm.startswith(temp_root + os.sep) or auto_norm == temp_root:
-                    auto_folder = ""
+                    pass
+                
+                root_paths = self.settings_manager.get("import/root_paths", []) or []
+                root_paths = [p for p in root_paths if p and os.path.exists(str(p))]
+                try:
+                    import tempfile
+                    temp_root = os.path.normcase(os.path.normpath(tempfile.gettempdir()))
+                except Exception:
+                    temp_root = ""
+                if temp_root:
+                    filtered = []
+                    changed = False
+                    for p in root_paths:
+                        s = str(p)
+                        try:
+                            norm = os.path.normcase(os.path.normpath(s))
+                        except Exception:
+                            norm = s
+                        if norm.startswith(temp_root + os.sep) or norm == temp_root:
+                            changed = True
+                            continue
+                        filtered.append(s)
+                    if changed:
+                        root_paths = filtered
+                        try:
+                            self.settings_manager.set("import/root_paths", root_paths)
+                            self.settings_manager.sync()
+                        except Exception:
+                            pass
+                if root_paths:
+                    self.folder_panel.add_root_folders(root_paths)
+                    self._save_import_root_paths(self._get_import_root_paths_from_tree())
+
+                auto_folder = self.settings_manager.get("import/last_folder", "") or ""
+                if temp_root:
                     try:
-                        self.settings_manager.set("import/last_folder", "")
-                        self.settings_manager.sync()
+                        auto_norm = os.path.normcase(os.path.normpath(str(auto_folder)))
                     except Exception:
-                        pass
-            if auto_folder and os.path.exists(auto_folder):
-                self.load_images(auto_folder, recursive=True)
-            else:
-                path = self.settings_manager.get("import/last_path")
-                if path and os.path.exists(path):
-                    if not root_paths:
-                        self.folder_panel.add_root_folders([path])
-                        self._save_import_root_paths(self._get_import_root_paths_from_tree())
-                    self.load_images(path, recursive=True)
+                        auto_norm = str(auto_folder)
+                    if auto_norm.startswith(temp_root + os.sep) or auto_norm == temp_root:
+                        auto_folder = ""
+                        try:
+                            self.settings_manager.set("import/last_folder", "")
+                            self.settings_manager.sync()
+                        except Exception:
+                            pass
+                if auto_folder and os.path.exists(auto_folder):
+                    self.load_images(auto_folder, recursive=True)
+                else:
+                    path = self.settings_manager.get("import/last_path")
+                    if path and os.path.exists(path):
+                        if not root_paths:
+                            self.folder_panel.add_root_folders([path])
+                            self._save_import_root_paths(self._get_import_root_paths_from_tree())
+                        self.load_images(path, recursive=True)
+            
+            # 延迟一帧执行，确保UI先响应点击事件
+            QTimer.singleShot(0, _load_real_mode)
 
         try:
             self._refresh_focus_progress_ui()

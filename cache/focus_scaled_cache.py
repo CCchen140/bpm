@@ -60,13 +60,40 @@ def _max_count_from_settings(default: int = 500) -> int:
         return int(default)
 
 
+def _normalize_path_for_key(image_path: str) -> str:
+    """规范化路径用于构建缓存键
+
+    在Windows系统上，路径是大小写不敏感的，因此需要将路径统一转换为小写
+    以确保同一文件的不同大小写形式产生相同的缓存键
+    """
+    try:
+        # 使用normpath规范化路径分隔符
+        path = os.path.normpath(str(image_path))
+        # 在Windows上转换为小写，确保大小写不敏感
+        if os.name == "nt":
+            path = path.lower()
+        return path
+    except Exception:
+        return str(image_path)
+
+
 def build_key(image_path: str, target_size: int) -> str:
+    """构建缓存键
+
+    注意：不使用 mtime_ns（修改时间）作为键的一部分，因为：
+    1. 文件在对焦检测后可能被其他软件修改（如添加标签）
+    2. 这会导致缓存键不匹配，即使文件内容没有实质变化
+    3. 使用文件路径和大小足以识别文件
+    """
     try:
         st = os.stat(image_path)
-        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
-        token = f"{image_path}|{int(st.st_size)}|{mtime_ns}|{int(target_size)}"
+        # 只使用文件路径和大小作为键，不使用修改时间
+        # 使用规范化后的路径，确保Windows上大小写不敏感
+        normalized_path = _normalize_path_for_key(image_path)
+        token = f"{normalized_path}|{int(st.st_size)}|{int(target_size)}"
     except Exception:
-        token = f"{image_path}|0|0|{int(target_size)}"
+        normalized_path = _normalize_path_for_key(image_path)
+        token = f"{normalized_path}|0|{int(target_size)}"
     return hashlib.sha1(token.encode("utf-8", errors="ignore")).hexdigest()
 
 
@@ -77,10 +104,26 @@ def get_paths(image_path: str, target_size: int, scope: str = "import_focus") ->
 
 
 def try_load_qimage(image_path: str, target_size: int, scope: str = "import_focus") -> tuple[QImage | None, dict[str, Any] | None]:
+    """尝试加载缓存图片
+
+    同时尝试新旧两种格式的缓存键，兼容旧缓存
+    """
+    # 先尝试新格式缓存
     jpg_path, meta_path = get_paths(image_path, target_size, scope=scope)
+    use_legacy = False
     try:
-        if not os.path.isfile(jpg_path) or not os.path.isfile(meta_path):
-            return None, None
+        jpg_exists = os.path.isfile(jpg_path)
+        meta_exists = os.path.isfile(meta_path)
+        if not jpg_exists or not meta_exists:
+            # 尝试旧格式缓存
+            jpg_path_old, meta_path_old = _get_paths_legacy(image_path, target_size, scope=scope)
+            jpg_exists_old = os.path.isfile(jpg_path_old)
+            meta_exists_old = os.path.isfile(meta_path_old)
+            if jpg_exists_old and meta_exists_old:
+                jpg_path, meta_path = jpg_path_old, meta_path_old
+                use_legacy = True
+            else:
+                return None, None
     except Exception:
         return None, None
 
@@ -147,6 +190,51 @@ def try_load_meta(image_path: str, target_size: int, scope: str = "import_focus"
         return meta if isinstance(meta, dict) else None
     except Exception:
         return None
+
+
+def _build_key_legacy(image_path: str, target_size: int) -> str:
+    """旧版本的缓存键生成（包含 mtime_ns）
+
+    用于兼容旧缓存，在过渡期后应删除
+    """
+    try:
+        st = os.stat(image_path)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        token = f"{image_path}|{int(st.st_size)}|{mtime_ns}|{int(target_size)}"
+    except Exception:
+        token = f"{image_path}|0|0|{int(target_size)}"
+    return hashlib.sha1(token.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _get_paths_legacy(image_path: str, target_size: int, scope: str = "import_focus") -> tuple[str, str]:
+    """获取旧版本缓存路径"""
+    key = _build_key_legacy(image_path, int(target_size or 0))
+    d = get_cache_dir(scope)
+    return os.path.join(d, f"{key}.jpg"), os.path.join(d, f"{key}.json")
+
+
+def has(image_path: str, target_size: int, scope: str = "import_focus") -> bool:
+    """检查缓存是否存在，不实际加载图片
+
+    同时检查新旧两种格式的缓存键，兼容旧缓存
+    """
+    # 检查新格式缓存
+    jpg_path, meta_path = get_paths(image_path, target_size, scope=scope)
+    try:
+        if os.path.isfile(jpg_path) and os.path.isfile(meta_path):
+            return True
+    except Exception:
+        pass
+    
+    # 检查旧格式缓存（兼容过渡期）
+    try:
+        jpg_path_old, meta_path_old = _get_paths_legacy(image_path, target_size, scope=scope)
+        if os.path.isfile(jpg_path_old) and os.path.isfile(meta_path_old):
+            return True
+    except Exception:
+        pass
+    
+    return False
 
 
 def save_scaled_qimage(

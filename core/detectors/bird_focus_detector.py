@@ -153,19 +153,11 @@ def _get_project_root() -> str:
 def get_focus_scaled_cache_dir() -> str:
     """获取对焦检测缩略图缓存目录
 
-    使用绝对路径，避免多进程环境下工作目录不同导致的问题
+    使用 focus_scaled_cache 模块中的函数，确保缓存目录一致性
     """
     try:
-        # 获取当前文件所在目录，然后上两级到项目根目录
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(current_file_dir, os.pardir, os.pardir))
-        cache_dir = os.path.join(project_root, "cache", "focus_scaled")
-        # 确保目录存在
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-        except Exception:
-            pass
-        return cache_dir
+        from cache.focus_scaled_cache import get_cache_dir
+        return get_cache_dir("focus_scaled")
     except Exception:
         # 如果失败，使用基于当前工作目录的路径（兼容旧逻辑）
         try:
@@ -482,15 +474,41 @@ class BirdFocusDetector:
             return 500
 
     def _scaled_cache_key(self, image_path: str) -> str:
+        """构建缓存键
+
+        使用 focus_scaled_cache 模块中的 build_key 函数，确保与加载时使用的键一致
+        """
         try:
-            st = os.stat(image_path)
-            token = f"{image_path}|{int(st.st_size)}|{int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9)))}|{int(self.target_size)}"
+            from cache.focus_scaled_cache import build_key
+            return build_key(image_path, int(self.target_size))
         except Exception:
-            token = f"{image_path}|0|0|{int(self.target_size)}"
-        return hashlib.sha1(token.encode("utf-8", errors="ignore")).hexdigest()
+            # 如果导入失败，使用本地实现（备用）
+            # 注意：需要与 focus_scaled_cache.build_key 保持相同的规范化逻辑
+            try:
+                st = os.stat(image_path)
+                # 规范化路径：Windows上转换为小写
+                path = os.path.normpath(str(image_path))
+                if os.name == "nt":
+                    path = path.lower()
+                token = f"{path}|{int(st.st_size)}|{int(self.target_size)}"
+            except Exception:
+                path = os.path.normpath(str(image_path))
+                if os.name == "nt":
+                    path = path.lower()
+                token = f"{path}|0|{int(self.target_size)}"
+            return hashlib.sha1(token.encode("utf-8", errors="ignore")).hexdigest()
 
     def _scaled_cache_paths(self, key: str) -> tuple[str, str]:
-        base = str(getattr(self, "_scaled_cache_dir", "") or "")
+        """获取缓存文件路径
+
+        使用 focus_scaled_cache 模块中的 get_cache_dir 函数，确保目录一致性
+        """
+        try:
+            from cache.focus_scaled_cache import get_cache_dir
+            base = get_cache_dir("focus_scaled")
+        except Exception:
+            # 如果导入失败，使用本地实现（备用）
+            base = str(getattr(self, "_scaled_cache_dir", "") or "")
         return os.path.join(base, f"{key}.jpg"), os.path.join(base, f"{key}.json")
 
     def _scaled_cache_try_load(self, image_path: str):
@@ -557,6 +575,8 @@ class BirdFocusDetector:
                         json.dump(meta, f, ensure_ascii=False)
                     os.replace(tmp, jpg_path)
                     os.replace(tmp_meta, meta_path)
+                except Exception:
+                    pass
                 finally:
                     try:
                         if os.path.exists(tmp):

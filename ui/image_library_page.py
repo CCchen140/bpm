@@ -682,7 +682,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         super().__init__()
         self.db = BirdLibraryDB()
         self.current_original_pixmap = None  # 缓存当前预览的原图
-        self.cache_manager = ImageCacheManager()
+        # 禁用预加载，避免启动4个后台线程导致资源竞争和UI卡顿
+        # 图库页面使用独立的缩略图加载机制，不需要CacheWorker线程
+        self.cache_manager = ImageCacheManager(enable_preload=False)
         self.big_image_cache = BigImageCacheManager.instance("library")
         self._library_cache_loading_started = False
         self._special_cache_inited = False

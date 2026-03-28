@@ -232,18 +232,28 @@ class ThumbnailRunnable(QRunnable):
                 image = None
                 # 尝试从 focus_scaled_cache 加载缩略图（对焦检测时生成的缓存）
                 # 不仅限于导入页面，图库页面也可以使用这个缓存
+                focus_cache_hit = False
+                focus_target = 640
                 try:
-                    focus_target = 640
                     if hasattr(self.cache_manager, "settings_manager") and self.cache_manager.settings_manager:
                         focus_target = int(self.cache_manager.settings_manager.get("focus_detect/target_size", 640) or 640)
+                except Exception:
+                    focus_target = 640
+                
+                # 尝试从 focus_scaled_cache 加载缩略图
+                try:
                     from cache.focus_scaled_cache import try_load_qimage
 
                     img2, _meta2 = try_load_qimage(self.path, int(focus_target), scope="import_focus")
                     if img2 is not None and not img2.isNull():
                         image = img2
                         from_cache = True
+                        focus_cache_hit = True
                 except Exception:
                     pass
+                
+                # 记录是否需要实际生成缩略图（而非从缓存加载）
+                need_generate = False
                 target_size = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
                 if not disable_scaling:
                     req_max = _get_req_max()
@@ -645,7 +655,7 @@ class ThumbnailLoader(QObject):
         
     def load_thumbnails(self, paths, current_display_size, cache_type='general', request_id=None, default_priority=3):
         """提交加载任务 - 批量优化版
-        
+
         参数:
             paths: 路径列表，可以是字符串或 (priority, path) 元组
             current_display_size: 当前显示尺寸
@@ -655,7 +665,8 @@ class ThumbnailLoader(QObject):
         """
         if not paths:
             return
-            
+
+        # 添加日志：排查缩略图加载请求来源
         # 批量处理，减少锁竞争
         tasks_to_enqueue = []
         for item in paths:

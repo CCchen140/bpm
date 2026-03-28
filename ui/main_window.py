@@ -893,16 +893,18 @@ class MainWindow(QMainWindow):
 
         # 优化：仅在启动时预加载图库页面（索引0），导入页面（索引1）改为按需加载
         # 这样可以减少启动时的主线程阻塞时间
+        # 优化：预加载导入页面，避免用户点击侧边栏切换时等待
         try:
             QTimer.singleShot(150, lambda: self._ensure_page_loaded(0))
-            # 不再预加载导入页面，改为首次切换到导入页时才加载
-            # QTimer.singleShot(250, lambda: self._ensure_page_loaded(1))
+            # 延迟预加载导入页面，避免启动时阻塞，但确保用户切换时页面已准备好
+            QTimer.singleShot(500, lambda: self._ensure_page_loaded(1))
         except Exception:
             pass
 
         if not self._startup_preloaded:
             try:
-                QTimer.singleShot(1200, self._maybe_start_page_startup_jobs)
+                # 提前到800ms后开始预加载，减少用户等待时间
+                QTimer.singleShot(800, self._maybe_start_page_startup_jobs)
             except Exception:
                 pass
         QTimer.singleShot(1200, self._warmup_subject_detector_once)
@@ -924,6 +926,7 @@ class MainWindow(QMainWindow):
     def _maybe_start_page_startup_jobs(self):
         """
         主界面显示后，启动与页面相关但不影响首屏显示的初始化工作。
+        优化：预加载导入页面，避免用户点击侧边栏时等待
         """
         try:
             if bool(getattr(self, "_startup_preloaded", False)):
@@ -938,9 +941,27 @@ class MainWindow(QMainWindow):
 
         lib = getattr(self, "page_library", None)
         imp = getattr(self, "page_import", None)
-        if lib is None and imp is None:
+        
+        # 如果页面还没有加载，预加载它们（避免用户点击侧边栏时等待）
+        # 优先预加载导入页面，因为用户经常需要在图库和导入页面之间切换
+        preloaded_any = False
+        if lib is None and not bool(self._page_loading_flags.get(0, False)):
             try:
-                QTimer.singleShot(500, self._maybe_start_page_startup_jobs)
+                self._ensure_page_loaded(0)  # 预加载图库页面
+                preloaded_any = True
+            except Exception:
+                pass
+        if imp is None and not bool(self._page_loading_flags.get(1, False)):
+            try:
+                self._ensure_page_loaded(1)  # 预加载导入页面
+                preloaded_any = True
+            except Exception:
+                pass
+        
+        # 如果页面还在加载中，稍后再试
+        if lib is None or imp is None:
+            try:
+                QTimer.singleShot(300, self._maybe_start_page_startup_jobs)
             except Exception:
                 pass
             return
