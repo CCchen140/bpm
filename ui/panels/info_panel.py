@@ -56,6 +56,24 @@ class ExifLoaderThread(QThread):
             self.exif_ready.emit(self.request_id, self.image_path or "", exif_data)
 
 
+class FileSizeLoaderThread(QThread):
+    """后台线程获取文件大小，避免阻塞UI"""
+    file_size_ready = pyqtSignal(str, int)  # path, file_size
+
+    def __init__(self, image_path: str, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+
+    def run(self):
+        file_size = None
+        try:
+            if self.image_path and os.path.exists(self.image_path):
+                file_size = os.path.getsize(self.image_path)
+        except Exception:
+            pass
+        self.file_size_ready.emit(self.image_path or "", file_size)
+
+
 class FocusDistanceLoaderThread(QThread):
     focus_distance_ready = pyqtSignal(int, str, str)  # request_id, path, focus_distance
 
@@ -779,6 +797,54 @@ class InfoPanel(QWidget):
         except Exception:
             pass
 
+    def _load_file_size_async(self, image_path: str):
+        """启动后台线程获取文件大小"""
+        try:
+            # 保存当前路径，用于回调时验证
+            self._file_size_request_path = image_path
+            # 创建并启动后台线程
+            self._file_size_thread = FileSizeLoaderThread(image_path, self)
+            self._file_size_thread.file_size_ready.connect(self._on_file_size_loaded)
+            self._file_size_thread.start()
+        except Exception as e:
+            print(f"[ERROR] _load_file_size_async failed: {e}, path={image_path}")
+
+    def _on_file_size_loaded(self, image_path: str, file_size: int):
+        """文件大小加载完成后的回调（在主线程执行）"""
+        try:
+            # 验证路径是否匹配当前显示的图片
+            if getattr(self, "_file_size_request_path", None) != image_path:
+                return
+            # 如果面板处于收起状态，不更新UI
+            if getattr(self, "_vert_collapsed", False):
+                return
+            # 更新文件大小显示
+            if file_size is not None:
+                if file_size < 1024:
+                    size_str = f"{file_size} B"
+                elif file_size < 1024 * 1024:
+                    size_str = f"{file_size / 1024:.1f} KB"
+                else:
+                    size_str = f"{file_size / (1024 * 1024):.2f} MB"
+                self.info_basic_items['size'].setText(1, size_str)
+        except Exception as e:
+            print(f"[ERROR] _on_file_size_loaded failed: {e}, path={image_path}")
+
+    def load_file_size(self, image_path: str = None):
+        """公共方法：加载文件大小（供外部在点击缩略图后调用）
+
+        参数:
+            image_path: 图片路径，如果为 None 则使用当前显示的图片路径
+        """
+        try:
+            path = image_path or getattr(self, "_current_image_path", None)
+            if not path:
+                return
+            # 启动后台线程获取文件大小
+            self._load_file_size_async(path)
+        except Exception as e:
+            print(f"[ERROR] load_file_size failed: {e}, path={image_path}")
+
     def set_path_only(self, image_path):
         """仅设置路径与文件名显示，不做任何 I/O；大小/时间/尺寸/EXIF 保留上一张内容，待新数据就绪后一次性更新，避免闪「-」。"""
         if not image_path:
@@ -1125,7 +1191,7 @@ class InfoPanel(QWidget):
             print(f"[ERROR] info_panel set path failed: {e}")
         
         # 文件大小（优先使用后台 worker 提供的 io_data，避免主线程 I/O）
-        # P1 优化：如果 io_data 中没有 file_size，显示 "-" 而不是在主线程查询
+        # 如果 io_data 中没有 file_size，显示 "-"，由外部在点击缩略图后调用 load_file_size 获取
         try:
             if io_data is not None and io_data.get("file_size") is not None:
                 file_size = int(io_data["file_size"])
@@ -1138,7 +1204,7 @@ class InfoPanel(QWidget):
                 self.info_basic_items['size'].setText(1, size_str)
             else:
                 # 如果 io_data 中没有 file_size，显示 "-"
-                # 文件大小应该在后台 worker 中计算
+                # 由外部在点击缩略图后调用 load_file_size 方法获取文件大小
                 self.info_basic_items['size'].setText(1, "-")
         except Exception as e:
             print(f"[ERROR] info_panel get file size failed: {e}, path={image_path}")

@@ -32,7 +32,13 @@ class _VirtualThumbnailItem:
         self.selected = bool(selected)
         self._notify_changed(self.index)
 
-    def set_thumbnail_image(self, image):
+    def set_thumbnail_image(self, image, immediate=False):
+        """设置缩略图图像
+        
+        参数:
+            image: 要设置的缩略图图像
+            immediate: 是否立即更新（用于预加载，避免闪烁）
+        """
         self._thumbnail_image = image
         self._has_error = image is None
         self._notify_changed(self.index)

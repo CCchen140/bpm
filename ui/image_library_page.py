@@ -688,7 +688,12 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.big_image_cache = BigImageCacheManager.instance("library")
         self._library_cache_loading_started = False
         self._special_cache_inited = False
-        self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.LIBRARY_LOADER)
+        # 从性能设置中读取加载线程数
+        cpu_count = os.cpu_count() or 4
+        default_threads = max(1, cpu_count - 2)
+        loader_threads = int(SettingsManager().get("import/loader_threads", default_threads))
+        loader_threads = max(1, min(loader_threads, default_threads))
+        self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.LIBRARY_LOADER, thread_count=loader_threads)
         self.thumbnail_loader.signals.loaded.connect(self.on_thumbnail_loaded)
         self._thumbnail_request_id = 0
         self._thumb_status_task_id = None  # 缩略图加载任务状态ID
@@ -705,7 +710,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._thumbnail_loaded_retry_delay_ms = 60
         self._thumbnail_loaded_retry_max = 20
         self._pending_updates = deque()
-        self._update_batch_size = 10  # 每批处理数量减少，避免阻塞
+        self._update_batch_size = 20  # 每批处理数量增加，加快预加载图片的显示速度
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(5)  # 增加小延迟，让UI有机会响应
@@ -2339,6 +2344,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
                     path = info.get('path')
                     if hasattr(self, 'folder_panel') and self.folder_panel:
                         self.folder_panel.locate_taxonomy_node(o, f, g, s, path, emit_signal=False)
+            except Exception:
+                pass
+
+            # 点击缩略图后，异步加载文件大小
+            try:
+                path = info.get("path") or info.get("file_path") or info.get("filepath")
+                if path and hasattr(self, 'info_panel') and self.info_panel:
+                    self.info_panel.load_file_size(path)
             except Exception:
                 pass
 
@@ -6582,8 +6595,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
     def on_scroll_value_changed(self, value):
         """处理滚动事件，触发可见范围缩略图加载"""
-        # 兜底：如果控制器不可用，则走原逻辑（保持兼容）
-        self._schedule_visible_load(immediate=False)
+        # 滚动时立即调度加载，确保预加载及时生效
+        # 使用 immediate=True 避免延迟，让预加载立即开始
+        self._schedule_visible_load(immediate=True)
         try:
             self._schedule_persist_folder_view_state()
         except Exception:
@@ -6884,7 +6898,15 @@ class ImageLibraryPage(BaseImageBrowserPage):
         if end_visible < start_visible:
             return
 
-        extra_rows = 0 if getattr(self, "_fast_scroll_active", False) else visible_rows
+        # 计算预加载行数：始终预加载，根据滚动速度调整预加载量
+        # 基础预加载：2屏内容（确保滚动时有足够的内容已加载）
+        base_preload_screens = 2
+        if getattr(self, "_fast_scroll_active", False):
+            # 快速滚动时增加到 4 屏
+            base_preload_screens = 4
+        
+        # 计算额外预加载行数
+        extra_rows = visible_rows * base_preload_screens
         start, end, _ = self.grid_view.get_visible_index_range(extra_rows=extra_rows)
         if end < start:
             return
@@ -6894,15 +6916,29 @@ class ImageLibraryPage(BaseImageBrowserPage):
             cols = max(1, int(metrics.get("cols", 1)))
         except Exception:
             cols = 1
+        
+
             
         # 优化：限制每次处理的最大数量，避免UI卡顿
         # 优先处理可见区域，然后才是预加载区域
-        max_process_per_call = 100  # 每次最多处理100个缩略图
+        max_process_per_call = 200  # 每次最多处理200个缩略图（增加以支持更大的预加载范围）
         
         # 如果范围太大，优先处理可见区域
         if end - start > max_process_per_call:
-            # 先处理可见区域
-            visible_end = min(end_visible + cols * 2, end)  # 可见区域+下方2行
+            # 先处理可见区域和预加载区域
+            # 根据当前模式动态计算预加载行数
+            base_preload_rows = 4  # 基础预加载4行
+            is_big = False
+            try:
+                is_big = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
+            except Exception:
+                pass
+            if is_big:
+                base_preload_rows = 6  # 大缩略图模式预加载6行
+            if getattr(self, "_fast_scroll_active", False):
+                base_preload_rows *= 2  # 快速滚动时翻倍
+                
+            visible_end = min(end_visible + cols * base_preload_rows, end)  # 可见区域+下方多行
             if visible_end - start > max_process_per_call:
                 visible_end = start + max_process_per_call
             end = visible_end
@@ -6912,20 +6948,27 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             is_big_mode = False
             
-        # 优化：简化大模式下的预加载逻辑，减少循环开销
-        if is_big_mode and not bool(getattr(self, "_fast_scroll_active", False)) and cols > 0 and visible_rows > 0:
+        # 优化：大模式下的预加载逻辑
+        # 大缩略图模式下，增加预加载范围以提供更流畅的滚动体验
+        if is_big_mode and cols > 0 and visible_rows > 0:
             try:
                 last_row = max(0, int(end_visible) // int(cols))
-                probe_row = int(last_row) + 2
+                # 根据滚动速度调整预加载行数
+                preload_rows = 4  # 基础预加载4行
+                if getattr(self, "_fast_scroll_active", False):
+                    preload_rows = 8  # 快速滚动时预加载8行
+                
+                probe_row = int(last_row) + preload_rows
                 probe_start = int(probe_row) * int(cols)
                 if probe_start < len(self.grid_view.thumbnails) and probe_start <= end:
-                    # 简化检查：只检查第一个缩略图是否已加载
+                    # 检查预加载区域是否已加载，如果没有则扩展加载范围
                     try:
                         t = self.grid_view.thumbnails[probe_start]
                         pix = getattr(t, "thumbnail_pixmap", None)
                         img = getattr(t, "_thumbnail_image", None)
                         has_loaded = (pix is not None and not pix.isNull()) or (img is not None and not img.isNull())
                         if not has_loaded:
+                            # 扩展加载范围到可见区域 + 预加载行数
                             big_end = min(len(self.grid_view.thumbnails) - 1, int(probe_start) + int(visible_rows) * int(cols) - 1)
                             if int(big_end) > int(end):
                                 end = int(big_end)
@@ -6949,9 +6992,12 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             req_max = 0
 
+        # 注意：不要在这里取消所有待处理的任务，否则会中断预加载
+        # 只有在切换文件夹或刷新时才需要取消所有任务
         if getattr(self, "_visible_load_force_cancel", False):
-            self.thumbnail_loader.cancel_pending()
-            self._requested_paths = set()
+            # 只取消低优先级的后台任务，保留高优先级的可见区域和预加载任务
+            # 这样可以在滚动时保持预加载的连续性
+            pass  # 暂时不取消任何任务，让预加载继续
         self._visible_load_force_cancel = False
 
         paths_to_load = []
@@ -7007,15 +7053,17 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         pass
             has_loaded = (has_pix or has_img) and not is_stale
 
+            # 检查是否已经在请求列表中
             if key in self._requested_paths and not is_stale:
-                if i <= end_visible:
-                    if not has_loaded and hasattr(thumb, "load_thumbnail"):
-                        try:
-                            if hasattr(thumb, "update"):
-                                thumb.update()
-                        except Exception:
-                            pass
-                continue
+                # 如果已经请求过但没有加载完成，且当前在可见区域，尝试重新加载
+                if i <= end_visible and not has_loaded:
+                    # 可见区域但尚未加载，保留在列表中以便重新请求
+                    pass  # 继续处理，不跳过
+                else:
+                    # 已加载或不在可见区域，跳过
+                    continue
+            
+            # 如果标记为过期，从请求列表中移除以便重新加载
             if key in self._requested_paths and is_stale:
                 try:
                     self._requested_paths.discard(key)
@@ -7030,21 +7078,43 @@ class ImageLibraryPage(BaseImageBrowserPage):
             # PRIORITY_ADJACENT = 0: 相邻区域（预加载）
             # PRIORITY_PRELOAD = 1: 预加载区域
             # PRIORITY_BACKGROUND = 2: 后台加载
+            
+            # 计算预加载范围：根据滚动速度动态调整
+            # 基础预加载：下方3行
+            base_preload_rows = 3
+            # 快速滚动时增加预加载范围
+            fast_scroll_multiplier = 2 if getattr(self, "_fast_scroll_active", False) else 1
+            # 大缩略图模式增加预加载范围
+            big_mode_multiplier = 2 if is_big_mode else 1
+            
+            preload_rows = base_preload_rows * fast_scroll_multiplier * big_mode_multiplier
+            preload_count = cols * preload_rows
+            
             if i <= end_visible:
                 # 立即可见区域使用最高优先级
                 priority = -2
                 is_in_view = True
-            elif i <= end_visible + cols * 2:
-                # 相邻区域（下方2行）
-                priority = 0
+            elif i <= end_visible + preload_count:
+                # 预加载区域（下方多行）
+                # 根据距离可见区域的远近设置不同优先级
+                distance = i - end_visible
+                if distance <= cols:
+                    # 紧邻区域（1行内）
+                    priority = 0
+                elif distance <= cols * 2:
+                    # 近邻区域（2行内）
+                    priority = 1
+                else:
+                    # 远邻区域
+                    priority = 2
                 is_in_view = False
             elif getattr(self, "_mouse_busy", False):
                 # 鼠标忙碌时，降低预加载优先级
-                priority = 2
+                priority = 3
                 is_in_view = False
             else:
-                # 普通预加载
-                priority = 1
+                # 后台加载
+                priority = 2
                 is_in_view = False
 
             paths_to_load.append((priority, path, is_in_view))
@@ -7064,7 +7134,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._current_visible_path_keys = current_visible_keys
         self._pending_visible_path_keys = pending_visible_keys
 
+
+
         if paths_to_load:
+            # 反转加载顺序，确保从左上角到右下角加载
+            # 因为 thumbnail_loader 中 front=True 的任务使用递减的 seq，
+            # 后添加的任务会有更小的 seq，会先被处理
+            # 所以反转列表，让左上角的缩略图后添加，从而先被处理
+            paths_to_load.reverse()
             self.thumbnail_loader.load_thumbnails(paths_to_load, self.current_thumb_size, cache_type, request_id=getattr(self, "_thumbnail_request_id", None))
             # 在状态栏显示缩略图加载任务
             try:
@@ -7111,9 +7188,15 @@ class ImageLibraryPage(BaseImageBrowserPage):
             except Exception:
                 pass
 
+        # 懒加载：当接近已加载缩略图的末尾时，加载更多
+        # 修改：提前加载，确保预加载有足够的缩略图控件
         if self.is_lazy_loading and self.current_loaded_count < len(self.all_image_files):
             try:
-                if end_visible >= max(0, len(self.grid_view.thumbnails) - 6):
+                # 计算需要提前加载的阈值
+                # 原来是：当滚动到距离末尾6个时加载
+                # 现在：当预加载范围接近已加载数量时就开始加载更多
+                preload_threshold = max(0, len(self.grid_view.thumbnails) - self.batch_size // 2)
+                if end >= preload_threshold:
                     self.load_more_thumbnails()
             except Exception:
                 pass
@@ -7138,12 +7221,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 可视区域能显示的数量
         visible_count = cols * rows_visible
         
-        # 缓冲区域（预加载下方 5 行，增加缓冲以防止快速滚动时的空白）
-        buffer_rows = 5
+        # 缓冲区域（预加载下方 10 行，增加缓冲以防止快速滚动时的空白）
+        # 增加缓冲行数，确保预加载有足够的缩略图控件
+        buffer_rows = 10
         buffer_count = cols * buffer_rows
         
-        # 初始加载数量
-        initial_count = visible_count + buffer_count
+        # 初始加载数量：可见区域 + 缓冲区域 + 额外预加载区域
+        # 确保一开始就有足够的缩略图控件来支持预加载
+        initial_count = visible_count + buffer_count + (cols * 5)  # 额外5行作为安全余量
         
         try:
             LogManager.instance().debug(
@@ -7304,8 +7389,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                             self._startup_pending_paths.add(self._normalize_path_key(path))
                     
             if paths_to_load:
+                # 反转加载顺序，确保从左上角到右下角加载
+                paths_to_load.reverse()
                 self.thumbnail_loader.load_thumbnails(paths_to_load, self.current_thumb_size, cache_type, request_id=getattr(self, "_thumbnail_request_id", None))
-                
+
             # 如果加载完了，关闭懒加载标志
             if self.current_loaded_count >= len(self.all_image_files):
                 self.is_lazy_loading = False
@@ -8902,6 +8989,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
         2. 如果已经在处理，直接添加到队列
         3. 使用singleShot启动处理，避免阻塞
         """
+
+        
         # 限制队列长度，避免内存无限增长
         max_queue_size = 500
         if len(self._pending_updates) >= max_queue_size:
@@ -8951,8 +9040,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         
         优化点：
         1. 批量处理，减少定时器触发次数
-        2. 每处理一批后让出时间片，避免阻塞UI
-        3. 使用processEvents保持UI响应
+        2. 优先处理可见区域的缩略图，确保用户看到的立即更新
+        3. 每处理一批后让出时间片，避免阻塞UI
+        4. 使用processEvents保持UI响应
         """
         if not self._pending_updates:
             self._is_processing_updates = False
@@ -8962,25 +9052,54 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._is_processing_updates = False
             return
         
+
+        
         # 标记正在处理
         self._is_processing_updates = True
         
-        # 批量处理，但每批数量适中
-        batch_size = min(self._update_batch_size, len(self._pending_updates))
-        processed = 0
+        # 获取当前可见区域的路径，优先处理
+        visible_keys = getattr(self, '_current_visible_path_keys', set())
         
-        while self._pending_updates and processed < batch_size:
+        # 将队列分为可见区域和非可见区域
+        visible_updates = []
+        non_visible_updates = []
+        
+        while self._pending_updates:
             path, image = self._pending_updates.popleft()
             key = self._normalize_path_key(path)
-            
-            if not self._apply_loaded_thumbnail(path, image):
+            if key in visible_keys:
+                visible_updates.append((path, image))
+            else:
+                non_visible_updates.append((path, image))
+        
+
+        
+        # 优先处理可见区域的更新
+        all_updates = visible_updates + non_visible_updates
+        
+        # 批量处理，但每批数量适中
+        batch_size = min(self._update_batch_size, len(all_updates))
+        processed = 0
+        applied_count = 0
+        
+        # 先处理第一批（可见区域优先）
+        for path, image in all_updates[:batch_size]:
+            if self._apply_loaded_thumbnail(path, image):
+                applied_count += 1
+            else:
                 self._retry_apply_loaded_thumbnail(path, image, 0)
             
+            key = self._normalize_path_key(path)
             if self._startup_mask_enabled and self._startup_mask_visible:
                 if key in self._startup_pending_paths:
                     self._startup_pending_paths.discard(key)
             
             processed += 1
+        
+        # 将未处理的更新放回队列
+        remaining = all_updates[batch_size:]
+        for path, image in remaining:
+            self._pending_updates.append((path, image))
         
         # 更新启动遮罩状态
         if self._startup_mask_enabled and self._startup_mask_visible:
@@ -8989,7 +9108,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 如果还有未处理的更新，安排下一批
         if self._pending_updates:
             # 使用QTimer.singleShot让出时间片，避免阻塞UI
-            QTimer.singleShot(1, self._process_pending_updates)
+            # 如果有可见区域的更新，使用更短的延迟
+            delay = 0 if visible_updates else 1
+            QTimer.singleShot(delay, self._process_pending_updates)
         else:
             self._is_processing_updates = False
             # 所有缩略图更新处理完成，结束状态栏任务
@@ -9045,16 +9166,34 @@ class ImageLibraryPage(BaseImageBrowserPage):
         
         优化点：
         1. 减少不必要的属性访问
-        2. 延迟更新非可见区域的缩略图
+        2. 预加载的图片立即显示，不延迟
         3. 使用轻量级检查
+        4. 支持从 grid_view.thumbnails 中查找（备用）
         """
         key = self._normalize_path_key(path)
         
-        # 快速检查：如果不在当前可见区域，延迟更新
-        visible_keys = getattr(self, '_current_visible_path_keys', set())
-        is_visible = key in visible_keys
-        
+        # 首先从 _thumb_by_path 中查找
         thumb = self._thumb_by_path.get(key)
+        found_in_cache = thumb is not None
+        
+        # 如果没找到，尝试从 grid_view.thumbnails 中查找
+        # 这在懒加载模式下很重要，因为缩略图可能还没被添加到 _thumb_by_path
+        if not thumb and hasattr(self, 'grid_view') and self.grid_view:
+            for t in getattr(self.grid_view, 'thumbnails', []):
+                info = getattr(t, 'image_info', None)
+                if info:
+                    try:
+                        t_path = info.get('path') or info.get('file_path') or info.get('filepath')
+                        if t_path and self._normalize_path_key(t_path) == key:
+                            thumb = t
+                            # 缓存到 _thumb_by_path 以便下次快速查找
+                            self._thumb_by_path[key] = thumb
+                            break
+                    except Exception:
+                        pass
+        
+
+        
         if not thumb:
             return False
             
@@ -9073,18 +9212,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
         if image is None:
             return True
             
-        # 只有可见区域或非快速滚动时才更新UI
-        if is_visible or not getattr(self, "_fast_scroll_active", False):
-            if hasattr(thumb, "set_thumbnail_image"):
-                thumb.set_thumbnail_image(image)
-                try:
-                    thumb._stale_thumbnail = False
-                except Exception:
-                    pass
-        else:
-            # 非可见区域且快速滚动中，标记为待更新
+        # 立即应用缩略图，不区分是否可见或是否快速滚动
+        # 这样可以确保预加载的图片立即显示，用户滚动时不会看到占位符
+        if hasattr(thumb, "set_thumbnail_image"):
+            thumb.set_thumbnail_image(image)
             try:
-                thumb._pending_image = image
                 thumb._stale_thumbnail = False
             except Exception:
                 pass

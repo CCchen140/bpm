@@ -173,24 +173,26 @@ class ThumbnailLoadTask(QRunnable):
             # 检查请求是否仍然有效
             if page._load_request_id != self.load_request_id:
                 return
-            
+
             visible_paths = result.get('visible_paths', [])
             preload_paths = result.get('preload_paths', [])
-            
+
             if not visible_paths and not preload_paths:
                 return
-            
+
             # 合并路径列表
             paths_to_load = visible_paths[:]
             max_preload = 20  # 限制预加载数量
             if len(preload_paths) > max_preload:
                 preload_paths = preload_paths[:max_preload]
             paths_to_load.extend(preload_paths)
-            
+
             # 执行实际的缩略图加载
             if paths_to_load:
-                page._execute_thumbnail_load(paths_to_load, result.get('current_visible_paths', set()))
-                
+                # 反转加载顺序，确保从左上角到右下角加载
+                paths_to_load.reverse()
+                page.thumbnail_loader.load_thumbnails(paths_to_load, page.grid_view.current_thumb_size, request_id=page._load_request_id)
+
         except Exception:
             pass
 from ui.utils.icon_loader import qta
@@ -252,8 +254,8 @@ class ImportPage(BaseImageBrowserPage):
         self.cache_manager = ImageCacheManager(context="import", enable_preload=False)
         self.big_image_cache = BigImageCacheManager.instance("import")
         self.cache_manager.max_cache_size = cache_size
-        self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.IMPORT_LOADER)
-        self.thumbnail_loader.set_max_thread_count(loader_threads)
+        # 使用性能设置中的加载线程数创建缩略图加载器
+        self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.IMPORT_LOADER, thread_count=loader_threads)
         
         self.image_files = [] # 当前显示的图片文件列表
         self._all_image_files = []
@@ -3206,6 +3208,18 @@ class ImportPage(BaseImageBrowserPage):
                     pass
         try:
             self._schedule_visible_load(immediate=True)
+        except Exception:
+            pass
+
+        # 点击缩略图后，异步加载文件大小
+        try:
+            path = None
+            if index < len(thumbnails) and thumbnails[index].image_info:
+                path = thumbnails[index].image_info.get("path") or thumbnails[index].image_info.get("file_path")
+            elif index < len(self.image_files):
+                path = self.image_files[index].get("path") or self.image_files[index].get("file_path")
+            if path and hasattr(self, 'info_panel') and self.info_panel:
+                self.info_panel.load_file_size(path)
         except Exception:
             pass
 
@@ -9775,8 +9789,12 @@ class ImportPage(BaseImageBrowserPage):
                 if (has_existing_pix or has_existing_img) and not is_stale:
                     continue
                 if not is_visible:
+                    # 预加载的图片立即应用到 UI，确保滚动时不会看到占位符
                     try:
-                        thumb._thumbnail_image = image
+                        if hasattr(thumb, "set_thumbnail_image"):
+                            thumb.set_thumbnail_image(image)
+                        else:
+                            thumb._thumbnail_image = image
                         try:
                             thumb._stale_thumbnail = False
                         except Exception:
@@ -9786,7 +9804,8 @@ class ImportPage(BaseImageBrowserPage):
                     continue
                 if hasattr(thumb, "set_thumbnail_image"):
                     # 可见：使用控件自身的更新接口（内部会触发必要的重绘）
-                    thumb.set_thumbnail_image(image)
+                    # immediate=True 避免延迟更新导致的闪烁
+                    thumb.set_thumbnail_image(image, immediate=True)
                 else:
                     try:
                         thumb.set_pixmap(image)
@@ -9949,8 +9968,10 @@ class ImportPage(BaseImageBrowserPage):
 
                 if image is None and not self._error_notified:
                     self._error_notified = True
-            #  else: 非可见区域的缩略图直接丢弃，不处理
-            #  等滚动到可见区域时会触发新的加载请求
+            else:
+                # 非可见区域的缩略图（预加载）也要处理，确保滚动时不会看到占位符
+                # 使用 _apply_loaded_thumbnail_ui 方法应用预加载的图片
+                self._apply_loaded_thumbnail_ui(path, image, is_visible=False)
 
         if stats_updated and self.has_valid_folder:
             self.stats_changed.emit(len(self.image_files), self.loaded_count, self.selected_count)
@@ -10052,8 +10073,10 @@ class ImportPage(BaseImageBrowserPage):
             is_big_mode = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
         except Exception:
             is_big_mode = False
-        # 虚拟文件模式下，所有显示模式都需要在滚动时触发缩略图加载
-        if bool(getattr(self, "is_virtual_mode", False)) and end >= start:
+
+        # 所有模式下都需要在滚动时触发缩略图加载
+        # 探测下方多行是否有未加载的缩略图
+        if end >= start:
             try:
                 metrics = self.grid_view.get_viewport_metrics() or {}
                 cols = max(1, int(metrics.get("cols", 1)))
@@ -10064,20 +10087,25 @@ class ImportPage(BaseImageBrowserPage):
                     last_row = max(0, int(end) // int(cols))
                 except Exception:
                     last_row = 0
-                probe_row = int(last_row) + 2
+                # 探测下方多行是否有未加载的缩略图（增加探测范围到10行）
+                probe_row = int(last_row) + 1
                 probe_start = int(probe_row) * int(cols)
+                # 使用 image_files 的长度而不是 thumbnails 的长度，确保能探测到尚未构建的缩略图
                 try:
-                    total_items = len(getattr(self.grid_view, "thumbnails", []) or [])
+                    total_items = len(self.image_files)
                 except Exception:
                     total_items = 0
                 if 0 <= int(probe_start) < int(total_items):
-                    probe_end = min(int(total_items) - 1, int(probe_start) + int(cols) - 1)
+                    # 增加探测范围到10行，确保能检测到需要加载的缩略图
+                    probe_end = min(int(total_items) - 1, int(probe_start) + int(cols) * 10 - 1)
                     probe_has_unloaded = False
                     for j in range(int(probe_start), int(probe_end) + 1):
                         try:
                             t = self.grid_view.thumbnails[j]
                         except Exception:
-                            continue
+                            # 如果缩略图控件尚未构建，说明需要加载
+                            probe_has_unloaded = True
+                            break
                         try:
                             is_stale = bool(getattr(t, "_stale_thumbnail", False))
                         except Exception:
@@ -10094,10 +10122,17 @@ class ImportPage(BaseImageBrowserPage):
                             probe_has_unloaded = True
                             break
                     if probe_has_unloaded:
+                        print(f"[on_grid_scroll] Probe found unloaded thumbs at {probe_start}-{probe_end}, scheduling load")
                         try:
                             self._schedule_visible_load(immediate=True)
                         except Exception:
                             pass
+                # 无论是否探测到未加载的缩略图，都触发一次加载（确保滚动时总是加载）
+                print(f"[on_grid_scroll] Scroll detected, scheduling load for range {start}-{end}")
+                try:
+                    self._schedule_visible_load(immediate=True)
+                except Exception:
+                    pass
 
         try:
             total_count = len(self.image_files)
@@ -10230,6 +10265,8 @@ class ImportPage(BaseImageBrowserPage):
             pass
         if not self.image_files or not self.grid_view.thumbnails:
             return
+
+
             
         # 获取当前可视区域范围
         start, end, visible_rows = self._get_visible_index_range_for_loading(extra_rows=1)
@@ -10263,7 +10300,8 @@ class ImportPage(BaseImageBrowserPage):
         # 根据滚动方向动态调整预加载策略：
         # - 优先加载可见区域
         # - 根据滚动方向预加载下一屏，减少上一屏的预加载
-        preload_rows = visible_rows
+        # 预加载下一个完整屏幕的所有图片（两屏：当前可见屏幕 + 下一个屏幕）
+        preload_rows = visible_rows * 2
         preload_count = preload_rows * cols
         
         # 检测滚动方向
@@ -10284,17 +10322,19 @@ class ImportPage(BaseImageBrowserPage):
         
         # 根据滚动方向调整预加载范围
         # 快速滚动时增加预加载范围，确保流畅性
-        # 向下滑动时：预加载上方一屏 + 下方两屏（优先下方）
-        # 向上滑动时：预加载上方两屏 + 下方一屏（优先上方）
+        # 无论滚动方向如何，都预加载下方多屏，确保向下滑动时有足够的缩略图加载
         if scroll_direction > 0:  # 向下滑动
             preload_start = max(0, start - preload_count)  # 上方一屏
-            preload_end = min(len(self.image_files) - 1, end + preload_count * 2)  # 下方两屏
+            preload_end = min(len(self.image_files) - 1, end + preload_count * 3)  # 下方三屏
         elif scroll_direction < 0:  # 向上滑动
-            preload_start = max(0, start - preload_count * 2)  # 上方两屏
+            preload_start = max(0, start - preload_count * 3)  # 上方三屏
             preload_end = min(len(self.image_files) - 1, end + preload_count)  # 下方一屏
         else:  # 无明确方向
             preload_start = max(0, start - preload_count)  # 上方一屏
-            preload_end = min(len(self.image_files) - 1, end + preload_count)  # 下方一屏
+            preload_end = min(len(self.image_files) - 1, end + preload_count * 3)  # 下方三屏
+
+        # 调试日志：记录加载范围
+        print(f"[_load_visible_thumbnails] visible: {start}-{end}, preload: {preload_start}-{preload_end}, direction: {scroll_direction}")
 
         try:
             is_big_mode = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
@@ -10515,23 +10555,22 @@ class ImportPage(BaseImageBrowserPage):
         # 限制每次处理的缩略图数量，避免阻塞UI线程
         # 但优先保证可见区域的缩略图被加载
         # 增加预加载处理数量，确保快速滚动时的流畅性
-        max_process_per_frame = 300
+        max_process_per_frame = 1000  # 增加处理数量，确保预加载区域能被处理
         processed_count = 0
         has_more_to_process = False
         
         # 将 target_indices 转换为列表
         target_indices_list = list(target_indices)
-        
+
         # 分离可见区域和预加载区域
         visible_indices = [idx for idx in target_indices_list if idx >= start and idx <= end]
         preload_indices = [idx for idx in target_indices_list if idx < start or idx > end]
 
-        # 根据滚动方向调整预加载优先级
-        if scroll_direction > 0:  # 向下滑动，优先加载下方的缩略图
-            preload_indices.sort(reverse=True)  # 按索引从大到小排序（下方优先）
-        elif scroll_direction < 0:  # 向上滑动，优先加载上方的缩略图
-            preload_indices.sort(reverse=False)  # 按索引从小到大排序（上方优先）
-        
+        # 确保两个列表都按索引从小到大排序（从左上角到右下角）
+        # 这样反转后会变成从左上角到右下角的加载顺序
+        visible_indices.sort(reverse=False)
+        preload_indices.sort(reverse=False)
+
         # 合并列表：可见区域优先，然后是预加载区域
         target_indices_list = visible_indices + preload_indices
         
@@ -10565,11 +10604,14 @@ class ImportPage(BaseImageBrowserPage):
             is_visible = idx >= start and idx <= end  # 在可视区域内
             if is_visible:
                 current_visible_paths.add(path)
-                
+
             # 检查是否需要加载
             if idx >= len(self.grid_view.thumbnails):
                 if idx > missing_control_max_idx:
                     missing_control_max_idx = int(idx)
+                # 调试日志：记录跳过的缩略图
+                if is_visible:
+                    print(f"[SKIP] idx={idx} >= thumbnails_len={len(self.grid_view.thumbnails)}, path={path[-50:] if len(path) > 50 else path}")
                 continue
                 
             thumb = self.grid_view.thumbnails[idx]
@@ -10684,7 +10726,10 @@ class ImportPage(BaseImageBrowserPage):
 
         if paths_to_load:
             # 批量提交加载任务
-            # 添加日志：排查虚拟文件模式下的缩略图加载问题
+            # 反转加载顺序，确保从左上角到右下角加载
+            paths_to_load.reverse()
+            # 调试日志：记录加载任务数量
+            print(f"[_load_visible_thumbnails] visible: {len(visible_paths_to_load)}, preload: {len(preload_paths_to_load)}, total: {len(paths_to_load)}")
             self.thumbnail_loader.load_thumbnails(paths_to_load, load_thumb_size, request_id=self._load_request_id)
             # 在状态栏显示缩略图加载任务
             visible_count = len(visible_paths_to_load)

@@ -515,7 +515,7 @@ class ThumbnailLoader(QObject):
     PRIORITY_PRELOAD = 1     # 预加载区域
     PRIORITY_BACKGROUND = 2  # 后台加载
     
-    def __init__(self, cache_manager, task_type=TaskType.DEFAULT):
+    def __init__(self, cache_manager, task_type=TaskType.DEFAULT, thread_count=None):
         super().__init__()
         self.cache_manager = cache_manager
         scope = "import" if str(getattr(cache_manager, "context", "")).lower() == "import" else "library"
@@ -524,13 +524,19 @@ class ThumbnailLoader(QObject):
             self.disk_cache.cleanup_async(delay_sec=8.0)
         except Exception:
             pass
-        
+
         # 使用自定义线程池，更好地控制并发
         self.thread_pool = QThreadPool()
-        scheduler = TaskScheduler.instance()
-        self._default_thread_count = scheduler.get_thread_count(task_type)
-        # 限制最大线程数，避免过多线程竞争
-        self._max_thread_count = min(self._default_thread_count, 4)
+        # 如果提供了线程数，直接使用；否则从TaskScheduler获取
+        if thread_count is not None and thread_count > 0:
+            self._default_thread_count = int(thread_count)
+        else:
+            scheduler = TaskScheduler.instance()
+            self._default_thread_count = scheduler.get_thread_count(task_type)
+        # 增加最大线程数以提高缩略图加载速度
+        # 对于缩略图加载，更多的线程可以更好地利用CPU和I/O
+        # 最大线程数限制为6，避免过多线程导致资源竞争
+        self._max_thread_count = min(self._default_thread_count, 6)
         self.thread_pool.setMaxThreadCount(self._max_thread_count)
         
         self.signals = ThumbnailLoaderSignals()
@@ -571,8 +577,8 @@ class ThumbnailLoader(QObject):
     def set_max_thread_count(self, count):
         """设置最大线程数"""
         if count > 0:
-            # 限制最大线程数，避免过多线程竞争CPU
-            self._max_thread_count = min(int(count), 4)
+            # 增加最大线程数上限以支持更快的缩略图加载
+            self._max_thread_count = min(int(count), 6)
             self.thread_pool.setMaxThreadCount(self._max_thread_count)
     
     def _emit_loaded(self, path, image):
@@ -619,10 +625,10 @@ class ThumbnailLoader(QObject):
     def _process_result_queue(self):
         """处理结果队列，在主线程中异步发射信号
         
-        每帧最多处理5个结果，避免阻塞主线程
+        每帧最多处理8个结果，避免阻塞主线程
         配合8ms间隔，确保120fps流畅度，加快缩略图显示
         """
-        max_per_frame = 5
+        max_per_frame = 8
         processed = 0
         
         while processed < max_per_frame:
@@ -728,7 +734,7 @@ class ThumbnailLoader(QObject):
             
             # 限制每帧分发的任务数，避免一次性分发太多任务导致UI线程被信号淹没
             tasks_per_frame = 0
-            max_tasks_per_frame = 4  # 每帧最多分发4个任务，提高并发度
+            max_tasks_per_frame = 6  # 每帧最多分发6个任务，提高并发度以支持更大的预加载范围
             
             while tasks_per_frame < max_tasks_per_frame:
                 task = None

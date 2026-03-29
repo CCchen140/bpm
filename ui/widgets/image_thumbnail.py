@@ -785,13 +785,17 @@ class ImageThumbnail(QWidget):
             self._cached_pixmap = None
         self.update()
 
-    def set_thumbnail_image(self, image):
+    def set_thumbnail_image(self, image, immediate=False):
         """直接设置缩略图 (优化性能，避免内部重新缩放) - 优化版
         
         优化点：
         1. 如果图片尺寸合适，跳过缩放操作
         2. 优先使用快速缩放模式
-        3. 延迟更新，避免频繁重绘
+        3. 延迟更新，避免频繁重绘（除非 immediate=True）
+        
+        参数:
+            image: 要设置的缩略图图像
+            immediate: 是否立即更新，不延迟。用于预加载的图片，避免闪烁。
         """
         # 性能分析
         from utils.performance_profiler import PerformanceProfiler, MainThreadChecker
@@ -870,8 +874,9 @@ class ImageThumbnail(QWidget):
             self.thumbnail_pixmap = None
             self._cached_pixmap = None 
             
-            # 使用延迟更新，避免频繁重绘
-            self._schedule_update()
+            # 根据 immediate 参数决定是否立即更新
+            # immediate=True 用于预加载的图片，避免闪烁
+            self._schedule_update(immediate=immediate)
             
         except Exception as e:
             try:
@@ -884,10 +889,20 @@ class ImageThumbnail(QWidget):
             if MainThreadChecker.check_main_thread():
                 profiler.end("set_thumbnail_image_main_thread")
     
-    def _schedule_update(self):
-        """延迟更新缩略图显示，避免频繁重绘"""
+    def _schedule_update(self, immediate=False):
+        """延迟更新缩略图显示，避免频繁重绘
+        
+        参数:
+            immediate: 是否立即更新，不延迟。用于预加载的图片，避免闪烁。
+        """
         if not hasattr(self, '_update_pending'):
             self._update_pending = False
+        
+        if immediate:
+            # 立即更新，不延迟
+            self._update_pending = False
+            self.update()
+            return
             
         if not self._update_pending:
             self._update_pending = True

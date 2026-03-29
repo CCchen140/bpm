@@ -4877,7 +4877,12 @@ class ImageDetailPanel(QWidget):
         except Exception:
             pass
 
-        self._strip_thumb_loader = ThumbnailLoader(self.cache_manager)
+        # 从性能设置中读取加载线程数
+        cpu_count = os.cpu_count() or 4
+        default_threads = max(1, cpu_count - 2)
+        loader_threads = int(SettingsManager().get("import/loader_threads", default_threads))
+        loader_threads = max(1, min(loader_threads, default_threads))
+        self._strip_thumb_loader = ThumbnailLoader(self.cache_manager, thread_count=loader_threads)
         self._strip_thumb_loader.signals.loaded.connect(self._on_strip_thumbnail_loaded)
         self._strip_thumb_request_id = 1
         self._strip_thumb_timer = QTimer(self)
@@ -4963,6 +4968,8 @@ class ImageDetailPanel(QWidget):
         if tasks:
             self._strip_thumb_request_id += 1
             self._strip_thumb_loader.set_active_request_id(self._strip_thumb_request_id)
+            # 反转加载顺序，确保从当前位置向两侧加载
+            tasks.reverse()
             self._strip_thumb_loader.load_thumbnails(tasks, 104, request_id=self._strip_thumb_request_id)
 
     def _on_strip_thumbnail_loaded(self, path, image):
