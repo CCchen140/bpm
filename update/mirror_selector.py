@@ -426,6 +426,8 @@ def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
     """
     获取版本清单的URL列表（已排序）
     
+    优先使用 GitCode，其次是 GitHub 及其镜像
+    
     参数:
         use_cache: 是否使用缓存，默认为True
         
@@ -438,12 +440,20 @@ def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
         if cached is not None:
             return cached
     
-    # 主地址
-    urls = [(config.UPDATE_MANIFEST_URL, "github-direct")]
+    # URL 列表，按优先级排序
+    urls_with_meta = []
     
-    # 如果启用了镜像，添加镜像地址
+    # 1. GitCode - 国内优先
+    gitcode_manifest_url = f"https://gitcode.com/{config.GITCODE_OWNER}/{config.GITCODE_REPO}/releases/download/latest/update_manifest.json"
+    urls_with_meta.append((gitcode_manifest_url, "gitcode", True))
+    _log_debug("添加 GitCode 主源")
+    
+    # 2. GitHub 主源
+    urls_with_meta.append((config.GITHUB_UPDATE_MANIFEST_URL, "github-direct", True))
+    _log_debug("添加 GitHub 主源")
+    
+    # 3. GitHub 镜像
     if config.ENABLE_MIRROR and config.MIRROR_URLS:
-        mirror_urls = []
         for mirror_template, desc, enable_ping in config.MIRROR_URLS:
             try:
                 # 构建镜像 URL
@@ -453,18 +463,20 @@ def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
                     tag="latest",
                     filename="update_manifest.json"
                 )
-                mirror_urls.append((mirror_url, desc, enable_ping))
+                urls_with_meta.append((mirror_url, desc, enable_ping))
+                _log_debug(f"添加镜像: {desc}")
             except Exception as e:
                 _log_warning(f"构建镜像 URL 失败: {e}")
+    
+    # 检测并排序所有 URL
+    if urls_with_meta:
+        urls = select_best_mirror(urls_with_meta)
         
-        # 检测并排序镜像
-        if mirror_urls:
-            sorted_mirrors = select_best_mirror(mirror_urls)
-            urls.extend(sorted_mirrors)
-            
-            # 保存到缓存
-            if use_cache:
-                _save_cache(urls)
+        # 保存到缓存
+        if use_cache:
+            _save_cache(urls)
+    else:
+        urls = []
     
     return urls
 
