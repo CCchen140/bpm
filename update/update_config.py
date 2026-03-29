@@ -20,9 +20,11 @@ GITCODE_REPO = "qitupage"   # 仓库名称
 # 格式: https://gitcode.com/{owner}/{repo}/releases/download/{tag}/{filename}
 GITCODE_DOWNLOAD_URL_TEMPLATE = f"https://gitcode.com/{GITCODE_OWNER}/{GITCODE_REPO}/releases/download/{{tag}}/{{filename}}"
 
-# GitCode 版本清单文件 URL（使用最新版本）
-# 注意：GitCode 会返回 302 重定向到 CDN
-GITCODE_UPDATE_MANIFEST_URL = f"https://gitcode.com/{GITCODE_OWNER}/{GITCODE_REPO}/releases/download/latest/update_manifest.json"
+# GitCode 版本清单文件 URL 模板
+# 注意：GitCode 不支持 'latest' 标签，需要使用具体的版本号
+# 格式: https://gitcode.com/{owner}/{repo}/releases/download/{tag}/update_manifest.json
+# 实际的 URL 会在 mirror_selector.py 中通过 _get_latest_version_tag() 构建
+GITCODE_UPDATE_MANIFEST_URL_TEMPLATE = f"https://gitcode.com/{GITCODE_OWNER}/{GITCODE_REPO}/releases/download/{{tag}}/update_manifest.json"
 
 # =============================================================================
 # GitHub 配置（备用）
@@ -38,8 +40,8 @@ GITHUB_LATEST_RELEASE_URL = f"{GITHUB_API_BASE}/releases/latest"
 # 版本清单文件 URL（GitHub 备用）
 GITHUB_UPDATE_MANIFEST_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest/download/update_manifest.json"
 
-# 默认使用 GitCode 作为主源
-UPDATE_MANIFEST_URL = GITCODE_UPDATE_MANIFEST_URL
+# 默认使用 GitHub 作为主源（GitCode 需要具体的版本号，在 mirror_selector.py 中动态构建）
+UPDATE_MANIFEST_URL = GITHUB_UPDATE_MANIFEST_URL
 
 # 备用镜像地址（可选）
 # 当主源访问不稳定时，会尝试使用这些镜像

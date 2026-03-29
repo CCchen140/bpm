@@ -10333,9 +10333,6 @@ class ImportPage(BaseImageBrowserPage):
             preload_start = max(0, start - preload_count)  # 上方一屏
             preload_end = min(len(self.image_files) - 1, end + preload_count * 3)  # 下方三屏
 
-        # 调试日志：记录加载范围
-        print(f"[_load_visible_thumbnails] visible: {start}-{end}, preload: {preload_start}-{preload_end}, direction: {scroll_direction}")
-
         try:
             is_big_mode = int(getattr(self, "display_mode", ImageThumbnail.MODE_WITH_NAME) or ImageThumbnail.MODE_WITH_NAME) == ImageThumbnail.MODE_THUMBNAIL_ONLY
         except Exception:
@@ -10728,8 +10725,6 @@ class ImportPage(BaseImageBrowserPage):
             # 批量提交加载任务
             # 反转加载顺序，确保从左上角到右下角加载
             paths_to_load.reverse()
-            # 调试日志：记录加载任务数量
-            print(f"[_load_visible_thumbnails] visible: {len(visible_paths_to_load)}, preload: {len(preload_paths_to_load)}, total: {len(paths_to_load)}")
             self.thumbnail_loader.load_thumbnails(paths_to_load, load_thumb_size, request_id=self._load_request_id)
             # 在状态栏显示缩略图加载任务
             visible_count = len(visible_paths_to_load)
@@ -15044,13 +15039,6 @@ class ImportPage(BaseImageBrowserPage):
                                 dest_dir = str(virtual_roots[0])
                         except Exception:
                             pass
-
-                    # 调试日志
-                    try:
-                        from utils.log_manager import LogManager
-                        LogManager.instance().info(f"[FocusDetectUI] open_dest_dir: post_action={post_action}, dest_dir={dest_dir}, exists={os.path.isdir(dest_dir) if dest_dir else False}")
-                    except Exception:
-                        pass
 
                     if dest_dir and os.path.isdir(dest_dir):
                         # 使用与软件其他部分相同的方式打开文件夹

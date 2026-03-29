@@ -343,8 +343,11 @@ class CheckUpdateThread(QThread):
     def run(self):
         """执行检查"""
         try:
+            print("[UpdateCheckWorker] 开始执行检查...")
+            _log_debug("开始执行检查...")
             # 获取版本清单
             manifest = self._fetch_manifest()
+            print(f"[UpdateCheckWorker] 获取到版本清单: {manifest is not None}")
             if not manifest:
                 self.check_failed.emit("无法获取版本清单")
                 return
@@ -460,8 +463,11 @@ class CheckUpdateThread(QThread):
         else:
             # 使用镜像选择器获取排序后的 URL 列表
             from .mirror_selector import get_manifest_urls
+            print("[_fetch_manifest] 调用 get_manifest_urls()...")
+            _log_debug("调用 get_manifest_urls()...")
             urls = get_manifest_urls()
-            _log_debug(f"将尝试 {len(urls)} 个地址获取版本清单")
+            print(f"[_fetch_manifest] 获取到 {len(urls)} 个地址: {urls}")
+            _log_debug(f"将尝试 {len(urls)} 个地址获取版本清单: {[desc for _, desc in urls]}")
         
         # 尝试所有 URL
         last_error = None

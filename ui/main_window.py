@@ -1241,14 +1241,6 @@ class MainWindow(QMainWindow):
             self._subject_detector_warmup_started = True
         except Exception:
             self._subject_detector_warmup_started = True
-        
-        # 优化：不再在启动时预热主体检测器，改为首次实际使用时再加载
-        # 这样可以避免启动时导入 torch 等重型依赖，显著减少启动时间
-        # 预热操作推迟到用户首次使用相关功能时自动触发
-        try:
-            LogManager.instance().debug("[Startup] 主体检测器预热已推迟到首次使用时")
-        except Exception:
-            pass
 
     def on_guide_completed(self):
         """引导完成"""
@@ -2258,6 +2250,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 在强制退出前，手动清理数据库标志文件（os._exit 不会执行 atexit 钩子）
+        try:
+            from utils.sql.data_base import BirdLibraryDB
+            db = BirdLibraryDB()
+            db._mark_db_closed()
+        except Exception:
+            pass
+
         # 使用 os._exit 强制终止进程，确保不会残留
         # 延迟一点执行，让清理线程有机会运行
         def _force_exit():
@@ -2281,24 +2281,17 @@ class MainWindow(QMainWindow):
         """
         import time
 
-        # 记录启动时的进程列表
-        self._log_processes_at_exit("退出开始")
-
         # 停止 ExifHandleWorker（不等待，立即返回）
         try:
             worker_instance.stop(force=True)
-            print("[ExitDebug] ExifHandleWorker.stop() 已调用")
-        except Exception as e:
-            print(f"[ExitDebug] ExifHandleWorker.stop() 失败: {e}")
+        except Exception:
+            pass
 
         # 强制终止所有子进程（减少等待时间）
         try:
             self._kill_all_children_processes_fast()
-        except Exception as e:
-            print(f"[ExitDebug] 终止子进程失败: {e}")
-
-        # 记录退出后的进程列表
-        self._log_processes_at_exit("退出完成")
+        except Exception:
+            pass
 
         # 异步备份数据库
         try:
@@ -2308,62 +2301,6 @@ class MainWindow(QMainWindow):
             db.backup_on_exit()
         except Exception:
             pass
-
-    def _log_processes_at_exit(self, stage: str):
-        """
-        记录当前所有子进程信息，用于调试残留进程问题
-        """
-        try:
-            import psutil
-            import os
-
-            current_pid = os.getpid()
-            current_process = psutil.Process(current_pid)
-
-            print(f"\n[ExitDebug] ===== {stage} 时的进程列表 =====")
-            print(f"[ExitDebug] 当前进程 PID: {current_pid}")
-
-            # 获取所有子进程
-            try:
-                children = current_process.children(recursive=True)
-                if not children:
-                    print(f"[ExitDebug] 没有子进程")
-                else:
-                    print(f"[ExitDebug] 发现 {len(children)} 个子进程:")
-                    for proc in children:
-                        try:
-                            proc_info = proc.as_dict(attrs=['pid', 'name', 'exe', 'cmdline', 'create_time'])
-                            print(f"[ExitDebug]   PID={proc_info['pid']}, Name={proc_info['name']}")
-                            print(f"[ExitDebug]     Exe={proc_info.get('exe', 'N/A')}")
-                            cmdline = proc_info.get('cmdline', [])
-                            if cmdline:
-                                print(f"[ExitDebug]     Cmdline={' '.join(cmdline[:3])}...")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            print(f"[ExitDebug]   PID={proc.pid} (无法获取详细信息)")
-                        except Exception as e:
-                            print(f"[ExitDebug]   PID={proc.pid} (错误: {e})")
-            except Exception as e:
-                print(f"[ExitDebug] 获取子进程列表失败: {e}")
-
-            # 同时记录所有 qitu 相关的进程（包括不是子进程的）
-            print(f"[ExitDebug] ----- 系统中所有 qitu 相关进程 -----")
-            for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
-                try:
-                    proc_info = proc.info
-                    proc_name = proc_info.get('name', '').lower()
-                    proc_exe = proc_info.get('exe', '')
-                    if 'qitu' in proc_name or (proc_exe and 'qitu' in proc_exe.lower()):
-                        is_current = proc_info['pid'] == current_pid
-                        print(f"[ExitDebug]   PID={proc_info['pid']}, Name={proc_info['name']}, Current={is_current}")
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-                except Exception:
-                    continue
-
-            print(f"[ExitDebug] ===== 进程列表结束 =====\n")
-
-        except Exception as e:
-            print(f"[ExitDebug] 记录进程列表失败: {e}")
 
     def _kill_all_children_processes_fast(self):
         """
@@ -2380,47 +2317,39 @@ class MainWindow(QMainWindow):
             children = []
             try:
                 children = current_process.children(recursive=True)
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                print(f"[ExitDebug] 获取子进程失败: {e}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
             if not children:
-                print("[ExitDebug] 没有子进程需要终止")
                 return
-
-            print(f"[ExitDebug] 准备终止 {len(children)} 个子进程")
 
             # 先尝试优雅终止
             for proc in children:
                 try:
-                    print(f"[ExitDebug]   终止 PID={proc.pid}, Name={proc.name()}")
                     proc.terminate()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-                except Exception as e:
-                    print(f"[ExitDebug]   终止 PID={proc.pid} 失败: {e}")
+                except Exception:
+                    continue
 
             # 短暂等待（最多0.5秒）
             gone, alive = psutil.wait_procs(children, timeout=0.5)
-            print(f"[ExitDebug] 已终止 {len(gone)} 个进程，还有 {len(alive)} 个存活")
 
             # 强制杀死仍未终止的进程
             for proc in alive:
                 try:
-                    print(f"[ExitDebug]   强制杀死 PID={proc.pid}")
                     proc.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-                except Exception as e:
-                    print(f"[ExitDebug]   强制杀死 PID={proc.pid} 失败: {e}")
+                except Exception:
+                    continue
 
             # 再次等待
             if alive:
-                gone2, alive2 = psutil.wait_procs(alive, timeout=0.5)
-                print(f"[ExitDebug] 强制杀死后，已终止 {len(gone2)} 个，还有 {len(alive2)} 个存活")
+                psutil.wait_procs(alive, timeout=0.5)
 
-        except Exception as e:
-            print(f"[ExitDebug] 终止子进程过程出错: {e}")
+        except Exception:
+            pass
 
     def _kill_exiftool_processes(self):
         """

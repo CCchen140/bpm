@@ -41,7 +41,7 @@ class BirdLibraryDB:
     def __init__(self, db_path=None):
         if db_path is None:
             db_path = get_default_db_path()
-        
+
         # 检查是否已经初始化过该路径
         with BirdLibraryDB._instance_lock:
             if db_path in BirdLibraryDB._initialized_paths:
@@ -745,8 +745,17 @@ class BirdLibraryDB:
     def _is_abnormal_exit(self) -> bool:
         """检查上次是否非正常退出（通过标志文件判断）"""
         sentinel_path = _get_db_sentinel_path(self.db_path)
-        return os.path.exists(sentinel_path)
-    
+        exists = os.path.exists(sentinel_path)
+        if exists:
+            try:
+                with open(sentinel_path, 'r', encoding='utf-8') as f:
+                    timestamp = f.read().strip()
+                LogManager.instance().debug(f"[DB] 发现标志文件，上次运行时间戳: {timestamp}")
+            except Exception as e:
+                LogManager.instance().debug(f"[DB] 读取标志文件失败: {e}")
+        LogManager.instance().debug(f"[DB] 检查标志文件: {sentinel_path}, 存在: {exists}")
+        return exists
+
     def _mark_db_running(self):
         """标记数据库正在运行（创建标志文件）"""
         sentinel_path = _get_db_sentinel_path(self.db_path)
@@ -754,15 +763,17 @@ class BirdLibraryDB:
             # 创建标志文件，记录当前时间
             with open(sentinel_path, 'w', encoding='utf-8') as f:
                 f.write(str(time.time()))
+            LogManager.instance().debug(f"[DB] 创建标志文件: {sentinel_path}")
         except Exception as e:
             LogManager.instance().warning(f"[DB] Failed to create running sentinel: {e}")
-    
+
     def _mark_db_closed(self):
         """标记数据库已正常关闭（删除标志文件）"""
         sentinel_path = _get_db_sentinel_path(self.db_path)
         try:
             if os.path.exists(sentinel_path):
                 os.remove(sentinel_path)
+                LogManager.instance().debug(f"[DB] 成功删除标志文件: {sentinel_path}")
         except Exception as e:
             LogManager.instance().warning(f"[DB] Failed to remove running sentinel: {e}")
 
@@ -978,31 +989,40 @@ class BirdLibraryDB:
 
     def _init_db(self):
         """初始化数据库：创建表结构
-        
+
         优化：仅在非正常退出时执行完整的数据库完整性检查，减少启动时间
         """
+        # 确保只初始化一次
+        with BirdLibraryDB._instance_lock:
+            if getattr(BirdLibraryDB, '_init_db_called', False):
+                LogManager.instance().debug(f"[DB] 数据库已初始化，跳过重复初始化")
+                return
+            BirdLibraryDB._init_db_called = True
+
         try:
             LogManager.instance().info(f"[DB] Initializing database at {self.db_path}")
         except Exception:
             pass
+
+        # 先检查上次是否非正常退出（在创建新标志文件之前检查）
+        needs_restore = False
+        is_abnormal = False
+        if os.path.exists(self.db_path):
+            is_abnormal = self._is_abnormal_exit()
+            if is_abnormal:
+                LogManager.instance().warning("[DB] 检测到上次非正常退出，执行完整数据库完整性检查")
         
         # 标记数据库正在运行（用于检测非正常退出）
         self._mark_db_running()
         # 注册退出时清理标志文件的钩子
         atexit.register(self._mark_db_closed)
+        LogManager.instance().debug("[DB] 已注册 atexit 钩子 _mark_db_closed")
         
-        needs_restore = False
-        if os.path.exists(self.db_path):
-            # 检查上次是否非正常退出
-            is_abnormal = self._is_abnormal_exit()
-            if is_abnormal:
-                LogManager.instance().warning("[DB] 检测到上次非正常退出，执行完整数据库完整性检查")
-            
-            # 正常退出时使用快速检查(quick_check)，非正常退出时使用完整检查(integrity_check)
-            use_quick_check = not is_abnormal
-            if not self._check_database_integrity(use_quick_check=use_quick_check):
-                needs_restore = True
-                self._backup_and_rebuild_database()
+        # 正常退出时使用快速检查(quick_check)，非正常退出时使用完整检查(integrity_check)
+        use_quick_check = not is_abnormal
+        if not self._check_database_integrity(use_quick_check=use_quick_check):
+            needs_restore = True
+            self._backup_and_rebuild_database()
         
         with self._lock:
             conn = self._get_connection()

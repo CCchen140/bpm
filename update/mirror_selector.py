@@ -425,30 +425,43 @@ def select_best_mirror(urls_with_meta: List[Tuple[str, str, bool]]) -> List[Tupl
 def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
     """
     获取版本清单的URL列表（已排序）
-    
+
     优先使用 GitCode，其次是 GitHub 及其镜像
-    
+
     参数:
         use_cache: 是否使用缓存，默认为True
-        
+
     返回:
         URL列表，每个元素是 (url, description)
     """
+    # 注意：由于 GitCode URL 需要动态获取版本号，缓存可能不包含正确的 URL
+    # 暂时禁用缓存，确保每次都能获取正确的版本号
+    use_cache = False  # 强制禁用缓存
+
     # 尝试从缓存加载
     if use_cache:
         cached = _load_cache()
         if cached is not None:
             return cached
-    
+
     # URL 列表，按优先级排序
     urls_with_meta = []
-    
-    # 1. GitCode - 国内优先
-    gitcode_manifest_url = f"https://gitcode.com/{config.GITCODE_OWNER}/{config.GITCODE_REPO}/releases/download/latest/update_manifest.json"
-    urls_with_meta.append((gitcode_manifest_url, "gitcode", True))
-    _log_debug("添加 GitCode 主源")
-    
-    # 2. GitHub 主源
+
+    # 获取最新的版本号（用于 GitCode）
+    print("[get_manifest_urls] 开始获取最新版本号...")
+    _log_debug("开始获取最新版本号...")
+    latest_tag = _get_latest_version_tag()
+    print(f"[get_manifest_urls] 获取到最新版本号: {latest_tag}")
+    _log_debug(f"获取到最新版本号: {latest_tag}")
+    if latest_tag:
+        # 1. GitCode - 国内优先（使用具体版本号，因为 GitCode 不支持 'latest'）
+        gitcode_manifest_url = f"https://gitcode.com/{config.GITCODE_OWNER}/{config.GITCODE_REPO}/releases/download/{latest_tag}/update_manifest.json"
+        urls_with_meta.append((gitcode_manifest_url, "gitcode", True))
+        _log_debug(f"添加 GitCode 主源 (版本: {latest_tag})")
+    else:
+        _log_debug("无法获取最新版本号，跳过 GitCode")
+
+    # 2. GitHub 主源（支持 'latest'）
     urls_with_meta.append((config.GITHUB_UPDATE_MANIFEST_URL, "github-direct", True))
     _log_debug("添加 GitHub 主源")
     
@@ -464,7 +477,6 @@ def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
                     filename="update_manifest.json"
                 )
                 urls_with_meta.append((mirror_url, desc, enable_ping))
-                _log_debug(f"添加镜像: {desc}")
             except Exception as e:
                 _log_warning(f"构建镜像 URL 失败: {e}")
     
@@ -484,12 +496,115 @@ def get_manifest_urls(use_cache: bool = True) -> List[Tuple[str, str]]:
 def refresh_mirror_cache() -> List[Tuple[str, str]]:
     """
     刷新镜像缓存
-    
+
     强制重新检测所有镜像并更新缓存
-    
+
     返回:
         新的镜像URL列表
     """
     _log_info("强制刷新镜像缓存...")
     clear_cache()
     return get_manifest_urls(use_cache=False)
+
+
+def _get_latest_version_tag() -> Optional[str]:
+    """
+    从官网网页获取最新的版本标签
+
+    用于构建 GitCode 的下载 URL（GitCode 不支持 'latest' 标签）
+    从 https://www.qitu-photo.top/ 的下载区域解析最新版本
+
+    返回:
+        最新的版本标签（如 'V0.0.4'），如果获取失败则返回 None
+    """
+    import urllib.request
+    import re
+
+    # 1. 首先从官网网页获取最新版本
+    try:
+        website_url = "https://www.qitu-photo.top/"
+        req = urllib.request.Request(
+            website_url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode('utf-8')
+
+            # 从网页中查找版本号，匹配格式如 V0.0.4-update1、V0.0.4、V0.0.3 等
+            # 优先匹配带 update 后缀的版本（最新升级包）
+            version_pattern = r'V(\d+\.\d+\.\d+)(?:-update(\d+))?'
+            matches = re.findall(version_pattern, html)
+
+            if matches:
+                # 找到最新的版本（按版本号排序）
+                latest_version = None
+                latest_update = -1
+
+                for base_version, update_num in matches:
+                    update_int = int(update_num) if update_num else 0
+                    # 比较版本号
+                    if latest_version is None:
+                        latest_version = base_version
+                        latest_update = update_int
+                    else:
+                        # 比较基础版本号
+                        current_parts = [int(x) for x in base_version.split('.')]
+                        latest_parts = [int(x) for x in latest_version.split('.')]
+
+                        if current_parts > latest_parts:
+                            latest_version = base_version
+                            latest_update = update_int
+                        elif current_parts == latest_parts and update_int > latest_update:
+                            latest_update = update_int
+
+                if latest_version:
+                    tag = f"V{latest_version}"
+                    if latest_update > 0:
+                        tag = f"V{latest_version}-update{latest_update}"
+                    print(f"[_get_latest_version_tag] 从官网获取到最新版本标签: {tag}")
+                    _log_debug(f"从官网获取到最新版本标签: {tag}")
+                    return tag
+                else:
+                    print(f"[_get_latest_version_tag] 未找到有效的最新版本")
+            else:
+                print(f"[_get_latest_version_tag] 未从官网匹配到版本号")
+    except Exception as e:
+        print(f"[_get_latest_version_tag] 从官网获取最新版本标签失败: {e}")
+        _log_debug(f"从官网获取最新版本标签失败: {e}")
+
+    # 2. 如果网页获取失败，尝试使用 GitHub API
+    try:
+        import json
+        api_url = f"https://api.github.com/repos/{config.GITHUB_OWNER}/{config.GITHUB_REPO}/releases/latest"
+
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                'User-Agent': 'BirdPictureManager-UpdateChecker/1.0',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            tag_name = data.get('tag_name')
+            if tag_name:
+                _log_debug(f"从 GitHub API 获取到最新版本标签: {tag_name}")
+                return tag_name
+    except Exception as e:
+        _log_debug(f"从 GitHub API 获取最新版本标签失败: {e}")
+
+    # 3. 如果都失败，使用配置中的默认版本
+    try:
+        test_version = getattr(config, 'TEST_TARGET_VERSION', None)
+        if test_version:
+            base_version = test_version.split('_')[0]
+            _log_debug(f"使用配置中的默认版本标签: V{base_version}")
+            return f"V{base_version}"
+    except Exception:
+        pass
+
+    return None
