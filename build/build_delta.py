@@ -510,6 +510,7 @@ def generate_iss_script(
 #define MyAppFlavor "{app_flavor}"
 #define MyAppUpdate "{update_num}"
 #define MyAppDistDir "{source_dir_escaped}"
+#define MyAppFullVersion "V{app_version}_update{update_num}"
 
 [Setup]
 AppId={{#MyAppId}}
@@ -689,7 +690,7 @@ begin
   // 显示确认对话框
   Msg := '检测到已安装的 {{#MyAppName}}' + Chr(13) + Chr(10) + Chr(13) + Chr(10) +
          '安装位置：' + InstalledPath + Chr(13) + Chr(10) + Chr(13) + Chr(10) +
-         '是否要将程序升级到 V{{#MyAppVersion}}？';
+         '是否要将程序升级到 {{#MyAppFullVersion}}？';
 
   if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDYES then
   begin

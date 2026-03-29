@@ -159,7 +159,89 @@ try:
 except Exception:
     pass
 
-hiddenimports = []
+hiddenimports = [
+    # UI 模块（动态导入的）
+    "ui.import_page",
+    "ui.image_library_page",
+    "ui.settings_page",
+    "ui.info_page",
+    "ui.guide_page",
+    "ui.update_page",
+    "ui.update_settings_page",
+    "ui.data_charts_page",
+    "ui.debug_console",
+    "ui.web.image_library_web_page",
+    "ui.web.image_library_manager",
+    "ui.web.web_style_manager",
+    "ui.web.image_library_html",
+    "ui.web.image_library_bridge",
+    "ui.web.image_grid_page",
+    "ui.web.image_grid_manager",
+    "ui.web.image_grid_html",
+    "ui.web.image_grid_bridge",
+    "ui.panels.info_panel",
+    "ui.panels.image_detail_panel",
+    "ui.panels.folder_panel",
+    "ui.panels.preview_panel",
+    "ui.dialogs.focus_detect_dialog",
+    "ui.dialogs.import_to_library_rename_dialog",
+    "ui.dialogs.bird_species_detect_dialog",
+    "ui.dialogs.edit_species_dialog",
+    "ui.dialogs.tag_manager_dialog",
+    "ui.dialogs.spray_tag_selection_dialog",
+    "ui.dialogs.watermark_dialog",
+    "ui.widgets.task_progress_overlay",
+    "ui.widgets.image_thumbnail",
+    "ui.widgets.track_match_dialog",
+    "ui.widgets.screen_capture_overlay",
+    "ui.widgets.custom_progress_dialog",
+    "ui.widgets.geolocation_dialog",
+    "ui.widgets.loading_overlay",
+    "ui.widgets.advanced_filter_panel",
+    "ui.widgets.remark_dialog",
+    "ui.widgets.exif_write_dialog",
+    "ui.widgets.exif_read_dialog",
+    "ui.widgets.themed_combo_box",
+    "ui.widgets.base_popup_dialog",
+    "ui.widgets.themed_color_dialog",
+    "ui.widgets.custom_title_bar",
+    "ui.widgets.toggle_switch",
+    "ui.widgets.rating_filter_button",
+    "ui.widgets.rating_filter_widget",
+    "ui.widgets.guide_overlay",
+    "ui.widgets.custom_message_box",
+    "ui.widgets.batch_rename_dialog",
+    "ui.widgets.status_detail_popup",
+    "ui.widgets.custom_selection_dialog",
+    "ui.widgets.shortcut_recorder",
+    "ui.widgets.star_rating",
+    "ui.widgets.custom_input_dialog",
+    "ui.library.views.virtual_thumbnail_grid_view",
+    "ui.library.views.thumbnail_grid_view",
+    "ui.library.views.toolbar_view",
+    "ui.utils.thumbnail_loader",
+    "ui.utils.notification_manager",
+    "ui.utils.status_manager",
+    "ui.utils.global_hotkey_manager",
+    "ui.utils.bird_detect_controller",
+    "ui.utils.system_tray_manager",
+    "ui.utils.shortcut_manager",
+    "ui.utils.icon_loader",
+    "ui.utils.color_manager",
+    "ui.utils.app_icon",
+    "ui.utils.window_effect",
+    "ui.utils.windows_folder_dialog",
+    "ui.utils.flow_layout",
+    "ui.utils.geo_manager",
+    "ui.common.icon_utils",
+    "ui.common.styles",
+    "ui.common.base_page",
+    "ui.common.base_toolbar",
+    "ui.common.interfaces",
+    "ui.common.types",
+    "ui.resources.about_images_data",
+    "ui.zoomable_scroll_area",
+]
 try:
     if collect_submodules is not None:
         hiddenimports += [
@@ -202,7 +284,16 @@ try:
 except Exception:
     pass
 
-for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil", "win10toast"):
+# 收集 ui 包及其所有子模块（确保动态导入的模块被打包）
+try:
+    if collect_submodules is not None:
+        ui_submodules = collect_submodules("ui")
+        hiddenimports += ui_submodules
+        print(f"[INFO] 自动收集到 {len(ui_submodules)} 个 ui 子模块")
+except Exception as e:
+    print(f"[WARNING] 收集 ui 子模块失败: {e}")
+
+for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil"):
     try:
         if collect_submodules is not None:
             hiddenimports += collect_submodules(_opt_pkg)
@@ -580,6 +671,20 @@ analysis = Analysis(
         # "pdb",
         "pdbpp",
         "ipdb",
+        # 排除 PyQt5，因为项目使用 PyQt6
+        "PyQt5",
+        "PyQt5.QtCore",
+        "PyQt5.QtGui",
+        "PyQt5.QtWidgets",
+        "PyQt5.QtNetwork",
+        "PyQt5.QtWebEngine",
+        "PyQt5.QtWebEngineWidgets",
+        # 排除 pkg_resources 及其相关模块
+        "pkg_resources",
+        "pkg_resources._vendor",
+        "pkg_resources._vendor.packaging",
+        "pkg_resources.extern",
+        "_pkg_resources",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
