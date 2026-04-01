@@ -293,6 +293,8 @@ try:
 except Exception as e:
     print(f"[WARNING] 收集 ui 子模块失败: {e}")
 
+
+
 for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil"):
     try:
         if collect_submodules is not None:

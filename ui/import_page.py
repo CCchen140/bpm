@@ -1409,7 +1409,8 @@ class ImportPage(BaseImageBrowserPage):
         self.toolbar.sortModeChanged.connect(self.on_sort_changed)
         try:
             self.stash_filter_btn = QPushButton()
-            self.stash_filter_btn.setIcon(qta.icon('mdi6.tag-outline', color=ColorManager.instance().get("theme.text.dark"), options=[{'scale_factor': 1.1}]))
+            _icon_options = [{'scale_factor': 1.1}]
+            self.stash_filter_btn.setIcon(qta.icon('mdi6.tag-outline', color=ColorManager.instance().get("theme.text.dark"), options=_icon_options))
             self.stash_filter_btn.setIconSize(QSize(22, 22))
             self.stash_filter_btn.setFixedSize(32, 32)
             self.stash_filter_btn.setToolTip("暂存筛选：不筛选")
@@ -1426,7 +1427,7 @@ class ImportPage(BaseImageBrowserPage):
             pass
         try:
             self.batch_rename_btn = QPushButton()
-            self.batch_rename_btn.setIcon(qta.icon('mdi6.rename-box', color=ColorManager.instance().get("theme.text.dark"), options=[{'scale_factor': 1.1}]))
+            self.batch_rename_btn.setIcon(qta.icon('mdi6.rename-box', color=ColorManager.instance().get("theme.text.dark"), options=_icon_options))
             self.batch_rename_btn.setIconSize(QSize(22, 22))
             self.batch_rename_btn.setFixedSize(32, 32)
             self.batch_rename_btn.setToolTip("批量重命名")
@@ -8500,14 +8501,15 @@ class ImportPage(BaseImageBrowserPage):
             c = ColorManager.instance().get("theme.text.dark")
         except Exception:
             c = "#555"
+        icon_options = [{"scale_factor": 1.1}]
         if mode == 1:
-            btn.setIcon(qta.icon("mdi6.tag-check", color=c, options=[{"scale_factor": 1.1}]))
+            btn.setIcon(qta.icon("mdi6.tag-check", color=c, options=icon_options))
             btn.setToolTip("暂存筛选：仅暂存")
         elif mode == 2:
-            btn.setIcon(qta.icon("mdi6.tag-off", color=c, options=[{"scale_factor": 1.1}]))
+            btn.setIcon(qta.icon("mdi6.tag-off", color=c, options=icon_options))
             btn.setToolTip("暂存筛选：仅非暂存")
         else:
-            btn.setIcon(qta.icon("mdi6.tag-outline", color=c, options=[{"scale_factor": 1.1}]))
+            btn.setIcon(qta.icon("mdi6.tag-outline", color=c, options=icon_options))
             btn.setToolTip("暂存筛选：不筛选")
 
     def _apply_stash_filter_mode(self):
@@ -10122,13 +10124,11 @@ class ImportPage(BaseImageBrowserPage):
                             probe_has_unloaded = True
                             break
                     if probe_has_unloaded:
-                        print(f"[on_grid_scroll] Probe found unloaded thumbs at {probe_start}-{probe_end}, scheduling load")
                         try:
                             self._schedule_visible_load(immediate=True)
                         except Exception:
                             pass
                 # 无论是否探测到未加载的缩略图，都触发一次加载（确保滚动时总是加载）
-                print(f"[on_grid_scroll] Scroll detected, scheduling load for range {start}-{end}")
                 try:
                     self._schedule_visible_load(immediate=True)
                 except Exception:
@@ -11133,7 +11133,8 @@ class ImportPage(BaseImageBrowserPage):
                 sample = (k, v)
                 break
             if sample:
-                self._vdbg_log(f"apply_exif_updates: req_id={request_id} count={len(updates)} sample_key={sample[0]} sample={ {kk: sample[1].get(kk) for kk in ('has_exif','iso','shutter','fnumber','focal_length','shot_time')} }")
+                sample_dict = {kk: sample[1].get(kk) for kk in ('has_exif','iso','shutter','fnumber','focal_length','shot_time')}
+                self._vdbg_log(f"apply_exif_updates: req_id={request_id} count={len(updates)} sample_key={sample[0]} sample={sample_dict}")
             else:
                 self._vdbg_log(f"apply_exif_updates: req_id={request_id} count={len(updates)}")
         except Exception:
@@ -14676,7 +14677,8 @@ class ImportPage(BaseImageBrowserPage):
                             sample = "；示例：" + " | ".join([os.path.basename(x) for x in failed_samples[:5]])
                     except Exception:
                         sample = ""
-                    warn = f"对焦检测后文件{op}：成功 {ok_count}，失败 {fail_count}{sample}" + (f"（最后错误：{last_err}）" if last_err else "")
+                    err_text = f"（最后错误：{last_err}）" if last_err else ""
+                    warn = f"对焦检测后文件{op}：成功 {ok_count}，失败 {fail_count}{sample}{err_text}"
                 else:
                     warn = f"对焦检测后文件{op}：成功 {ok_count}"
             if not post_results:
@@ -15334,6 +15336,12 @@ class ImportPage(BaseImageBrowserPage):
                     if it.data(0, Qt.ItemDataRole.UserRole) == current_role:
                         tree.setCurrentItem(it)
                         break
+        except Exception:
+            pass
+        # 虚拟文件夹树构建完成后，自动触发缩略图加载和预加载
+        try:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(100, self._reload_virtual_focus_detect_view)
         except Exception:
             pass
 
@@ -17626,7 +17634,8 @@ class ImportPage(BaseImageBrowserPage):
             else:
                 # 其他错误，尝试shell=True方式
                 try:
-                    cmd = f'"{app_path}"' + ''.join([f' "{p}"' for p in paths])
+                    path_args = ''.join([f' "{p}"' for p in paths])
+                    cmd = f'"{app_path}"{path_args}'
                     subprocess.Popen(cmd, shell=True)
                     return
                 except Exception:
@@ -17638,7 +17647,9 @@ class ImportPage(BaseImageBrowserPage):
             # 使用runas命令以管理员权限运行
             # runas /user:Administrator 需要密码，不适合
             # 使用powershell的Start-Process -Verb runas
-            ps_cmd = f'Start-Process -FilePath "{app_path}" -ArgumentList {",".join([f'"{p}"' for p in paths])} -Verb runas'
+            arg_list = [f'"{p}"' for p in paths]
+            args_str = ",".join(arg_list)
+            ps_cmd = f'Start-Process -FilePath "{app_path}" -ArgumentList {args_str} -Verb runas'
             subprocess.Popen(["powershell", "-Command", ps_cmd], shell=False)
             return
         except Exception as e2:
@@ -18788,7 +18799,8 @@ class ImportPage(BaseImageBrowserPage):
             pass
         try:
             if getattr(self, "stash_filter_btn", None) is not None:
-                self.stash_filter_btn.setIcon(qta.icon("mdi6.tag-check", color=text_dark, options=[{"scale_factor": 1.1}]))
+                _icon_options2 = [{"scale_factor": 1.1}]
+                self.stash_filter_btn.setIcon(qta.icon("mdi6.tag-check", color=text_dark, options=_icon_options2))
         except Exception:
             pass
         try:
@@ -18803,7 +18815,7 @@ class ImportPage(BaseImageBrowserPage):
             pass
         try:
             if getattr(self, "batch_rename_btn", None) is not None:
-                self.batch_rename_btn.setIcon(qta.icon("mdi6.rename-box", color=text_dark, options=[{"scale_factor": 1.1}]))
+                self.batch_rename_btn.setIcon(qta.icon("mdi6.rename-box", color=text_dark, options=_icon_options2))
         except Exception:
             pass
     

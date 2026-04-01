@@ -887,12 +887,12 @@ class GPUScaler:
     @classmethod
     def scale_numpy(
         cls,
-        arr: np.ndarray,
+        arr,
         target_w: int,
         target_h: int,
         interpolation=None,
         keep_aspect: bool = True,
-    ) -> np.ndarray | None:
+    ):
         """
         直接对 numpy BGR 数组做 GPU 缩放，省去 QImage 转换。
         CUDA/OpenCL 路径: upload → resize → download（3 步）。

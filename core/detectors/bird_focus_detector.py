@@ -308,12 +308,6 @@ class BirdFocusDetector:
             LogManager.instance().error(f"[FocusDetect] 构造失败(模型路径解析异常): {e}")
             raise
 
-        # 调试日志：记录模型路径解析结果
-        try:
-            LogManager.instance().debug(f"[FocusDetect] 模型路径解析: 原始={model_path}, 解析后={self.model_path}, 存在={os.path.isfile(self.model_path)}")
-        except Exception:
-            pass
-
         self.device = "cpu"
         try:
             if bool(use_gpu):
@@ -460,7 +454,8 @@ class BirdFocusDetector:
                 continue
         
         # 如果都没找到，抛出异常
-        error_msg = f"模型文件不存在: {model_name}\n尝试过的路径:\n" + "\n".join(f"  - {p}" for p in tried_paths)
+        path_list = "\n".join(f"  - {p}" for p in tried_paths)
+        error_msg = f"模型文件不存在: {model_name}\n尝试过的路径:\n{path_list}"
         raise FileNotFoundError(error_msg)
 
     def _get_scaled_cache_max_count(self) -> int:

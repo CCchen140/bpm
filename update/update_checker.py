@@ -467,7 +467,8 @@ class CheckUpdateThread(QThread):
             _log_debug("调用 get_manifest_urls()...")
             urls = get_manifest_urls()
             print(f"[_fetch_manifest] 获取到 {len(urls)} 个地址: {urls}")
-            _log_debug(f"将尝试 {len(urls)} 个地址获取版本清单: {[desc for _, desc in urls]}")
+            url_descs = [desc for _, desc in urls]
+            _log_debug(f"将尝试 {len(urls)} 个地址获取版本清单: {url_descs}")
         
         # 尝试所有 URL
         last_error = None

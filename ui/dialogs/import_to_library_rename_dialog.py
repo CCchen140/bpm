@@ -1139,9 +1139,11 @@ class ImportToLibraryRenameDialog(BasePopupDialog):
                 only_folder = next(iter(target_folders))
                 will_create = "将创建" if not os.path.exists(only_folder) else "已存在"
                 extra = f" ({will_create})"
-                self.dest_label.setText(f"目标目录: {only_folder}{extra}  |  选中 {count} 张  |  根目录: {root}" + (f"  |  未完成 {missing} 张" if missing else ""))
+                missing_text = f"  |  未完成 {missing} 张" if missing else ""
+                self.dest_label.setText(f"目标目录: {only_folder}{extra}  |  选中 {count} 张  |  根目录: {root}{missing_text}")
             else:
-                self.dest_label.setText(f"目标目录: (多目录 {len(target_folders)} 个)  |  选中 {count} 张  |  根目录: {root}" + (f"  |  未完成 {missing} 张" if missing else ""))
+                missing_text = f"  |  未完成 {missing} 张" if missing else ""
+                self.dest_label.setText(f"目标目录: (多目录 {len(target_folders)} 个)  |  选中 {count} 张  |  根目录: {root}{missing_text}")
 
         self._suppress_table_change = True
         try:
