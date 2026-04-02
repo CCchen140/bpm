@@ -117,60 +117,26 @@ class ThumbnailRunnable(QRunnable):
 
             if cached_image:
                 from_cache = True
-                # Scale in background thread if size is provided
+                # 缓存命中：快速路径，直接返回缓存图片
                 output_image = cached_image
+
+                # 只有当缓存图片比目标大很多时才进行缩放
                 if self.size and not disable_scaling:
                     try:
                         w, h = self.size if isinstance(self.size, (tuple, list)) else (self.size, self.size)
-                        if (
-                            w > 0
-                            and h > 0
-                            and not cached_image.isNull()
-                            and cached_image.width() > 0
-                            and cached_image.height() > 0
-                        ):
-                            ratio = min(w / cached_image.width(), h / cached_image.height())
-                            new_w = int(max(1, round(cached_image.width() * ratio)))
-                            new_h = int(max(1, round(cached_image.height() * ratio)))
-                            if abs(new_w - cached_image.width()) >= 2 or abs(new_h - cached_image.height()) >= 2:
-                                # 根据设置决定是否使用GPUScaler
-                                if use_gpu_scaling:
-                                    scaled = GPUScaler.scale_qimage(
-                                        cached_image,
-                                        w,
-                                        h,
-                                        keep_aspect=True,
-                                        fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
-                                    )
-                                    output_image = scaled if scaled is not None else cached_image.scaled(
-                                        new_w,
-                                        new_h,
-                                        Qt.AspectRatioMode.KeepAspectRatio,
-                                        transformation_mode
-                                    )
-                                else:
-                                    output_image = cached_image.scaled(
-                                        new_w,
-                                        new_h,
-                                        Qt.AspectRatioMode.KeepAspectRatio,
-                                        transformation_mode
-                                    )
+                        if w > 0 and h > 0 and cached_image.width() > w * 1.2 and cached_image.height() > h * 1.2:
+                            output_image = cached_image.scaled(
+                                w,
+                                h,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation
+                            )
                     except Exception:
                         pass
-                
-                # 确保图片格式为 ARGB32_Premultiplied，这是 QPixmap.fromImage 最快的格式
-                if output_image is not None and not output_image.isNull() and output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
-                    output_image = output_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
-                try:
-                    base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
-                except Exception:
-                    base_px = 0
-                try:
-                    if self.disk_cache is not None and not self.disk_cache.has(self.path, self.size, cache_type=self.cache_type, scale_quality=scale_quality, base_px=base_px):
-                        self.disk_cache.put(self.path, output_image, self.size, cache_type=self.cache_type, scale_quality=scale_quality, base_px=base_px)
-                except Exception:
-                    pass
+                # 确保图片格式正确
+                if output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+                    output_image = output_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
                 if self.result_emitter:
                     elapsed_ms = (time.time() - start_time) * 1000.0
@@ -190,37 +156,19 @@ class ThumbnailRunnable(QRunnable):
                 disk_img = None
             if disk_img is not None and not (hasattr(disk_img, "isNull") and disk_img.isNull()):
                 from_cache = True
+                # 磁盘缓存命中：快速路径
+                output_image = disk_img
+
+                # 保存到内存缓存
                 try:
-                    should_put = True
-                    try:
-                        base_px2 = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
-                    except Exception:
-                        base_px2 = 0
-                    try:
-                        disk_max = max(int(disk_img.width() or 0), int(disk_img.height() or 0))
-                    except Exception:
-                        disk_max = 0
-                    if base_px2 > 0 and disk_max > 0 and disk_max < int(base_px2 * 0.9):
-                        should_put = False
-                    if should_put:
-                        try:
-                            existing = self.cache_manager.get_image(self.path)
-                        except Exception:
-                            existing = None
-                        if existing is not None and hasattr(existing, "width") and hasattr(existing, "height"):
-                            try:
-                                existing_max = max(int(existing.width() or 0), int(existing.height() or 0))
-                            except Exception:
-                                existing_max = 0
-                            if existing_max >= disk_max and existing_max > 0:
-                                should_put = False
-                    if should_put:
-                        self.cache_manager.put(self.path, disk_img, self.cache_type)
+                    self.cache_manager.put(self.path, disk_img, self.cache_type)
                 except Exception:
                     pass
-                output_image = disk_img
-                if output_image is not None and not output_image.isNull() and output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+
+                # 确保图片格式正确
+                if output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
                     output_image = output_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
                 if self.result_emitter:
                     elapsed_ms = (time.time() - start_time) * 1000.0
                     self.result_emitter(self.path, output_image, int(self.request_id or 0), elapsed_ms, from_cache, attempts)
@@ -274,195 +222,140 @@ class ThumbnailRunnable(QRunnable):
                         from_cache = False
                 
                 if image is None or (hasattr(image, "isNull") and image.isNull()):
-                    # 渐进式加载策略：
-                    # 1. 首先尝试从EXIF加载内置缩略图（最快）
-                    # 2. 然后使用QImageReader加载（中等速度）
-                    # 3. 最后使用OpenCV加载（最慢但最兼容）
-                    
-                    for attempt in range(3):
-                        attempts = attempt + 1
-                        
-                        # 第一次尝试：使用QImageReader快速加载
-                        if attempt == 0 and ext not in raw_exts and ext not in (".TIF", ".TIFF"):
-                            try:
-                                from utils.system.stderr_suppressor import suppress_stderr_fd
+                    # XNView风格的高效加载策略：
+                    # 1. 首先尝试从EXIF加载内置缩略图（最快，几乎所有相机照片都有）
+                    # 2. 使用QImageReader的setScaledSize（在解码时缩放，避免加载完整图片）
+                    # 3. 避免使用OpenCV加载完整图片（除非万不得已）
 
-                                with suppress_stderr_fd():
-                                    reader = QImageReader(self.path)
-                                    if reader.canRead():
-                                        try:
-                                            # 使用较小的目标尺寸进行快速加载
-                                            # 如果目标尺寸很大，先加载一个中等尺寸的图片
-                                            quick_target = target_size
-                                            if target_size > 800:
-                                                # 先加载一个中等尺寸的图片，让用户快速看到内容
-                                                quick_target = min(400, target_size // 2)
-                                            
-                                            if quick_target:
-                                                size = reader.size()
-                                                if size.isValid():
-                                                    w = size.width()
-                                                    h = size.height()
-                                                    if w > 0 and h > 0:
-                                                        if w >= h:
-                                                            scaled_w = int(quick_target)
-                                                            scaled_h = int(max(1, round(h * quick_target / w)))
-                                                        else:
-                                                            scaled_h = int(quick_target)
-                                                            scaled_w = int(max(1, round(w * quick_target / h)))
-                                                        reader.setScaledSize(QSize(scaled_w, scaled_h))
-                                            image = reader.read()
-                                            
-                                            # 如果加载成功且尺寸足够，直接返回
-                                            # 否则继续尝试加载更高分辨率
-                                            if image is not None and not image.isNull():
-                                                img_max = max(int(image.width() or 0), int(image.height() or 0))
-                                                if img_max >= int(target_size * 0.85):
-                                                    break  # 尺寸足够，跳出循环
-                                                # 尺寸不够，继续下一次尝试加载更高分辨率
-                                        except Exception:
-                                            image = None
-                            except Exception:
-                                image = None
-                        
-                        # 第二次尝试：使用QImageReader加载完整分辨率
-                        elif attempt == 1 and ext not in raw_exts and ext not in (".TIF", ".TIFF"):
-                            try:
-                                from utils.system.stderr_suppressor import suppress_stderr_fd
+                    attempts = 0
 
-                                with suppress_stderr_fd():
-                                    reader = QImageReader(self.path)
-                                    if reader.canRead():
-                                        try:
-                                            if target_size:
-                                                size = reader.size()
-                                                if size.isValid():
-                                                    w = size.width()
-                                                    h = size.height()
-                                                    if w > 0 and h > 0:
-                                                        if w >= h:
-                                                            scaled_w = int(target_size)
-                                                            scaled_h = int(max(1, round(h * target_size / w)))
-                                                        else:
-                                                            scaled_h = int(target_size)
-                                                            scaled_w = int(max(1, round(w * target_size / h)))
-                                                        reader.setScaledSize(QSize(scaled_w, scaled_h))
-                                            image = reader.read()
-                                        except Exception:
-                                            image = None
-                            except Exception:
-                                image = None
-                        if image is None or (hasattr(image, "isNull") and image.isNull()):
-                            cv_img = None
-                            try:
-                                cv_img = load_image(self.path)
-                            except Exception:
-                                cv_img = None
-                            if cv_img is None:
-                                if ext in raw_exts:
-                                    try:
-                                        cv_img = extract_thumbnail(self.path)
-                                    except Exception:
-                                        cv_img = None
-                            if cv_img is not None:
+                    # 第一次尝试：从EXIF加载内置缩略图（最快）
+                    if ext not in raw_exts:
+                        try:
+                            from utils.file.file import extract_thumbnail
+                            exif_thumb = extract_thumbnail(self.path)
+                            if exif_thumb is not None:
                                 try:
-                                    cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-                                    height, width, channel = cv_img.shape
-                                    bytes_per_line = 3 * width
-                                    image = QImage(cv_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                                    # 转换OpenCV图像为QImage
+                                    exif_thumb = cv2.cvtColor(exif_thumb, cv2.COLOR_BGR2RGB)
+                                    h, w, _ = exif_thumb.shape
+                                    image = QImage(exif_thumb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+                                    attempts = 1
                                 except Exception:
                                     image = None
-                        if image is None or (hasattr(image, "isNull") and image.isNull()):
+                        except Exception:
+                            pass
+
+                    # 第二次尝试：使用QImageReader（在解码时缩放）
+                    if image is None or (hasattr(image, "isNull") and image.isNull()):
+                        if ext not in raw_exts and ext not in (".TIF", ".TIFF"):
                             try:
-                                with open(self.path, "rb") as f:
-                                    data = f.read()
-                                image = QImage.fromData(data)
+                                from utils.system.stderr_suppressor import suppress_stderr_fd
+
+                                with suppress_stderr_fd():
+                                    reader = QImageReader(self.path)
+                                    if reader.canRead():
+                                        try:
+                                            # 获取原始尺寸
+                                            orig_size = reader.size()
+                                            if orig_size.isValid() and orig_size.width() > 0 and orig_size.height() > 0:
+                                                orig_w = orig_size.width()
+                                                orig_h = orig_size.height()
+
+                                                # 计算缩放后的尺寸，保持宽高比
+                                                if target_size > 0:
+                                                    if orig_w >= orig_h:
+                                                        scaled_w = int(target_size)
+                                                        scaled_h = int(max(1, round(orig_h * target_size / orig_w)))
+                                                    else:
+                                                        scaled_h = int(target_size)
+                                                        scaled_w = int(max(1, round(orig_w * target_size / orig_h)))
+                                                    reader.setScaledSize(QSize(scaled_w, scaled_h))
+
+                                            image = reader.read()
+                                            if image is not None and not image.isNull():
+                                                attempts = 2
+                                        except Exception:
+                                            image = None
                             except Exception:
                                 image = None
-                        if image is not None and (not hasattr(image, "isNull") or not image.isNull()):
-                            break
-                        if attempt < 2:
-                            time.sleep(0.05)
+
+                    # 第三次尝试：对于RAW文件，提取内置缩略图
+                    if (image is None or (hasattr(image, "isNull") and image.isNull())) and ext in raw_exts:
+                        try:
+                            from utils.file.file import load_image
+                            raw_thumb = load_image(self.path)
+                            if raw_thumb is not None:
+                                try:
+                                    raw_thumb = cv2.cvtColor(raw_thumb, cv2.COLOR_BGR2RGB)
+                                    h, w, _ = raw_thumb.shape
+                                    image = QImage(raw_thumb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+                                    attempts = 3
+                                except Exception:
+                                    image = None
+                        except Exception:
+                            pass
+
+                    # 最后一次尝试：直接读取文件数据（最慢但最兼容）
+                    if image is None or (hasattr(image, "isNull") and image.isNull()):
+                        try:
+                            with open(self.path, "rb") as f:
+                                data = f.read()
+                            image = QImage.fromData(data)
+                            if image is not None and not image.isNull():
+                                # 如果图片太大，进行缩放
+                                if target_size > 0 and (image.width() > target_size or image.height() > target_size):
+                                    image = image.scaled(
+                                        target_size,
+                                        target_size,
+                                        Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.FastTransformation
+                                    )
+                                attempts = 4
+                        except Exception:
+                            image = None
 
                 if image is not None and (not hasattr(image, "isNull") or not image.isNull()):
-                    scaled_image = image
-                    # 根据设置决定是否使用GPUScaler
-                    if target_size and (image.width() > target_size or image.height() > target_size):
-                        if use_gpu_scaling:
-                            scaled = GPUScaler.scale_qimage(
-                                image,
-                                target_size,
-                                target_size,
-                                keep_aspect=True,
-                                fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
-                            )
-                            scaled_image = scaled if scaled is not None else image.scaled(
-                                target_size,
-                                target_size,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                transformation_mode
-                            )
-                        else:
-                            scaled_image = image.scaled(
-                                target_size,
-                                target_size,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                transformation_mode
-                            )
-                    if not scaled_image.isNull():
-                        self.cache_manager.put(self.path, scaled_image, self.cache_type)
-                        
-                        # Scale for display if needed (avoid main thread scaling)
-                        output_image = scaled_image
-                        if self.size and not disable_scaling:
-                            try:
-                                w, h = self.size if isinstance(self.size, (tuple, list)) else (self.size, self.size)
-                                if (
-                                    w > 0
-                                    and h > 0
-                                    and not scaled_image.isNull()
-                                    and scaled_image.width() > 0
-                                    and scaled_image.height() > 0
-                                ):
-                                    ratio = min(w / scaled_image.width(), h / scaled_image.height())
-                                    new_w = int(max(1, round(scaled_image.width() * ratio)))
-                                    new_h = int(max(1, round(scaled_image.height() * ratio)))
-                                    if abs(new_w - scaled_image.width()) >= 2 or abs(new_h - scaled_image.height()) >= 2:
-                                        # 根据设置决定是否使用GPUScaler
-                                        if use_gpu_scaling:
-                                            scaled = GPUScaler.scale_qimage(
-                                                scaled_image,
-                                                w,
-                                                h,
-                                                keep_aspect=True,
-                                                fast_mode=transformation_mode == Qt.TransformationMode.FastTransformation
-                                            )
-                                            output_image = scaled if scaled is not None else scaled_image.scaled(
-                                                new_w,
-                                                new_h,
-                                                Qt.AspectRatioMode.KeepAspectRatio,
-                                                transformation_mode
-                                            )
-                                        else:
-                                            output_image = scaled_image.scaled(
-                                                new_w,
-                                                new_h,
-                                                Qt.AspectRatioMode.KeepAspectRatio,
-                                                transformation_mode
-                                            )
-                            except Exception:
-                                pass
+                    # 使用平滑缩放模式，减少锯齿
+                    output_image = image
+
+                    # 计算目标尺寸
+                    if self.size and not disable_scaling:
+                        try:
+                            w, h = self.size if isinstance(self.size, (tuple, list)) else (self.size, self.size)
+                            if w > 0 and h > 0 and image.width() > 0 and image.height() > 0:
+                                # 如果图片比目标大，进行缩放
+                                if image.width() > w or image.height() > h:
+                                    output_image = image.scaled(
+                                        w,
+                                        h,
+                                        Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation
+                                    )
+                        except Exception:
+                            pass
+
+                    if not output_image.isNull():
+                        # 保存到缓存（使用原始目标尺寸，不是显示尺寸）
+                        if target_size > 0:
+                            cache_image = output_image
+                            if output_image.width() > target_size or output_image.height() > target_size:
+                                cache_image = output_image.scaled(
+                                    target_size,
+                                    target_size,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation
+                                )
+                            self.cache_manager.put(self.path, cache_image, self.cache_type)
 
                         # 确保图片格式为 ARGB32_Premultiplied，这是 QPixmap.fromImage 最快的格式
-                        if output_image is not None and not output_image.isNull() and output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+                        if output_image.format() != QImage.Format.Format_ARGB32_Premultiplied:
                             output_image = output_image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
+                        # 保存到磁盘缓存
                         try:
                             if self.disk_cache is not None:
-                                try:
-                                    base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
-                                except Exception:
-                                    base_px = 0
+                                base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
                                 self.disk_cache.put(self.path, output_image, self.size, cache_type=self.cache_type, scale_quality=scale_quality, base_px=base_px)
                         except Exception:
                             pass
@@ -533,10 +426,9 @@ class ThumbnailLoader(QObject):
         else:
             scheduler = TaskScheduler.instance()
             self._default_thread_count = scheduler.get_thread_count(task_type)
-        # 增加最大线程数以提高缩略图加载速度
-        # 对于缩略图加载，更多的线程可以更好地利用CPU和I/O
-        # 最大线程数限制为6，避免过多线程导致资源竞争
-        self._max_thread_count = min(self._default_thread_count, 6)
+        # 限制线程数：生成缩略图时限制为4个线程，避免UI卡顿
+        # 缓存命中会走快速路径，不受此限制
+        self._max_thread_count = min(self._default_thread_count, 4)
         self.thread_pool.setMaxThreadCount(self._max_thread_count)
         
         self.signals = ThumbnailLoaderSignals()
@@ -565,8 +457,9 @@ class ThumbnailLoader(QObject):
         self._result_queue = deque()
         self._result_queue_lock = Lock()
         self._result_timer = QTimer(self)
-        # 使用8ms间隔（约120fps），提高UI更新频率，加快缩略图显示速度
-        self._result_timer.setInterval(8)
+        # 使用16ms间隔（约60fps），平衡UI更新频率和性能
+        # 过高的频率（如8ms）会导致主线程频繁中断，反而降低整体性能
+        self._result_timer.setInterval(16)
         self._result_timer.timeout.connect(self._process_result_queue)
         self._result_timer.start()
         
@@ -624,33 +517,64 @@ class ThumbnailLoader(QObject):
     
     def _process_result_queue(self):
         """处理结果队列，在主线程中异步发射信号
-        
-        每帧最多处理8个结果，避免阻塞主线程
-        配合8ms间隔，确保120fps流畅度，加快缩略图显示
+
+        每帧最多处理4个结果，避免阻塞主线程
+        配合16ms间隔（约60fps），确保流畅的UI响应
+
+        说明：
+        - 减少每帧处理数量可以降低主线程负载
+        - 使用字典合并同一图片的loaded和metrics信号，减少信号发射次数
         """
-        max_per_frame = 8
+        max_per_frame = 4
         processed = 0
-        
+
+        # 使用字典合并同一图片的结果，减少信号发射次数
+        # 格式: {path: {'image': QImage, 'metrics': (request_id, elapsed_ms, from_cache, attempts)}}
+        merged_results = {}
+
         while processed < max_per_frame:
             result = None
             with self._result_queue_lock:
                 if self._result_queue:
                     result = self._result_queue.popleft()
-            
+
             if result is None:
                 break
-            
+
             try:
+                path = result[1]
+                if path not in merged_results:
+                    merged_results[path] = {'image': None, 'metrics': None}
+
                 if result[0] == 'loaded':
                     # result = ('loaded', path, image)
-                    self.signals.loaded.emit(result[1], result[2])
+                    merged_results[path]['image'] = result[2]
                 elif result[0] == 'metrics':
                     # result = ('metrics', path, image, request_id, elapsed_ms, from_cache, attempts)
-                    self.signals.loaded_metrics.emit(result[1], result[2], result[3], result[4], result[5], result[6])
+                    # 保存image和metrics信息
+                    merged_results[path]['image'] = result[2]
+                    merged_results[path]['metrics'] = (result[3], result[4], result[5], result[6])
             except Exception:
                 pass
-            
+
             processed += 1
+
+        # 发射合并后的信号
+        for path, data in merged_results.items():
+            try:
+                image = data['image']
+                metrics = data['metrics']
+
+                if image is not None:
+                    # 始终发射loaded信号（向后兼容）
+                    self.signals.loaded.emit(path, image)
+
+                    # 如果有metrics，也发射loaded_metrics信号
+                    if metrics:
+                        # loaded_metrics信号参数: (path, image, request_id, elapsed_ms, from_cache, attempts)
+                        self.signals.loaded_metrics.emit(path, image, metrics[0], metrics[1], metrics[2], metrics[3])
+            except Exception:
+                pass
 
     def shutdown(self):
         """停止加载器并清理资源"""
@@ -672,9 +596,10 @@ class ThumbnailLoader(QObject):
         if not paths:
             return
 
-        # 添加日志：排查缩略图加载请求来源
-        # 批量处理，减少锁竞争
+        # 第一步：立即处理缓存命中的图片（不走线程池，直接返回）
+        cache_hits = []
         tasks_to_enqueue = []
+
         for item in paths:
             priority = default_priority
             path = item
@@ -696,8 +621,52 @@ class ThumbnailLoader(QObject):
                         front = bool(item[2])
             if not path:
                 continue
+
+            # 检查内存缓存
+            cached_image = None
+            try:
+                cached_image = self.cache_manager.get_image(path)
+            except Exception:
+                pass
+
+            if cached_image and not cached_image.isNull():
+                # 检查尺寸是否足够
+                size = current_display_size
+                if size:
+                    try:
+                        w, h = size if isinstance(size, (tuple, list)) else (size, size)
+                        req_max = max(int(w or 0), int(h or 0))
+                        cached_max = max(cached_image.width(), cached_image.height())
+                        # 如果缓存图片尺寸足够，直接返回
+                        if cached_max >= req_max * 0.9:
+                            cache_hits.append((path, cached_image))
+                            continue
+                    except Exception:
+                        pass
+                else:
+                    # 没有指定尺寸，直接使用缓存
+                    cache_hits.append((path, cached_image))
+                    continue
+
+            # 缓存未命中或尺寸不够，加入任务队列
             tasks_to_enqueue.append((priority, path, current_display_size, cache_type, request_id, front))
-        
+
+        # 立即返回缓存命中的结果（不走线程池，直接发射信号）
+        for path, image in cache_hits:
+            try:
+                # 确保格式正确
+                if image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+                    image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                # 直接发射信号，不走线程池
+                self.signals.loaded.emit(path, image)
+                self.signals.loaded_metrics.emit(path, image, int(request_id or 0), 0.0, True, 0)
+            except Exception:
+                pass
+
+        # 第二步：将未命中的任务加入队列，走线程池处理
+        if not tasks_to_enqueue:
+            return
+
         # 批量入队
         with self._queue_lock:
             for priority, path, size, cache_type, request_id, front in tasks_to_enqueue:
@@ -732,10 +701,10 @@ class ThumbnailLoader(QObject):
                 time.sleep(0.005)  # 缩短等待时间，提高响应性
                 continue
             
-            # 限制每帧分发的任务数，避免一次性分发太多任务导致UI线程被信号淹没
+            # 限制调度：生成缩略图时限制每帧分发任务数，避免UI卡顿
             tasks_per_frame = 0
-            max_tasks_per_frame = 6  # 每帧最多分发6个任务，提高并发度以支持更大的预加载范围
-            
+            max_tasks_per_frame = 4  # 每帧最多分发4个任务，平衡性能和UI响应
+
             while tasks_per_frame < max_tasks_per_frame:
                 task = None
                 # 优先从高优先级队列获取
@@ -748,32 +717,31 @@ class ThumbnailLoader(QObject):
                     except queue.Empty:
                         # 两个队列都为空，跳出内层循环
                         break
-                
+
                 if task is None:
                     break
-                    
+
                 priority, seq, path, size, cache_type, request_id = task
-                
+
                 # 检查请求ID是否匹配
                 if self._active_request_id is not None and request_id is not None and int(request_id) != int(self._active_request_id):
                     continue
-                
+
                 # 创建并启动任务
-                # 使用结果发射回调函数，将结果放入队列，由主线程定时器异步处理
                 runnable = ThumbnailRunnable(path, size, self.cache_manager, self.disk_cache, self._on_thumbnail_result, cache_type, request_id, priority, self._request_id_ref)
-                
+
                 # 包装任务以跟踪运行状态
                 wrapped_runnable = self._wrap_runnable(runnable)
                 self.thread_pool.start(wrapped_runnable)
-                
+
                 tasks_per_frame += 1
-                
-                # 每分发一个任务后，让出时间片，避免阻塞
-                time.sleep(0.0005)
-            
-            # 如果本帧没有分发任何任务，等待一下
+
+                # 让出时间片，避免阻塞UI
+                time.sleep(0.001)
+
+            # 空转等待，降低CPU占用
             if tasks_per_frame == 0:
-                time.sleep(0.01)
+                time.sleep(0.01)  # 10ms，平衡响应性和CPU占用
 
     def _wrap_runnable(self, runnable):
         """包装runnable以跟踪运行状态"""

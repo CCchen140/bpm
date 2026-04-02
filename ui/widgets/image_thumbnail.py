@@ -787,31 +787,23 @@ class ImageThumbnail(QWidget):
 
     def set_thumbnail_image(self, image, immediate=False):
         """直接设置缩略图 (优化性能，避免内部重新缩放) - 优化版
-        
+
         优化点：
         1. 如果图片尺寸合适，跳过缩放操作
         2. 优先使用快速缩放模式
         3. 延迟更新，避免频繁重绘（除非 immediate=True）
-        
+        4. 尽可能避免在主线程进行耗时操作
+
         参数:
             image: 要设置的缩略图图像
             immediate: 是否立即更新，不延迟。用于预加载的图片，避免闪烁。
         """
-        # 性能分析
-        from utils.performance_profiler import PerformanceProfiler, MainThreadChecker
-        profiler = PerformanceProfiler.instance()
-        
-        if MainThreadChecker.check_main_thread():
-            profiler.start("set_thumbnail_image_main_thread")
-        
-        self._has_error = False # 成功设置图片时清除错误状态
-        
+        self._has_error = False  # 成功设置图片时清除错误状态
+
         if image is None or (hasattr(image, "isNull") and image.isNull()):
             self.clear_image_data()
-            if MainThreadChecker.check_main_thread():
-                profiler.end("set_thumbnail_image_main_thread")
             return
-            
+
         try:
             w, h = self._get_wh()
             border_width = 1
@@ -822,72 +814,42 @@ class ImageThumbnail(QWidget):
             # 优化：如果图片尺寸已经合适，跳过缩放
             img_w = image.width()
             img_h = image.height()
-            
-            # 获取GPU缩放设置
-            use_gpu_scaling = True
-            try:
-                if hasattr(self.cache_manager, "settings_manager"):
-                    use_gpu_scaling = bool(self.cache_manager.settings_manager.get("performance/use_gpu_scaling", True))
-            except Exception:
-                use_gpu_scaling = True
-            
-            # 优化：如果图片尺寸接近目标尺寸（误差在10%以内），直接使用原图
+
+            # 优化：如果图片尺寸接近目标尺寸（误差在20%以内），直接使用原图
             # 避免在主线程进行耗时的缩放操作
+            # 放宽阈值从10%到20%，减少主线程缩放次数
             if thumb_w > 0 and thumb_h > 0:
                 size_ratio = max(img_w / thumb_w, img_h / thumb_h)
-                
-                # 如果图片比目标大，需要缩放
-                if size_ratio > 1.1:  # 图片大于目标10%以上时进行缩放
+
+                # 如果图片比目标大很多，才进行缩放
+                if size_ratio > 1.2:  # 图片大于目标20%以上时进行缩放
                     target_w = thumb_w
                     target_h = thumb_h
-                    
-                    # 根据设置决定是否使用GPUScaler
-                    if use_gpu_scaling:
-                        try:
-                            scaled = GPUScaler.scale_qimage(
-                                image,
-                                target_w,
-                                target_h,
-                                mode='fit'
-                            )
-                            if scaled is not None and not scaled.isNull():
-                                image = scaled
-                        except Exception:
-                            # GPU缩放失败，回退到Qt缩放
-                            image = image.scaled(
-                                target_w,
-                                target_h,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation
-                            )
-                    else:
-                        # 使用Qt的快速缩放模式
-                        image = image.scaled(
-                            target_w,
-                            target_h,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.FastTransformation
-                        )
+
+                    # 使用Qt的快速缩放模式，避免SmoothTransformation的耗时
+                    # FastTransformation使用最近邻插值，速度快很多
+                    image = image.scaled(
+                        target_w,
+                        target_h,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation
+                    )
 
             # 优化：直接存储 QImage，避免主线程进行耗时的 QPixmap 转换
             self._thumbnail_image = image
             self.thumbnail_pixmap = None
-            self._cached_pixmap = None 
-            
+            self._cached_pixmap = None
+
             # 根据 immediate 参数决定是否立即更新
             # immediate=True 用于预加载的图片，避免闪烁
             self._schedule_update(immediate=immediate)
-            
+
         except Exception as e:
             try:
                 LogManager.instance().warning(f"设置缩略图图像失败: {e}")
             except Exception:
                 pass
             self.clear_image_data()
-        finally:
-            # 性能分析结束
-            if MainThreadChecker.check_main_thread():
-                profiler.end("set_thumbnail_image_main_thread")
     
     def _schedule_update(self, immediate=False):
         """延迟更新缩略图显示，避免频繁重绘

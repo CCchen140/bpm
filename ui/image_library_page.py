@@ -2317,7 +2317,20 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 path = None
             if path:
                 try:
-                    self.preview_image_file(path)
+                    # 获取当前缩略图的pixmap，用于快速预览
+                    thumb_pixmap = None
+                    if idx < len(thumbnails):
+                        try:
+                            thumb = thumbnails[idx]
+                            if thumb:
+                                # 尝试获取缩略图的pixmap
+                                if hasattr(thumb, 'thumbnail_pixmap') and thumb.thumbnail_pixmap:
+                                    thumb_pixmap = thumb.thumbnail_pixmap
+                                elif hasattr(thumb, '_cached_pixmap') and thumb._cached_pixmap:
+                                    thumb_pixmap = thumb._cached_pixmap
+                        except Exception:
+                            pass
+                    self.preview_image_file(path, thumb_pixmap)
                 except Exception:
                     pass
             try:
@@ -4759,11 +4772,16 @@ class ImageLibraryPage(BaseImageBrowserPage):
         if hasattr(self, 'preview_panel'):
             self.preview_panel.update_image_size()
 
-    def preview_image_file(self, image_path):
-        """在预览区显示图片"""
+    def preview_image_file(self, image_path, initial_pixmap=None):
+        """在预览区显示图片
+
+        参数:
+            image_path: 图片路径
+            initial_pixmap: 可选，当前缩略图的pixmap，用于快速显示
+        """
         self.current_preview_path = image_path
         if hasattr(self, 'preview_panel'):
-            self.preview_panel.load_image(image_path)
+            self.preview_panel.load_image(image_path, initial_pixmap)
         
         # 同步收藏状态
         is_fav = False
@@ -7044,8 +7062,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         existing_max = max(int(pix.width() or 0), int(pix.height() or 0))
                 except Exception:
                     existing_max = 0
-                
-                if existing_max > 0 and existing_max < int(req_max * 0.6):
+
+                # 如果现有缩略图分辨率明显低于请求尺寸，标记为过期并重新加载
+                # 阈值设为90%，确保放大缩略图时能获得清晰的图片
+                # 例如：请求300px，现有250px（< 270px），则重新加载
+                if existing_max > 0 and existing_max < int(req_max * 0.9):
                     try:
                         thumb._stale_thumbnail = True
                         is_stale = True
@@ -9037,33 +9058,37 @@ class ImageLibraryPage(BaseImageBrowserPage):
 
     def _process_pending_updates(self):
         """处理待更新的缩略图 - 优化版
-        
+
         优化点：
         1. 批量处理，减少定时器触发次数
         2. 优先处理可见区域的缩略图，确保用户看到的立即更新
         3. 每处理一批后让出时间片，避免阻塞UI
-        4. 使用processEvents保持UI响应
+        4. 使用更小的批次（5个）确保UI响应性
+        5. 强制每处理一个缩略图后让出时间片
+
+        说明：
+        - 将批次大小从20减少到5，降低单次处理对UI的阻塞
+        - 使用QTimer.singleShot(0)确保在处理之间让出时间片
+        - 优先保证可见区域的缩略图立即显示
         """
         if not self._pending_updates:
             self._is_processing_updates = False
             return
-            
+
         if getattr(self, "_thumbnail_ui_suspended", False):
             self._is_processing_updates = False
             return
-        
 
-        
         # 标记正在处理
         self._is_processing_updates = True
-        
+
         # 获取当前可见区域的路径，优先处理
         visible_keys = getattr(self, '_current_visible_path_keys', set())
-        
+
         # 将队列分为可见区域和非可见区域
         visible_updates = []
         non_visible_updates = []
-        
+
         while self._pending_updates:
             path, image = self._pending_updates.popleft()
             key = self._normalize_path_key(path)
@@ -9071,45 +9096,45 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 visible_updates.append((path, image))
             else:
                 non_visible_updates.append((path, image))
-        
 
-        
         # 优先处理可见区域的更新
         all_updates = visible_updates + non_visible_updates
-        
-        # 批量处理，但每批数量适中
-        batch_size = min(self._update_batch_size, len(all_updates))
+
+        # 减少每批处理数量，从20减少到5，确保UI响应性
+        # 较小的批次可以降低单次处理对主线程的阻塞时间
+        batch_size = min(5, len(all_updates))
         processed = 0
         applied_count = 0
-        
+
         # 先处理第一批（可见区域优先）
         for path, image in all_updates[:batch_size]:
             if self._apply_loaded_thumbnail(path, image):
                 applied_count += 1
             else:
                 self._retry_apply_loaded_thumbnail(path, image, 0)
-            
+
             key = self._normalize_path_key(path)
             if self._startup_mask_enabled and self._startup_mask_visible:
                 if key in self._startup_pending_paths:
                     self._startup_pending_paths.discard(key)
-            
+
             processed += 1
-        
+
         # 将未处理的更新放回队列
         remaining = all_updates[batch_size:]
         for path, image in remaining:
             self._pending_updates.append((path, image))
-        
+
         # 更新启动遮罩状态
         if self._startup_mask_enabled and self._startup_mask_visible:
             self._maybe_hide_startup_mask()
-        
+
         # 如果还有未处理的更新，安排下一批
         if self._pending_updates:
             # 使用QTimer.singleShot让出时间片，避免阻塞UI
-            # 如果有可见区域的更新，使用更短的延迟
-            delay = 0 if visible_updates else 1
+            # 使用5ms延迟，确保UI有时间响应用户输入
+            # 如果有可见区域的更新，使用更短的延迟（0ms）
+            delay = 0 if visible_updates else 5
             QTimer.singleShot(delay, self._process_pending_updates)
         else:
             self._is_processing_updates = False

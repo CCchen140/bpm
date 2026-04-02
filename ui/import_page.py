@@ -3162,7 +3162,13 @@ class ImportPage(BaseImageBrowserPage):
                     p = None
                     if isinstance(thumb.image_info, dict):
                         p = thumb.image_info.get("path") or thumb.image_info.get("file_path")
-                    self._schedule_preview(p)
+                    # 获取当前缩略图的pixmap，用于快速预览
+                    thumb_pixmap = None
+                    if hasattr(thumb, 'thumbnail_pixmap') and thumb.thumbnail_pixmap:
+                        thumb_pixmap = thumb.thumbnail_pixmap
+                    elif hasattr(thumb, '_cached_pixmap') and thumb._cached_pixmap:
+                        thumb_pixmap = thumb._cached_pixmap
+                    self._schedule_preview(p, thumb_pixmap)
                 except Exception:
                     pass
                 try:
@@ -3916,11 +3922,16 @@ class ImportPage(BaseImageBrowserPage):
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"打开导入图库窗口失败: {e}")
 
-    def preview_image_file(self, image_path):
-        """预览图片 - 优化版本，数据库查询放后台"""
+    def preview_image_file(self, image_path, initial_pixmap=None):
+        """预览图片 - 优化版本，数据库查询放后台
+
+        参数:
+            image_path: 图片路径
+            initial_pixmap: 可选，当前缩略图的pixmap，用于快速显示
+        """
         self.current_preview_path = image_path
         if hasattr(self, 'preview_panel'):
-            self.preview_panel.load_image(image_path)
+            self.preview_panel.load_image(image_path, initial_pixmap)
             
             # 立即显示基本信息（从缩略图缓存获取，不查询数据库）
             fav = False
@@ -6394,30 +6405,44 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
-    def _schedule_preview(self, path: str):
+    def _schedule_preview(self, path: str, initial_pixmap=None):
         if not path:
             return
-        try:
-            self._pending_preview_path = str(path)
-            if self._preview_debounce_timer.isActive():
-                self._preview_debounce_timer.stop()
-            self._preview_debounce_timer.start()
-        except Exception:
+        # 立即显示缩略图，不使用debounce延迟
+        # 如果有传入pixmap，直接显示；否则使用延迟加载
+        if initial_pixmap is not None:
             try:
-                self.preview_image_file(path)
+                self.preview_image_file(path, initial_pixmap)
             except Exception:
                 pass
+        else:
+            # 没有传入pixmap，使用原来的debounce机制
+            try:
+                self._pending_preview_path = str(path)
+                self._pending_preview_pixmap = None
+                # 确保定时器已创建
+                timer = self._ensure_timer("_preview_debounce_timer", single_shot=True, interval=0, callback=self._apply_pending_preview)
+                if timer.isActive():
+                    timer.stop()
+                timer.start(50)  # 50ms延迟
+            except Exception:
+                try:
+                    self.preview_image_file(path, None)
+                except Exception:
+                    pass
 
     def _apply_pending_preview(self):
         p = getattr(self, "_pending_preview_path", None)
+        pixmap = getattr(self, "_pending_preview_pixmap", None)
         if not p:
             return
         try:
             self._pending_preview_path = None
+            self._pending_preview_pixmap = None
         except Exception:
             pass
         try:
-            self.preview_image_file(p)
+            self.preview_image_file(p, pixmap)
         except Exception:
             pass
 

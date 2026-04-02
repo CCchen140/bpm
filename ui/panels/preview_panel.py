@@ -21,6 +21,7 @@ from utils.log_manager import LogManager
 from ui.widgets.rating_filter_widget import StarRatingWidget
 from ui.utils.color_manager import ColorManager
 from cache.big_image_cache_manager import BigImageCacheManager
+from cache.cache_manager import ImageCacheManager
 import json
 
 
@@ -140,6 +141,8 @@ class PreviewPanel(QWidget):
         self.settings_manager = settings_manager
         self._cache_context = str(cache_context or "library")
         self._big_cache = BigImageCacheManager.instance(self._cache_context)
+        # 缩略图缓存管理器，用于快速显示缩略图
+        self._thumb_cache = ImageCacheManager.instance()
         self.current_original_pixmap = None
         self.current_image_path = None
         self.is_expanded = True # 默认展开
@@ -156,6 +159,8 @@ class PreviewPanel(QWidget):
         self._preview_load_gen = 0
         self._preview_load_signals = _PreviewLoadSignals(self)
         self._preview_load_signals.finished.connect(self._on_preview_load_finished)
+        # 标记当前显示的是否是缩略图（临时显示）
+        self._showing_thumbnail = False
         
         # 色标颜色映射 (与 ImageThumbnail 保持一致)
         self.LABEL_COLORS = {
@@ -654,9 +659,21 @@ class PreviewPanel(QWidget):
             icon_name = "mdi6.heart-outline"
         self.fav_btn.setIcon(qta.icon(icon_name, color=icon_color, options=[{"scale_factor": 1.1}]))
 
-    def load_image(self, image_path):
-        """加载并在预览区显示图片"""
+    def load_image(self, image_path, initial_pixmap=None):
+        """加载并在预览区显示图片
+
+        优化策略：
+        1. 先检查大图片缓存，如果有直接显示
+        2. 如果传入了 initial_pixmap（当前显示的缩略图），直接显示它（最快）
+        3. 如果没有传入，尝试从缩略图缓存加载
+        4. 同时启动后台线程加载原图，加载完成后替换
+
+        参数:
+            image_path: 图片路径
+            initial_pixmap: 可选，当前已经显示的缩略图QPixmap，直接用于预览
+        """
         self.current_image_path = image_path
+        self._showing_thumbnail = False
 
         if not image_path:
             # 清空显示，不显示"图片不存在"，保持空白或显示之前的统计信息(如果没被清空的话)
@@ -678,6 +695,7 @@ class PreviewPanel(QWidget):
             return
 
         try:
+            # 第一步：检查大图片缓存
             cached = None
             try:
                 cached = self._big_cache.get(image_path)
@@ -699,8 +717,85 @@ class PreviewPanel(QWidget):
                     except Exception:
                         pass
                     return
-            # P0 优化：缓存未命中时在后台解码；不清空当前画面，保留旧图直至新图就绪后直接切换，避免闪烁
-            # P1 优化：将 os.path.exists 检查也移到后台线程，避免主线程阻塞
+
+            # 第二步：如果有传入的缩略图pixmap，直接显示（最快路径）
+            if initial_pixmap is not None and not initial_pixmap.isNull():
+                # 将传入的缩略图缩放到预览面板大小并显示
+                try:
+                    panel_size = self.size()
+                    margins = self.main_layout.contentsMargins()
+                    bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+                    top_height = self.top_widget.height()
+                    available_width = panel_size.width() - margins.left() - margins.right() - 4
+                    available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
+
+                    # 缩略图缩放到适合预览面板的大小
+                    thumb_scaled = initial_pixmap.scaled(
+                        max(1, available_width),
+                        max(1, available_height),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    if not thumb_scaled.isNull():
+                        self.current_original_pixmap = thumb_scaled
+                        self._showing_thumbnail = True  # 标记当前显示的是缩略图
+                        self._mark_image_dirty()
+                        self.image_label.setText("")
+                        if self.is_expanded:
+                            self.bottom_widget.show()
+                        try:
+                            self.zoom_out_btn.setEnabled(True)
+                            self.zoom_in_btn.setEnabled(True)
+                            self.zoom_slider.setEnabled(True)
+                            self.zoom_reset_btn.setEnabled(True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            else:
+                # 第三步：没有传入pixmap，尝试从缩略图缓存加载
+                thumb_image = None
+                try:
+                    thumb_image = self._thumb_cache.get_image(image_path)
+                except Exception:
+                    thumb_image = None
+
+                if thumb_image is not None and not thumb_image.isNull():
+                    # 将缩略图缩放到预览面板大小并显示
+                    try:
+                        panel_size = self.size()
+                        margins = self.main_layout.contentsMargins()
+                        bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+                        top_height = self.top_widget.height()
+                        available_width = panel_size.width() - margins.left() - margins.right() - 4
+                        available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
+
+                        # 缩略图缩放到适合预览面板的大小
+                        thumb_scaled = thumb_image.scaled(
+                            max(1, available_width),
+                            max(1, available_height),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        thumb_pixmap = QPixmap.fromImage(thumb_scaled)
+                        if not thumb_pixmap.isNull():
+                            self.current_original_pixmap = thumb_pixmap
+                            self._showing_thumbnail = True  # 标记当前显示的是缩略图
+                            self._mark_image_dirty()
+                            self.image_label.setText("")
+                            if self.is_expanded:
+                                self.bottom_widget.show()
+                            try:
+                                self.zoom_out_btn.setEnabled(True)
+                                self.zoom_in_btn.setEnabled(True)
+                                self.zoom_slider.setEnabled(True)
+                                self.zoom_reset_btn.setEnabled(True)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+            # 第四步：启动后台线程加载原图，加载完成后替换缩略图
             self._preview_load_gen += 1
             self.current_image_path = image_path
             self._overlay_bbox = None
@@ -744,7 +839,10 @@ class PreviewPanel(QWidget):
                 pass
 
     def _on_preview_load_finished(self, path: str, qimage, generation: int, error_msg=None):
-        """仅在主线程执行：校验请求未过期后更新 UI，保证线程隔离。"""
+        """仅在主线程执行：校验请求未过期后更新 UI，保证线程隔离。
+
+        优化：如果当前显示的是缩略图，原图加载完成后会替换缩略图。
+        """
         if path != getattr(self, "current_image_path", None):
             return
         if generation != getattr(self, "_preview_load_gen", 0):
@@ -754,6 +852,9 @@ class PreviewPanel(QWidget):
         except Exception:
             pass
         if qimage is None or qimage.isNull():
+            # 如果当前显示的是缩略图，不显示错误，保持缩略图显示
+            if getattr(self, "_showing_thumbnail", False):
+                return
             # P1 优化：显示具体的错误信息
             display_msg = "无法加载图片"
             if error_msg == "文件不存在":
@@ -773,16 +874,24 @@ class PreviewPanel(QWidget):
         try:
             pixmap = QPixmap.fromImage(qimage)
         except Exception:
+            # 如果当前显示的是缩略图，不显示错误，保持缩略图显示
+            if getattr(self, "_showing_thumbnail", False):
+                return
             self.image_label.setText("无法加载图片")
             self.image_label.setPixmap(QPixmap())
             self.current_original_pixmap = None
             return
         if pixmap.isNull():
+            # 如果当前显示的是缩略图，不显示错误，保持缩略图显示
+            if getattr(self, "_showing_thumbnail", False):
+                return
             self.image_label.setText("无法加载图片")
             self.image_label.setPixmap(QPixmap())
             self.current_original_pixmap = None
             return
+        # 原图加载完成，替换缩略图（如果有的话）
         self.current_original_pixmap = pixmap
+        self._showing_thumbnail = False  # 标记现在显示的是原图
         self.image_label.setText("")
         self._mark_image_dirty()
         if self.is_expanded:

@@ -622,7 +622,19 @@ begin
          DelTree(UserDataPath, True, True, True);
       end;
 
-      // 4. 删除注册表项
+      // 4. 删除 cache 和 update 目录（位于安装目录下）
+      UserDataPath := ExpandConstant('{{app}}\\cache');
+      if DirExists(UserDataPath) then
+      begin
+         DelTree(UserDataPath, True, True, True);
+      end;
+      UserDataPath := ExpandConstant('{{app}}\\update');
+      if DirExists(UserDataPath) then
+      begin
+         DelTree(UserDataPath, True, True, True);
+      end;
+
+      // 5. 删除注册表项
       if RegKeyExists(HKCU, 'Software\\BirdPictureManager') then
       begin
         RegDeleteKeyIncludingSubkeys(HKCU, 'Software\\BirdPictureManager');
