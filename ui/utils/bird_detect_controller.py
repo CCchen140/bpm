@@ -156,19 +156,27 @@ class BirdDetectController(QObject):
         try:
             # 获取截图
             pixmap = self._overlay.get_captured_pixmap()
+            # 清理覆盖层
+            try:
+                self._overlay.close()
+                self._overlay.deleteLater()
+            except Exception:
+                pass
+            self._overlay = None
+
             if not pixmap:
                 NotificationManager.instance().show_warning("错误", "获取截图失败")
                 return
-                
+
             # 保存截图到临时文件
             temp_path = self._save_pixmap_to_temp(pixmap)
             if not temp_path:
                 NotificationManager.instance().show_warning("错误", "保存截图失败")
                 return
-                
+
             # 开始识别
             self._start_recognition(temp_path)
-            
+
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"处理截图失败: {e}")
             LogManager.instance().error(f"处理截图失败: {e}")
@@ -176,6 +184,13 @@ class BirdDetectController(QObject):
     def _on_capture_cancelled(self):
         """截图取消回调"""
         LogManager.instance().info("截图识鸟已取消")
+        # 清理覆盖层
+        try:
+            self._overlay.close()
+            self._overlay.deleteLater()
+        except Exception:
+            pass
+        self._overlay = None
         
     def _save_pixmap_to_temp(self, pixmap: QPixmap) -> Optional[str]:
         """将 QPixmap 保存到临时文件"""

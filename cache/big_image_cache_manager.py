@@ -53,7 +53,7 @@ class BigImageCacheManager:
             except Exception:
                 pass
         try:
-            sm = SettingsManager()
+            sm = SettingsManager.instance()
             v = int(sm.get("performance/big_image_cache_max_items", 100))
         except Exception:
             v = 100
@@ -107,7 +107,7 @@ class BigImageCacheManager:
             except Exception:
                 pass
         try:
-            sm = SettingsManager()
+            sm = SettingsManager.instance()
             v = int(sm.get("performance/big_image_cache_long_edge", 5120))
         except Exception:
             v = 5120

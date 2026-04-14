@@ -283,6 +283,7 @@ def _hybrid_cpu_worker_init(
         exp_frame_check,
         initial_conf,
         enable_eye_detect,
+        clear_cache=False,  # Worker 进程中不清理缓存
     )
 
 
@@ -493,6 +494,7 @@ def _focus_detect_worker_init(
     exp_frame_check: bool,
     initial_conf: float = 0.15,
     enable_eye_detect: bool = False,
+    clear_cache: bool = False,
 ):
     global _FOCUS_DETECTOR_WORKER_INSTANCE, _FOCUS_DETECT_EYE_ENABLED
     t0 = time.time()
@@ -536,7 +538,8 @@ def _focus_detect_worker_init(
     except Exception:
         _FOCUS_DETECT_EYE_ENABLED = False
     try:
-        det.enable_scaled_cache(True)
+        # 只在主进程或明确要求时清理缓存，子进程中不清理
+        det.enable_scaled_cache(True, clear_existing=clear_cache)
     except Exception:
         pass
     try:
@@ -574,6 +577,7 @@ def prewarm_focus_detector(
         bool(exp_frame_check),
         float(initial_conf or 0.15),
         bool(enable_eye_detect),
+        clear_cache=False,  # Worker 进程中不清理缓存
     )
 
 
@@ -658,35 +662,95 @@ def _focus_detect_one_path(image_path: str, af_focus_point=None):
             res["_file_mtime"] = float(_file_mtime)
         except Exception:
             pass
+        
+        # 诊断：记录进入缓存保存逻辑（使用print确保一定输出）
+        print(f"[DIAG] 开始处理文件: {os.path.basename(p0)}, file_size={_file_size}")
+        
         try:
             from cache.focus_scaled_cache import save_scaled_cv_bgr
 
             do_save = True
             try:
-                if int(_file_size or 0) >= 20 * 1024 * 1024:
+                # 增加文件大小限制到100MB，以支持RAW格式文件
+                # RAW文件通常20-50MB，需要保存缩略图缓存以加速后续加载
+                if int(_file_size or 0) >= 100 * 1024 * 1024:
                     do_save = False
-            except Exception:
+                    print(f"[DIAG] 文件过大，跳过缓存: {os.path.basename(p0)}")
+            except Exception as e:
+                print(f"[DIAG] 检查文件大小时出错: {e}")
                 do_save = True
+            
             if do_save:
                 _t_sc0 = time.perf_counter()
+                
+                # 诊断：准备加载图片
+                print(f"[DIAG] 准备加载缩略图: {os.path.basename(p0)}")
+                
                 img_small, _sx, _sy, ow, oh = det.load_image_scaled_for_detection(p0)
+                
+                # 诊断：检查img_small是否为None
+                if img_small is None:
+                    print(f"[DIAG] img_small为None: {os.path.basename(p0)}")
+                elif not hasattr(img_small, "shape"):
+                    print(f"[DIAG] img_small没有shape属性: {os.path.basename(p0)}")
+                else:
+                    print(f"[DIAG] img_small shape={img_small.shape}: {os.path.basename(p0)}")
+                
                 if img_small is not None and hasattr(img_small, "shape"):
-                    save_scaled_cv_bgr(
-                        p0,
-                        int(getattr(det, "target_size", 640) or 640),
-                        img_small,
-                        orig_w=int(ow or 0),
-                        orig_h=int(oh or 0),
-                        scope="import_focus",
-                        quality=90,
-                    )
+                    # 记录缓存保存尝试
+                    try:
+                        LogManager.instance().info(f"[FocusDetect] 准备保存缓存: {os.path.basename(p0)}, target_size={getattr(det, 'target_size', 640)}")
+                    except Exception as e:
+                        print(f"[DIAG] 记录日志失败1: {e}")
+                    
+                    print(f"[DIAG] 调用save_scaled_cv_bgr: {os.path.basename(p0)}")
+                    
+                    try:
+                        save_scaled_cv_bgr(
+                            p0,
+                            int(getattr(det, "target_size", 640) or 640),
+                            img_small,
+                            orig_w=int(ow or 0),
+                            orig_h=int(oh or 0),
+                            scope="import_focus",
+                            quality=90,
+                        )
+                        
+                        print(f"[DIAG] 缓存保存成功: {os.path.basename(p0)}")
+                        
+                    except Exception as e:
+                        print(f"[DIAG] save_scaled_cv_bgr异常: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # 记录缓存保存成功
+                    try:
+                        LogManager.instance().info(f"[FocusDetect] 缓存保存完成: {os.path.basename(p0)}")
+                    except Exception as e:
+                        print(f"[DIAG] 记录日志失败2: {e}")
+                else:
+                    # 记录无法获取缩略图的情况
+                    print(f"[DIAG] 无法获取缩略图: {os.path.basename(p0)}, img_small={img_small}, has_shape={hasattr(img_small, 'shape') if img_small else 'N/A'}")
+                    try:
+                        LogManager.instance().info(f"[FocusDetect] 无法获取缩略图: {os.path.basename(p0)}")
+                    except Exception as e:
+                        print(f"[DIAG] 记录日志失败3: {e}")
+                
                 _t_sc1 = time.perf_counter()
                 try:
                     res["_scaled_cache_ms"] = float((_t_sc1 - _t_sc0) * 1000.0)
                 except Exception:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            # 记录缓存保存失败的情况
+            print(f"[DIAG] 缓存保存块外层异常: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                LogManager.instance().info(f"[FocusDetect] 缓存保存失败: {os.path.basename(p0)}: {e}")
+            except Exception as e2:
+                print(f"[DIAG] 记录日志失败4: {e2}")
         try:
             res["_elapsed_ms"] = float((t1 - t0) * 1000.0)
         except Exception:
@@ -762,6 +826,7 @@ def detect_focus_batch_for_import(
                 bool(exp_frame_check),
                 float(initial_conf or 0.15),
                 bool(enable_eye_detect),
+                clear_cache=True,  # 单进程模式（主进程）清理缓存
             )
         except Exception as e:
             LogManager.instance().error(f"[FocusDetectCLI] 单进程模式对焦检测器初始化失败: {e}")
@@ -1158,6 +1223,23 @@ def detect_focus_batch_for_import(
     # 如果需要多进程，在读取对焦点的同时异步初始化进程池
     pool_init_future = None
     if use_multiprocess:
+        # 多进程模式下，主进程先清理缓存（子进程中不清理）
+        try:
+            from core.detectors.bird_focus_detector import BirdFocusDetector
+            temp_det = BirdFocusDetector(
+                model_path,
+                target_size=int(target_size or 640),
+                initial_conf=float(initial_conf or 0.15),
+                multi_check=bool(multi_check),
+                exp_frame_check=bool(exp_frame_check),
+                use_gpu=False,  # 清理缓存不需要GPU
+                save_output=False,
+                print_focus_point=False,
+            )
+            temp_det.enable_scaled_cache(True, clear_existing=True)
+        except Exception as e:
+            focus_trace(f"stage=focus.clear_cache err={e}")
+        
         try:
             from concurrent.futures import ThreadPoolExecutor
             executor = ThreadPoolExecutor(max_workers=1)
@@ -1173,6 +1255,7 @@ def detect_focus_batch_for_import(
                         bool(exp_frame_check),
                         float(initial_conf or 0.15),
                         bool(enable_eye_detect),
+                        False,  # clear_cache=False，子进程中不清理缓存
                     ),
                 )
             pool_init_future = executor.submit(_init_pool)
@@ -1366,7 +1449,8 @@ def detect_focus_batch_for_import(
                 timeout_sec = int(per_file_timeout_sec or 0)
             except Exception:
                 timeout_sec = 0
-            timeout_sec = int(max(30, min(3600, timeout_sec))) if timeout_sec > 0 else 240
+            # 增加超时时间到600秒（10分钟），以支持RAW文件解码
+            timeout_sec = int(max(60, min(3600, timeout_sec))) if timeout_sec > 0 else 600
             try:
                 max_inflight = int(max(1, int(proc)))
             except Exception:
@@ -1620,6 +1704,7 @@ def detect_focus_batch_for_import(
             bool(exp_frame_check),
             float(initial_conf or 0.15),
             bool(enable_eye_detect),
+            clear_cache=True,  # 单进程模式（主进程）清理缓存
         )
         total = len(paths)
         done = 0
@@ -2054,7 +2139,8 @@ def _get_subject_detector(targets: Optional[Sequence[str]] = None):
             print_focus_point=False,
         )
         try:
-            det.enable_scaled_cache(True)
+            # 开始新的对焦检测，清理之前的缓存
+            det.enable_scaled_cache(True, clear_existing=True)
         except Exception:
             pass
         try:

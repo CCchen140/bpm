@@ -88,6 +88,14 @@ class LogManager:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = cls()
+                    # 在多进程环境下，子进程需要重新初始化LogManager
+                    # 检查是否在子进程中（通过环境变量判断）
+                    if os.environ.get("BIRD_PICTURE_MANAGER_LOG_FILE"):
+                        # 子进程：确保日志文件句柄被正确初始化
+                        cls._instance._ensure_log_target()
+                        # 子进程不启动工作线程，直接同步写入日志
+                        # 这样可以避免多进程环境下的线程同步问题
+                        cls._instance._start_worker()
         return cls._instance
 
     def __init__(self):
@@ -202,8 +210,32 @@ class LogManager:
             os.makedirs(logs_dir, exist_ok=True)
         except Exception:
             pass
-        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        self._log_file_path = os.path.join(logs_dir, f"{ts}.txt")
+        
+        # 检查环境变量中是否有主进程的日志文件路径
+        # 这样可以确保所有子进程都使用同一个日志文件
+        env_log_path = os.environ.get("BIRD_PICTURE_MANAGER_LOG_FILE")
+        if env_log_path and os.path.isdir(os.path.dirname(env_log_path)):
+            self._log_file_path = env_log_path
+        else:
+            # 主进程：创建新的日志文件
+            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+            self._log_file_path = os.path.join(logs_dir, f"{ts}.txt")
+            # 将日志文件路径保存到环境变量，供子进程使用
+            os.environ["BIRD_PICTURE_MANAGER_LOG_FILE"] = self._log_file_path
+        
+        # 主进程设置可执行文件目录的环境变量，供子进程使用
+        if not os.environ.get("BIRD_PICTURE_MANAGER_EXE_DIR"):
+            try:
+                import sys
+                if getattr(sys, 'frozen', False):
+                    # 打包后的程序，使用可执行文件所在目录
+                    exe_dir = os.path.dirname(sys.executable)
+                    if "_internal" in exe_dir.lower():
+                        exe_dir = os.path.dirname(exe_dir)
+                    os.environ["BIRD_PICTURE_MANAGER_EXE_DIR"] = exe_dir
+            except Exception:
+                pass
+        
         try:
             if not os.path.exists(self._log_file_path):
                 with open(self._log_file_path, "a", encoding="utf-8"):

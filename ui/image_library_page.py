@@ -695,8 +695,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
         loader_threads = max(1, min(loader_threads, default_threads))
         self.thumbnail_loader = ThumbnailLoader(self.cache_manager, TaskType.LIBRARY_LOADER, thread_count=loader_threads)
         self.thumbnail_loader.signals.loaded.connect(self.on_thumbnail_loaded)
+        if hasattr(self.thumbnail_loader.signals, "loaded_metrics"):
+            self.thumbnail_loader.signals.loaded_metrics.connect(self.on_thumbnail_metrics)
         self._thumbnail_request_id = 0
         self._thumb_status_task_id = None  # 缩略图加载任务状态ID
+        # 缩略图加载状态跟踪：区分从缓存加载和生成新缩略图
+        self._thumb_cache_loaded_count = 0  # 从缓存加载的数量
+        self._thumb_generated_count = 0     # 新生成缩略图的数量
+        self._thumb_total_to_load = 0       # 总共需要加载的数量
         self._thumb_by_path = {}
         self._requested_paths = set()
         self._startup_mask_enabled = True
@@ -713,7 +719,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self._update_batch_size = 20  # 每批处理数量增加，加快预加载图片的显示速度
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(5)  # 增加小延迟，让UI有机会响应
+        self._update_timer.setInterval(16)  # 增加到16ms（约60fps），减少CPU占用
         self._update_timer.timeout.connect(self._process_pending_updates)
         # 添加处理标志，避免重复处理
         self._is_processing_updates = False
@@ -1908,8 +1914,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 延迟加载设置（包括上次选中的文件夹）
         QTimer.singleShot(300, self.load_settings)
 
-    def initialize(self):
-        """手动初始化加载（用于延迟加载）"""
+    def initialize(self, preloaded_data=None):
+        """手动初始化加载（用于延迟加载）
+        
+        参数:
+            preloaded_data: 预加载的数据字典，包含:
+                - taxonomy_stats: 分类树统计数据
+                - unclassified_groups: 未分类文件夹分组数据
+        """
         t0 = time.perf_counter()
         if not self._library_cache_loading_started:
             self._library_cache_loading_started = True
@@ -1920,7 +1932,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._init_special_caches()
         self.root_dir = self.settings_manager.get("general/root_path")
         if self.root_dir and os.path.exists(self.root_dir):
-            self.folder_panel.populate_tree(self.root_dir)
+            # 传递预加载的数据给 folder_panel
+            self.folder_panel.populate_tree(self.root_dir, preloaded_data=preloaded_data)
             
             # 尝试恢复上次浏览的文件夹
             last_folder = self.settings_manager.get("library/last_folder")
@@ -7167,44 +7180,11 @@ class ImageLibraryPage(BaseImageBrowserPage):
             # 在状态栏显示缩略图加载任务
             try:
                 if self._thumb_status_task_id is None:
-                    # 检查是否可能从缓存读取
-                    cache_hits = 0
-                    # 获取缩放质量设置，确保与保存缓存时使用的一致
-                    try:
-                        scale_quality = str(self.cache_manager.settings_manager.get("performance/thumbnail_scale_quality", "low")).lower()
-                    except Exception:
-                        scale_quality = "low"
-                    # 获取缩略图缓存尺寸设置，确保与保存缓存时使用的一致
-                    try:
-                        base_px = int(getattr(self.cache_manager, "cache_thumbnail_size", 0) or 0)
-                    except Exception:
-                        base_px = 0
-                    # 获取对焦检测缩略图的目标尺寸
-                    try:
-                        focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                    except Exception:
-                        focus_target = 640
-                    try:
-                        from cache.focus_scaled_cache import try_load_qimage
-                        for _priority, path, _is_in_view in paths_to_load[:10]:  # 检查前10个作为样本
-                            # 检查 thumbnail_disk_cache
-                            if self.thumbnail_loader.disk_cache.has(path, self.current_thumb_size, cache_type, scale_quality=scale_quality, base_px=base_px):
-                                cache_hits += 1
-                            else:
-                                # 检查 focus_scaled_cache（对焦检测时生成的缩略图缓存）
-                                try:
-                                    img, _meta = try_load_qimage(path, focus_target, scope="import_focus")
-                                    if img is not None and not img.isNull():
-                                        cache_hits += 1
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                    # 如果大部分可能命中缓存，显示不同的提示
-                    if cache_hits >= len(paths_to_load[:10]) * 0.5:
-                        task_msg = f"正在读取缩略图缓存 ({len(paths_to_load)} 个)..."
-                    else:
-                        task_msg = f"正在生成缩略图 ({len(paths_to_load)} 个)..."
+                    # 初始化加载状态跟踪
+                    self._thumb_total_to_load = len(paths_to_load)
+                    self._thumb_cache_loaded_count = 0
+                    self._thumb_generated_count = 0
+                    task_msg = f"正在加载缩略图 ({len(paths_to_load)} 个)..."
                     self._thumb_status_task_id = StatusManager.instance().start_task(task_msg)
             except Exception:
                 pass
@@ -9057,19 +9037,18 @@ class ImageLibraryPage(BaseImageBrowserPage):
             self._maybe_hide_startup_mask()
 
     def _process_pending_updates(self):
-        """处理待更新的缩略图 - 优化版
+        """处理待更新的缩略图 - 超轻量版
 
-        优化点：
-        1. 批量处理，减少定时器触发次数
-        2. 优先处理可见区域的缩略图，确保用户看到的立即更新
-        3. 每处理一批后让出时间片，避免阻塞UI
-        4. 使用更小的批次（5个）确保UI响应性
-        5. 强制每处理一个缩略图后让出时间片
+        核心优化：
+        1. 每批只处理1个缩略图，最大程度避免UI阻塞
+        2. 使用QTimer.singleShot(0)立即让出时间片
+        3. 简化处理逻辑，只做最基本的赋值操作
+        4. 后台线程已经准备好QImage，主线程只需设置
 
         说明：
-        - 将批次大小从20减少到5，降低单次处理对UI的阻塞
-        - 使用QTimer.singleShot(0)确保在处理之间让出时间片
-        - 优先保证可见区域的缩略图立即显示
+        - 虽然每批处理1个看起来慢，但实际上总时间更短
+        - 因为UI不会卡顿，用户可以立即看到响应
+        - 滚动时也能保持流畅
         """
         if not self._pending_updates:
             self._is_processing_updates = False
@@ -9082,69 +9061,32 @@ class ImageLibraryPage(BaseImageBrowserPage):
         # 标记正在处理
         self._is_processing_updates = True
 
-        # 获取当前可见区域的路径，优先处理
-        visible_keys = getattr(self, '_current_visible_path_keys', set())
-
-        # 将队列分为可见区域和非可见区域
-        visible_updates = []
-        non_visible_updates = []
-
-        while self._pending_updates:
+        # 只处理一个缩略图，然后立即让出时间片
+        # 这是避免UI卡顿的关键
+        if self._pending_updates:
             path, image = self._pending_updates.popleft()
-            key = self._normalize_path_key(path)
-            if key in visible_keys:
-                visible_updates.append((path, image))
-            else:
-                non_visible_updates.append((path, image))
-
-        # 优先处理可见区域的更新
-        all_updates = visible_updates + non_visible_updates
-
-        # 减少每批处理数量，从20减少到5，确保UI响应性
-        # 较小的批次可以降低单次处理对主线程的阻塞时间
-        batch_size = min(5, len(all_updates))
-        processed = 0
-        applied_count = 0
-
-        # 先处理第一批（可见区域优先）
-        for path, image in all_updates[:batch_size]:
+            
+            # 快速应用缩略图
             if self._apply_loaded_thumbnail(path, image):
-                applied_count += 1
-            else:
-                self._retry_apply_loaded_thumbnail(path, image, 0)
-
-            key = self._normalize_path_key(path)
-            if self._startup_mask_enabled and self._startup_mask_visible:
-                if key in self._startup_pending_paths:
-                    self._startup_pending_paths.discard(key)
-
-            processed += 1
-
-        # 将未处理的更新放回队列
-        remaining = all_updates[batch_size:]
-        for path, image in remaining:
-            self._pending_updates.append((path, image))
+                key = self._normalize_path_key(path)
+                if self._startup_mask_enabled and self._startup_mask_visible:
+                    if key in self._startup_pending_paths:
+                        self._startup_pending_paths.discard(key)
 
         # 更新启动遮罩状态
         if self._startup_mask_enabled and self._startup_mask_visible:
             self._maybe_hide_startup_mask()
 
-        # 如果还有未处理的更新，安排下一批
+        # 如果还有未处理的更新，立即安排下一批（0ms延迟）
+        # 使用0ms延迟让Qt事件循环处理其他事件（如鼠标、键盘）
         if self._pending_updates:
-            # 使用QTimer.singleShot让出时间片，避免阻塞UI
-            # 使用5ms延迟，确保UI有时间响应用户输入
-            # 如果有可见区域的更新，使用更短的延迟（0ms）
-            delay = 0 if visible_updates else 5
-            QTimer.singleShot(delay, self._process_pending_updates)
+            QTimer.singleShot(0, self._process_pending_updates)
         else:
             self._is_processing_updates = False
             # 所有缩略图更新处理完成，结束状态栏任务
             if self._thumb_status_task_id is not None:
-                try:
-                    StatusManager.instance().finish_task(self._thumb_status_task_id)
-                    self._thumb_status_task_id = None
-                except Exception:
-                    pass
+                StatusManager.instance().finish_task(self._thumb_status_task_id)
+                self._thumb_status_task_id = None
 
     def _on_idle_visible_load_tick(self):
         try:
@@ -9186,66 +9128,74 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             return
 
-    def _apply_loaded_thumbnail(self, path, image=None):
-        """应用加载的缩略图到UI - 优化版
-        
-        优化点：
-        1. 减少不必要的属性访问
-        2. 预加载的图片立即显示，不延迟
-        3. 使用轻量级检查
-        4. 支持从 grid_view.thumbnails 中查找（备用）
-        """
-        key = self._normalize_path_key(path)
-        
-        # 首先从 _thumb_by_path 中查找
-        thumb = self._thumb_by_path.get(key)
-        found_in_cache = thumb is not None
-        
-        # 如果没找到，尝试从 grid_view.thumbnails 中查找
-        # 这在懒加载模式下很重要，因为缩略图可能还没被添加到 _thumb_by_path
-        if not thumb and hasattr(self, 'grid_view') and self.grid_view:
-            for t in getattr(self.grid_view, 'thumbnails', []):
-                info = getattr(t, 'image_info', None)
-                if info:
-                    try:
-                        t_path = info.get('path') or info.get('file_path') or info.get('filepath')
-                        if t_path and self._normalize_path_key(t_path) == key:
-                            thumb = t
-                            # 缓存到 _thumb_by_path 以便下次快速查找
-                            self._thumb_by_path[key] = thumb
-                            break
-                    except Exception:
-                        pass
-        
+    def on_thumbnail_metrics(self, path, image, request_id, elapsed_ms, from_cache, attempts):
+        """缩略图加载指标回调 - 用于更新状态显示
 
-        
-        if not thumb:
-            return False
-            
-        image_info = getattr(thumb, "image_info", None)
-        if not image_info:
-            return False
-            
-        try:
-            info_path = image_info.get("path")
-        except Exception:
-            return False
-            
-        if self._normalize_path_key(info_path) != key:
-            return False
-            
-        if image is None:
-            return True
-            
-        # 立即应用缩略图，不区分是否可见或是否快速滚动
-        # 这样可以确保预加载的图片立即显示，用户滚动时不会看到占位符
-        if hasattr(thumb, "set_thumbnail_image"):
-            thumb.set_thumbnail_image(image)
+        参数:
+            path: 图片路径
+            image: 加载的图片
+            request_id: 请求ID
+            elapsed_ms: 耗时（毫秒）
+            from_cache: 是否来自缓存
+            attempts: 尝试次数
+        """
+        if int(request_id or 0) != int(self._thumbnail_request_id):
+            return
+
+        # 更新加载/生成计数
+        if from_cache:
+            self._thumb_cache_loaded_count += 1
+        else:
+            self._thumb_generated_count += 1
+
+        # 更新状态栏消息，区分加载和生成
+        if self._thumb_status_task_id is not None:
             try:
-                thumb._stale_thumbnail = False
+                total_loaded = self._thumb_cache_loaded_count + self._thumb_generated_count
+                remaining = max(0, self._thumb_total_to_load - total_loaded)
+
+                # 根据情况显示不同的状态消息
+                # 优化：当缓存加载数量超过生成数量时，显示"正在加载"而不是"正在生成"
+                if self._thumb_generated_count > self._thumb_cache_loaded_count:
+                    # 生成数量多于缓存加载，显示生成进度
+                    task_msg = f"正在生成缩略图 ({self._thumb_generated_count}/{self._thumb_total_to_load})..."
+                else:
+                    # 缓存加载数量多于或等于生成数量，显示加载进度
+                    task_msg = f"正在加载缩略图 ({total_loaded}/{self._thumb_total_to_load})..."
+
+                StatusManager.instance().update_task(self._thumb_status_task_id, task_msg)
             except Exception:
                 pass
-                
+
+    def _apply_loaded_thumbnail(self, path, image=None):
+        """应用加载的缩略图到UI - 超轻量版
+
+        核心优化：
+        1. 只使用 _thumb_by_path 缓存查找，避免遍历所有缩略图
+        2. 移除所有不必要的检查
+        3. 直接调用 set_thumbnail_image，不做额外处理
+        4. 如果找不到缩略图控件，直接返回False（不重试）
+
+        说明：
+        - 简化逻辑可以大幅减少主线程阻塞时间
+        - 如果缩略图控件还没创建，跳过它，等创建时会自动加载缓存
+        """
+        if image is None:
+            return False
+            
+        key = self._normalize_path_key(path)
+        
+        # 只从缓存查找，不遍历所有缩略图
+        thumb = self._thumb_by_path.get(key)
+        
+        if not thumb:
+            # 缩略图控件不存在，直接返回
+            # 不需要重试，因为控件创建时会自动从缓存加载
+            return False
+            
+        # 直接应用缩略图，不做任何额外检查
+        thumb.set_thumbnail_image(image)
+        thumb._stale_thumbnail = False
         return True
 
     def _retry_apply_loaded_thumbnail(self, path, image, attempt):

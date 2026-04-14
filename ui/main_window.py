@@ -891,13 +891,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'icon_toolbar'):
              self.icon_toolbar.show()
 
-        # 优化：仅在启动时预加载图库页面（索引0），导入页面（索引1）改为按需加载
-        # 这样可以减少启动时的主线程阻塞时间
-        # 优化：预加载导入页面，避免用户点击侧边栏切换时等待
+        # 启动阶段优先保证图库页可见。
+        # 导入页如果需要预构造，优先在 main.py 的加载弹窗阶段完成，避免首屏出现后再卡主线程。
         try:
             QTimer.singleShot(150, lambda: self._ensure_page_loaded(0))
-            # 延迟预加载导入页面，避免启动时阻塞，但确保用户切换时页面已准备好
-            QTimer.singleShot(500, lambda: self._ensure_page_loaded(1))
+            if not bool(getattr(self, "_startup_import_page_prepared", False)):
+                # 没有加载弹窗预处理时，仍保留兜底预加载，避免首次切换导入页时等待过久。
+                QTimer.singleShot(500, lambda: self._ensure_page_loaded(1))
         except Exception:
             pass
 
@@ -910,8 +910,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1200, self._warmup_subject_detector_once)
         QTimer.singleShot(600, self._warmup_exiftool_stayopen_once)
         
-        # 初始化全局快捷键识鸟功能
-        QTimer.singleShot(800, self._init_bird_detect_controller)
+        # 全局识鸟快捷键优先在加载弹窗阶段初始化，减少首屏显示后的主线程抖动。
+        if not bool(getattr(self, "_startup_bird_detect_prepared", False)):
+            QTimer.singleShot(800, self._init_bird_detect_controller)
         
         # 尝试启动主界面功能引导（针对已有用户或测试模式）
         # 延迟一点时间，确保界面已完全显示

@@ -154,15 +154,78 @@ def get_focus_scaled_cache_dir() -> str:
     """获取对焦检测缩略图缓存目录
 
     使用 focus_scaled_cache 模块中的函数，确保缓存目录一致性
+    支持打包后的程序（PyInstaller）
     """
+    # 辅助函数：记录日志
+    def _log(msg):
+        try:
+            from utils.log_manager import LogManager
+            LogManager.instance().debug(msg)
+        except Exception:
+            pass
+
     try:
         from cache.focus_scaled_cache import get_cache_dir
-        return get_cache_dir("focus_scaled")
-    except Exception:
-        # 如果失败，使用基于当前工作目录的路径（兼容旧逻辑）
+        result = get_cache_dir("focus_scaled")
+        _log(f"[BirdFocusDetector] 使用focus_scaled_cache.get_cache_dir返回: {result}")
+        return result
+    except Exception as e:
+        # 如果导入失败，使用与 focus_scaled_cache 相同的逻辑计算路径
+        # 支持打包后的程序（PyInstaller）
+        _log(f"[BirdFocusDetector] 导入focus_scaled_cache失败: {e}，使用备用逻辑")
         try:
-            return os.path.join(_get_project_root(), "cache", "focus_scaled")
-        except Exception:
+            # 优先使用环境变量指定的缓存目录
+            env_cache_dir = os.environ.get("BIRD_PICTURE_MANAGER_CACHE_DIR")
+            if env_cache_dir:
+                base = env_cache_dir
+                _log(f"[BirdFocusDetector] 使用环境变量缓存目录: {base}")
+            elif getattr(sys, 'frozen', False):
+                # 打包后的程序，使用可执行文件所在目录
+                # 注意：在多进程环境下，sys.executable 可能指向 Python 解释器
+                # 尝试通过多种方式找到正确的应用程序目录
+                exe_dir = os.path.dirname(sys.executable)
+                _log(f"[BirdFocusDetector] 初始 exe_dir={exe_dir}, sys.executable={sys.executable}")
+
+                # 如果 exe_dir 包含 "_internal"，则向上回退到上级目录
+                if "_internal" in exe_dir.lower():
+                    exe_dir = os.path.dirname(exe_dir)
+                    _log(f"[BirdFocusDetector] 包含_internal，回退到: {exe_dir}")
+                # 如果 exe_dir 包含 "python"，说明是Python解释器，尝试其他方式
+                elif "python" in os.path.basename(exe_dir).lower() or "python" in os.path.basename(sys.executable).lower():
+                    _log(f"[BirdFocusDetector] 检测到Python解释器，尝试通过sys.argv[0]查找")
+                    try:
+                        # 尝试使用 sys.argv[0] 获取主程序路径
+                        main_script = sys.argv[0] if sys.argv else None
+                        if main_script:
+                            main_dir = os.path.dirname(os.path.abspath(main_script))
+                            _log(f"[BirdFocusDetector] sys.argv[0]={main_script}, main_dir={main_dir}")
+                            if main_dir and os.path.isdir(main_dir):
+                                # 检查这个目录是否包含可执行文件（.exe）
+                                for f in os.listdir(main_dir):
+                                    if f.lower().endswith('.exe'):
+                                        exe_dir = main_dir
+                                        _log(f"[BirdFocusDetector] 找到.exe文件: {f}，使用目录: {exe_dir}")
+                                        break
+                                    # 如果上级目录包含 _internal，说明是打包后的程序
+                                    parent_dir = os.path.dirname(main_dir)
+                                    if "_internal" in os.path.basename(parent_dir).lower():
+                                        exe_dir = parent_dir
+                                        _log(f"[BirdFocusDetector] 上级目录包含_internal，使用: {exe_dir}")
+                                        break
+                    except Exception as e2:
+                        _log(f"[BirdFocusDetector] 通过sys.argv[0]查找失败: {e2}")
+
+                base = os.path.join(exe_dir, "cache")
+                _log(f"[BirdFocusDetector] 最终 exe_dir={exe_dir}, base={base}")
+            else:
+                # 开发环境
+                base = os.path.join(_get_project_root(), "cache")
+                _log(f"[BirdFocusDetector] 开发环境，base={base}")
+            result = os.path.join(base, "focus_scaled")
+            _log(f"[BirdFocusDetector] 最终缓存目录: {result}")
+            return result
+        except Exception as e3:
+            _log(f"[BirdFocusDetector] 获取缓存目录失败: {e3}")
             return ""
 
 
@@ -238,7 +301,7 @@ class BirdFocusDetector:
         self,
         model_path: str = "yolov8n-seg.pt",
         *,
-        target_size: int = 512,
+        target_size: int = 640,  # 固定为640，与缩略图加载时一致
         initial_conf: float = 0.15,
         sharp_threshold: int = 80,
         norm_sharp_threshold: int = 130,
@@ -372,13 +435,23 @@ class BirdFocusDetector:
         self._eye_model_path = ""
         self._eye_conf = 0.25
 
-    def enable_scaled_cache(self, enabled: bool = True, cache_dir: str | None = None):
+    def enable_scaled_cache(self, enabled: bool = True, cache_dir: str | None = None, clear_existing: bool = False):
+        """启用或禁用缩略图缓存
+
+        参数:
+            enabled: 是否启用缓存
+            cache_dir: 自定义缓存目录（可选）
+            clear_existing: 是否清理现有缓存（开始新的对焦检测时设为True）
+        """
         self._scaled_cache_enabled = bool(enabled)
         if cache_dir is not None:
             try:
                 self._scaled_cache_dir = str(cache_dir or "")
             except Exception:
                 self._scaled_cache_dir = ""
+        # 开始新的对焦检测时清理之前的缓存
+        if clear_existing and self._scaled_cache_enabled:
+            self._scaled_cache_clear_all()
         return self
 
     @staticmethod
@@ -463,10 +536,10 @@ class BirdFocusDetector:
             from utils.setting.settings_manager import SettingsManager
 
             sm = SettingsManager()
-            v = int(sm.get("import/cache_size", 500))
+            v = int(sm.get("import/cache_size", 2000))
             return max(50, v)
         except Exception:
-            return 500
+            return 2000
 
     def _scaled_cache_key(self, image_path: str) -> str:
         """构建缓存键
@@ -546,45 +619,101 @@ class BirdFocusDetector:
             return
         try:
             os.makedirs(cache_dir, exist_ok=True)
-        except Exception:
+        except Exception as e:
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().warning(f"[FocusCache] 创建缓存目录失败: {cache_dir}, 错误: {e}")
+            except Exception:
+                pass
             return
         key = self._scaled_cache_key(image_path)
         jpg_path, meta_path = self._scaled_cache_paths(key)
         try:
             encoded = cv2.imencode(".jpg", scaled_img, [int(cv2.IMWRITE_JPEG_QUALITY), int(getattr(self, "_scaled_cache_quality", 90))])[1]
-        except Exception:
+        except Exception as e:
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().warning(f"[FocusCache] 编码图片失败: {image_path}, 错误: {e}")
+            except Exception:
+                pass
             return
-        tmp = f"{jpg_path}.tmp.{os.getpid()}"
-        tmp_meta = f"{meta_path}.tmp.{os.getpid()}"
+
+        # 多进程安全：使用进程ID和随机数创建唯一的临时文件名
+        import random
+        import time
+        unique_id = f"{os.getpid()}_{random.randint(1000, 9999)}_{int(time.time()*1000)%1000}"
+        tmp = f"{jpg_path}.tmp.{unique_id}"
+        tmp_meta = f"{meta_path}.tmp.{unique_id}"
+
+        # 先检查缓存是否已存在（避免重复写入）
         try:
-            with _scaled_cache_lock:
+            if os.path.isfile(jpg_path) and os.path.isfile(meta_path):
+                return
+        except Exception:
+            pass
+
+        try:
+            # 写入临时文件
+            encoded.tofile(tmp)
+            meta = {"orig_w": int(orig_w or 0), "orig_h": int(orig_h or 0)}
+            with open(tmp_meta, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+
+            # 使用原子操作移动到目标位置
+            try:
+                os.replace(tmp, jpg_path)
+                os.replace(tmp_meta, meta_path)
+            except Exception as e:
+                # 如果移动失败，清理临时文件
                 try:
-                    if os.path.isfile(jpg_path) and os.path.isfile(meta_path):
-                        return
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
                 except Exception:
                     pass
                 try:
-                    encoded.tofile(tmp)
-                    meta = {"orig_w": int(orig_w or 0), "orig_h": int(orig_h or 0)}
-                    with open(tmp_meta, "w", encoding="utf-8") as f:
-                        json.dump(meta, f, ensure_ascii=False)
-                    os.replace(tmp, jpg_path)
-                    os.replace(tmp_meta, meta_path)
+                    if os.path.exists(tmp_meta):
+                        os.remove(tmp_meta)
                 except Exception:
                     pass
-                finally:
-                    try:
-                        if os.path.exists(tmp):
-                            os.remove(tmp)
-                    except Exception:
-                        pass
-                    try:
-                        if os.path.exists(tmp_meta):
-                            os.remove(tmp_meta)
-                    except Exception:
-                        pass
+                try:
+                    from utils.log_manager import LogManager
+                    LogManager.instance().warning(f"[FocusCache] 保存缓存文件失败: {jpg_path}, 错误: {e}")
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().warning(f"[FocusCache] 保存缓存文件失败: {jpg_path}, 错误: {e}")
+            except Exception:
+                pass
         finally:
-            self._scaled_cache_enforce_limit()
+            # 确保临时文件被清理
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+            try:
+                if os.path.exists(tmp_meta):
+                    os.remove(tmp_meta)
+            except Exception:
+                pass
+        # 注意：不在此处清理缓存，缓存清理只在开始新的对焦检测时进行
+        # 这样可以保存所有缩略图，提高后续浏览速度
+
+    def _scaled_cache_clear_all(self):
+        """清理所有缓存文件 - 在开始新的对焦检测时调用"""
+        # 注意：不检查 _scaled_cache_enabled，确保可以清理缓存
+        cache_dir = str(getattr(self, "_scaled_cache_dir", "") or "")
+        if not cache_dir:
+            return
+        try:
+            import shutil
+            if os.path.isdir(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            pass
 
     def _scaled_cache_enforce_limit(self):
         if not bool(getattr(self, "_scaled_cache_enabled", False)):
@@ -595,7 +724,7 @@ class BirdFocusDetector:
         try:
             max_count = int(self._get_scaled_cache_max_count())
         except Exception:
-            max_count = 500
+            max_count = 2000
         if max_count <= 0:
             return
         try:
@@ -1015,9 +1144,21 @@ class BirdFocusDetector:
                         thumb = raw.extract_thumb()
                     except rawpy.LibRawNoThumbnailError:
                         try:
-                            LogManager.instance().debug(f"{os.path.basename(file_path)}: 无缩略图")
+                            LogManager.instance().debug(f"{os.path.basename(file_path)}: 无缩略图，尝试加载原图")
                         except Exception:
                             pass
+                        # 如果没有缩略图，尝试加载原图（解码RAW）
+                        try:
+                            rgb = raw.postprocess()
+                            if rgb is not None and rgb.size > 0:
+                                # 将RGB转换为BGR（OpenCV格式）
+                                image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                                return image
+                        except Exception as e:
+                            try:
+                                LogManager.instance().debug(f"{os.path.basename(file_path)}: 加载原图失败: {e}")
+                            except Exception:
+                                pass
                         return None
 
                     if thumb.format == rawpy.ThumbFormat.JPEG:

@@ -16,8 +16,8 @@ class ThumbnailLoadTask(QRunnable):
     
     将耗时的路径收集工作移到后台线程，避免阻塞UI线程
     """
-    def __init__(self, import_page_ref, request_id, load_request_id, start, end, preload_start, preload_end, 
-                 req_max, is_big_mode, force_update_placeholder):
+    def __init__(self, import_page_ref, request_id, load_request_id, start, end, preload_start, preload_end,
+                 req_max, is_big_mode, force_update_placeholder, scroll_direction=0):
         super().__init__()
         self.import_page_ref = import_page_ref
         self.request_id = request_id
@@ -29,6 +29,7 @@ class ThumbnailLoadTask(QRunnable):
         self.req_max = req_max
         self.is_big_mode = is_big_mode
         self.force_update_placeholder = force_update_placeholder
+        self.scroll_direction = scroll_direction  # 滑动方向：1=向下，-1=向上，0=无方向
         self.setAutoDelete(True)
     
     def run(self):
@@ -61,58 +62,83 @@ class ThumbnailLoadTask(QRunnable):
             requested_retry_ts = page._requested_retry_ts
         except Exception:
             return None
-        
+
         if not image_files or not thumbnails:
             return None
-        
+
         visible_paths_to_load = []
         preload_paths_to_load = []
         current_visible_paths = set()
         pending_visible = set()
         missing_control_max_idx = -1
-        
+
+        # 获取磁盘缓存实例用于检查本地缓存
+        disk_cache = None
+        try:
+            from cache.thumbnail_disk_cache import ThumbnailDiskCache
+            disk_cache = ThumbnailDiskCache(page.cache_manager, scope="import")
+        except Exception:
+            pass
+
+        # 根据滑动方向计算下两个屏幕的范围
+        metrics = page.grid_view.get_viewport_metrics() or {}
+        cols = max(1, int(metrics.get("cols", 1)))
+        visible_rows = max(1, int(metrics.get("visible_rows", 1)))
+        items_per_screen = cols * visible_rows
+
+        # 计算下两个屏幕的范围
+        if self.scroll_direction > 0:  # 向下滑动
+            next_screen_start = self.end + 1
+            next_screen_end = min(len(image_files) - 1, next_screen_start + items_per_screen * 2 - 1)
+        elif self.scroll_direction < 0:  # 向上滑动
+            next_screen_end = self.start - 1
+            next_screen_start = max(0, next_screen_end - items_per_screen * 2 + 1)
+        else:  # 无方向，预加载两侧
+            next_screen_start = self.preload_start
+            next_screen_end = self.preload_end
+
         target_indices = range(self.preload_start, self.preload_end + 1)
-        
+
         for idx in target_indices:
             if idx >= len(image_files):
                 break
-            
+
             try:
                 file_data = image_files[idx]
                 if isinstance(file_data, dict):
                     path = file_data.get('path')
                 else:
                     path = str(file_data)
-                
+
                 if not path:
                     continue
-                
+
                 path = page._normalize_path_key(path)
                 if not path:
                     continue
-                
+
                 is_visible = idx <= self.end
                 if is_visible:
                     current_visible_paths.add(path)
-                
+
                 if idx >= len(thumbnails):
                     if idx > missing_control_max_idx:
                         missing_control_max_idx = int(idx)
                     continue
-                
+
                 thumb = thumbnails[idx]
-                
+
                 # 检查是否已有图片数据
                 existing_pix = getattr(thumb, "thumbnail_pixmap", None)
                 existing_img = getattr(thumb, "_thumbnail_image", None)
                 has_existing_pix = existing_pix is not None and not (hasattr(existing_pix, "isNull") and existing_pix.isNull())
                 has_existing_img = existing_img is not None and not (hasattr(existing_img, "isNull") and existing_img.isNull())
-                
+
                 try:
                     is_stale = bool(getattr(thumb, "_stale_thumbnail", False))
                 except Exception:
                     is_stale = False
-                
+
                 # 检查是否需要重新加载（分辨率不够）
                 if (has_existing_pix or has_existing_img) and not is_stale and self.req_max > 0 and not self.is_big_mode:
                     try:
@@ -124,9 +150,9 @@ class ThumbnailLoadTask(QRunnable):
                         existing_max = 0
                     if existing_max > 0 and (existing_max < int(self.req_max * 0.85) or self.req_max - existing_max >= 32):
                         is_stale = True
-                
+
                 has_loaded = (has_existing_pix or has_existing_img) and not is_stale
-                
+
                 # 如果已经请求过，不再重复请求
                 if path in requested_paths and not is_stale:
                     if is_visible:
@@ -141,24 +167,38 @@ class ThumbnailLoadTask(QRunnable):
                         except Exception:
                             pass
                     continue
-                
+
                 if path in requested_paths and is_stale:
                     try:
                         requested_paths.discard(path)
                     except Exception:
                         pass
-                
+
                 if not has_loaded:
                     if is_visible:
                         visible_paths_to_load.append((-1, path, True))
                         requested_paths.add(path)
                         pending_visible.add(path)
                     else:
-                        preload_paths_to_load.append((1, path, False))
-                        
+                        # 预加载策略：只预加载有本地缓存的缩略图
+                        # 且只预加载滑动方向的下两个屏幕
+                        is_in_next_screens = next_screen_start <= idx <= next_screen_end
+                        has_local_cache = False
+                        if disk_cache is not None and is_in_next_screens:
+                            try:
+                                # 检查磁盘缓存是否存在
+                                cache_img = disk_cache.get(path, self.req_max, cache_type='import', scale_quality='low')
+                                has_local_cache = cache_img is not None and not cache_img.isNull()
+                            except Exception:
+                                has_local_cache = False
+
+                        # 只预加载有本地缓存且在下两个屏幕范围内的缩略图
+                        if has_local_cache:
+                            preload_paths_to_load.append((1, path, False))
+
             except Exception:
                 continue
-        
+
         return {
             'visible_paths': visible_paths_to_load,
             'preload_paths': preload_paths_to_load,
@@ -191,7 +231,8 @@ class ThumbnailLoadTask(QRunnable):
             if paths_to_load:
                 # 反转加载顺序，确保从左上角到右下角加载
                 paths_to_load.reverse()
-                page.thumbnail_loader.load_thumbnails(paths_to_load, page.grid_view.current_thumb_size, request_id=page._load_request_id)
+                # 使用 cache_type='import' 以启用对焦检测缓存
+                page.thumbnail_loader.load_thumbnails(paths_to_load, page.grid_view.current_thumb_size, cache_type='import', request_id=page._load_request_id)
 
         except Exception:
             pass
@@ -240,7 +281,7 @@ class ImportPage(BaseImageBrowserPage):
     def __init__(self):
         self.db = BirdLibraryDB()
         self.settings_manager = SettingsManager()
-        cache_size = int(self.settings_manager.get("import/cache_size", 500))
+        cache_size = int(self.settings_manager.get("import/cache_size", 2000))
         self._event_filter_installed = False
         self._suspend_filter_panel_auto_hide = False
         cpu_count = os.cpu_count() or 4
@@ -306,6 +347,10 @@ class ImportPage(BaseImageBrowserPage):
         self._metrics_cache_hits = 0
         self._folder_load_request_id = 0
         self._thumb_status_task_id = None
+        # 缩略图加载状态跟踪：区分从缓存加载和生成新缩略图
+        self._thumb_cache_loaded_count = 0  # 从缓存加载的数量
+        self._thumb_generated_count = 0     # 新生成缩略图的数量
+        self._thumb_total_to_load = 0       # 总共需要加载的数量
         self.has_valid_folder = False
         self._loaded_paths = set()
         self._last_scroll_value = None
@@ -335,7 +380,7 @@ class ImportPage(BaseImageBrowserPage):
         self._thumb_build_timer.timeout.connect(self._build_thumbnail_batch)
 
         self._update_timer = QTimer(self)
-        self._update_timer.setInterval(5)
+        self._update_timer.setInterval(16)  # 增加到16ms（约60fps），减少CPU占用
         self._update_timer.timeout.connect(self._process_pending_updates)
 
         self._startup_mask_timeout_timer = QTimer(self)
@@ -762,17 +807,13 @@ class ImportPage(BaseImageBrowserPage):
     def showEvent(self, event):
         """页面显示时恢复加载任务"""
         super().showEvent(event)
+        # 使用单次延迟调用替代多次重复调用，减少启动时的布局计算
         try:
-            self._apply_thumb_size_from_slider(apply_reload=False)
+            QTimer.singleShot(100, lambda: self._apply_thumb_size_from_slider(apply_reload=False))
         except Exception:
             pass
         try:
-            QTimer.singleShot(0, lambda: self._apply_thumb_size_from_slider(apply_reload=False))
-            QTimer.singleShot(80, lambda: self._apply_thumb_size_from_slider(apply_reload=False))
-        except Exception:
-            pass
-        try:
-            QTimer.singleShot(220, self._force_refresh_first_visible_thumbnail)
+            QTimer.singleShot(300, self._force_refresh_first_visible_thumbnail)
         except Exception:
             pass
         try:
@@ -786,8 +827,8 @@ class ImportPage(BaseImageBrowserPage):
             if hasattr(self, "_default_loader_threads"):
                 self.thumbnail_loader.set_max_thread_count(self._default_loader_threads)
             
-            # 触发可见区域加载
-            self._schedule_visible_load(immediate=True)
+            # 延迟触发可见区域加载，避免启动时卡顿
+            QTimer.singleShot(200, lambda: self._schedule_visible_load(immediate=True))
 
     def _force_refresh_first_visible_thumbnail(self):
         try:
@@ -2027,7 +2068,23 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
-    def _on_import_roots_changed(self, *_args):
+    def _get_disk_cache(self):
+        """获取磁盘缓存实例"""
+        try:
+            from cache.thumbnail_disk_cache import ThumbnailDiskCache
+            return ThumbnailDiskCache(self.cache_manager, scope="import")
+        except Exception:
+            return None
+
+    def _on_import_roots_changed(self, folder_path=None, *_args):
+        # 如果指定了文件夹路径，清理该文件夹的磁盘缓存
+        if folder_path:
+            try:
+                disk_cache = self._get_disk_cache()
+                if disk_cache is not None:
+                    disk_cache.invalidate_by_folder(str(folder_path))
+            except Exception:
+                pass
         try:
             roots = self._get_import_root_paths_from_tree()
         except Exception:
@@ -2153,17 +2210,20 @@ class ImportPage(BaseImageBrowserPage):
                     _auto_select_and_load(last_path)
 
             # 延迟500ms后再自动加载，确保UI已经响应
-            QTimer.singleShot(500, _delayed_auto_load)
+            # 延迟自动加载，确保UI完全初始化后再加载图片，减少启动卡顿
+            QTimer.singleShot(800, _delayed_auto_load)
 
-        # 1. 恢复缩略图大小
-        thumb_size = self.settings_manager.get("import/thumbnail_size")
-        if thumb_size is not None:
-            val = int(thumb_size)
-            if hasattr(self, 'toolbar') and hasattr(self.toolbar, 'preview_slider'):
-                self.toolbar.preview_slider.blockSignals(True)
-                self.toolbar.preview_slider.setValue(val)
-                self.toolbar.preview_slider.blockSignals(False)
-                self.on_thumbnail_size_changed(val)
+        # 1. 恢复缩略图大小（延迟执行，避免启动时卡顿）
+        def _apply_thumb_size_later():
+            thumb_size = self.settings_manager.get("import/thumbnail_size")
+            if thumb_size is not None:
+                val = int(thumb_size)
+                if hasattr(self, 'toolbar') and hasattr(self.toolbar, 'preview_slider'):
+                    self.toolbar.preview_slider.blockSignals(True)
+                    self.toolbar.preview_slider.setValue(val)
+                    self.toolbar.preview_slider.blockSignals(False)
+                    self.on_thumbnail_size_changed(val)
+        QTimer.singleShot(300, _apply_thumb_size_later)
 
         # 2. 恢复 Splitter 状态
         splitter_state = self.settings_manager.get("import/splitter_state")
@@ -5170,11 +5230,7 @@ class ImportPage(BaseImageBrowserPage):
                                 if w0 <= 1 or h0 <= 1:
                                     try:
                                         from cache.focus_scaled_cache import try_load_meta
-                                        focus_target = 640
-                                        try:
-                                            focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                                        except Exception:
-                                            focus_target = 640
+                                        focus_target = 640  # 固定为640，与对焦检测保存时一致
                                         meta0 = try_load_meta(fp, int(focus_target), scope="import_focus")
                                         if isinstance(meta0, dict):
                                             try:
@@ -5579,11 +5635,7 @@ class ImportPage(BaseImageBrowserPage):
                                 if width <= 1 or height <= 1:
                                     try:
                                         from cache.focus_scaled_cache import try_load_meta
-                                        focus_target = 640
-                                        try:
-                                            focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                                        except Exception:
-                                            focus_target = 640
+                                        focus_target = 640  # 固定为640，与对焦检测保存时一致
                                         meta0 = try_load_meta(fp, int(focus_target), scope="import_focus")
                                         if isinstance(meta0, dict):
                                             try:
@@ -6283,7 +6335,10 @@ class ImportPage(BaseImageBrowserPage):
                 # 设置缓存预热
                 self._cache_warmup_request_id = request_id
                 self._cache_warmup_index = 0
-                self._cache_warmup_paths = [img.get("path") for img in self.image_files if img.get("path")]
+                # 限制预热路径数量，避免启动时加载过多导致卡顿
+                # 只预热前500个图片，后面的图片在用户滚动时再加载
+                all_paths = [img.get("path") for img in self.image_files if img.get("path")]
+                self._cache_warmup_paths = all_paths[:500]
                 # 确保定时器已创建
                 self._ensure_timer("_cache_warmup_timer", single_shot=False, interval=50, callback=self._on_cache_warmup_timeout)
                 if self._cache_warmup_timer.isActive():
@@ -6689,6 +6744,14 @@ class ImportPage(BaseImageBrowserPage):
         try:
             if isinstance(folder, str) and folder.startswith("virtual://focus_detect?"):
                 real_folder, _, _ = self._parse_focus_detect_virtual_path(folder)
+                if real_folder:
+                    folder = str(real_folder)
+        except Exception:
+            pass
+        # 处理连拍文件夹虚拟路径
+        try:
+            if isinstance(folder, str) and folder.startswith("virtual://focus_detect_burst?"):
+                real_folder, _, _ = self._parse_focus_detect_burst_virtual_path(folder)
                 if real_folder:
                     folder = str(real_folder)
         except Exception:
@@ -9758,7 +9821,8 @@ class ImportPage(BaseImageBrowserPage):
                     load_thumb_size = int(base)
                 except Exception:
                     load_thumb_size = self.grid_view.current_thumb_size
-            self.thumbnail_loader.load_thumbnails(batch, load_thumb_size, request_id=self._load_request_id)
+            # 使用 cache_type='import' 以启用对焦检测缓存
+            self.thumbnail_loader.load_thumbnails(batch, load_thumb_size, cache_type='import', request_id=self._load_request_id)
         if self._cache_warmup_index >= total:
             self._cache_warmup_timer.stop()
 
@@ -10032,7 +10096,35 @@ class ImportPage(BaseImageBrowserPage):
             self._metrics_fail += 1
         if from_cache:
             self._metrics_cache_hits += 1
+            self._thumb_cache_loaded_count += 1
+        else:
+            self._thumb_generated_count += 1
         self._metrics_times.append(float(elapsed_ms))
+
+        # 更新状态栏消息，区分加载和生成
+        if self._thumb_status_task_id is not None:
+            try:
+                total_loaded = self._thumb_cache_loaded_count + self._thumb_generated_count
+                remaining = max(0, self._thumb_total_to_load - total_loaded)
+
+                # 如果已加载数量达到或超过总数，结束任务
+                if total_loaded >= self._thumb_total_to_load:
+                    StatusManager.instance().finish_task(self._thumb_status_task_id)
+                    self._thumb_status_task_id = None
+                else:
+                    # 根据情况显示不同的状态消息
+                    # 优化：当缓存加载数量超过生成数量时，显示"正在加载"而不是"正在生成"
+                    if self._thumb_generated_count > self._thumb_cache_loaded_count:
+                        # 生成数量多于缓存加载，显示生成进度
+                        task_msg = f"正在生成缩略图 ({self._thumb_generated_count}/{self._thumb_total_to_load})..."
+                    else:
+                        # 缓存加载数量多于或等于生成数量，显示加载进度
+                        task_msg = f"正在加载缩略图 ({total_loaded}/{self._thumb_total_to_load})..."
+
+                    StatusManager.instance().update_task(self._thumb_status_task_id, task_msg)
+            except Exception:
+                pass
+
         now = time.time()
         if now - self._metrics_last_log >= 2.0:
             self._metrics_last_log = now
@@ -10048,7 +10140,8 @@ class ImportPage(BaseImageBrowserPage):
 
                 LogManager.instance().debug(
                     f"[Import] Thumb metrics: total={self._metrics_total}, fail={self._metrics_fail}, "
-                    f"cache_hit={self._metrics_cache_hits}, avg_ms={avg_ms:.1f}, p50={p50:.1f}, "
+                    f"cache_hit={self._metrics_cache_hits}, generated={self._thumb_generated_count}, "
+                    f"avg_ms={avg_ms:.1f}, p50={p50:.1f}, "
                     f"p95={p95:.1f}, max={max_ms:.1f}, "
                     f"cache={cache_info.get('general_cached', 0)}/{cache_info.get('max_size', 0)}, "
                     f"preload_q={cache_info.get('preload_queue', 0)}, requested={len(self._requested_paths)}"
@@ -10708,21 +10801,62 @@ class ImportPage(BaseImageBrowserPage):
                     self._requested_paths.add(path)
                     pending_visible.add(path)
                 else:
-                    # 预加载区域：稍后处理
-                    preload_paths_to_load.append((1, path, False))
-        
+                    # 预加载区域：只预加载有本地缓存的缩略图
+                    # 且只预加载滑动方向的下两个屏幕
+                    # 使用优先级2（低于可见区域的-1和预加载的1），确保不会阻塞可见区域
+                    preload_paths_to_load.append((2, path, False))
+
         # 合并加载任务：先加载可见区域，再限制加载预加载区域
         paths_to_load = visible_paths_to_load
-        # 预加载区域限制数量，避免加载过多非可见缩略图
-        # 根据滚动方向调整预加载数量，确保流畅性
-        if scroll_direction > 0:  # 向下滑动，多预加载下方
-            max_preload = cols * visible_rows * 2  # 预加载2屏
-        elif scroll_direction < 0:  # 向上滑动，多预加载上方
-            max_preload = cols * visible_rows * 2  # 预加载2屏
+
+        # 根据滑动方向计算下两个屏幕的范围
+        if scroll_direction > 0:  # 向下滑动
+            next_screen_start = end + 1
+            next_screen_end = min(len(self.image_files) - 1, next_screen_start + cols * visible_rows * 2 - 1)
+        elif scroll_direction < 0:  # 向上滑动
+            next_screen_end = start - 1
+            next_screen_start = max(0, next_screen_end - cols * visible_rows * 2 + 1)
         else:  # 无明确方向
-            max_preload = cols * visible_rows  # 预加载1屏
+            next_screen_start = preload_start
+            next_screen_end = preload_end
+
+        # 获取磁盘缓存实例用于检查本地缓存
+        disk_cache = None
+        try:
+            from cache.thumbnail_disk_cache import ThumbnailDiskCache
+            disk_cache = ThumbnailDiskCache(self.cache_manager, scope="import")
+        except Exception:
+            pass
+
+        # 获取用于检查缓存的尺寸（使用当前缩略图尺寸）
+        check_size = load_thumb_size if load_thumb_size > 0 else 300
+
+        # 过滤预加载路径：只保留在下两个屏幕范围内的路径
+        filtered_preload_paths = []
+        for item in preload_paths_to_load:
+            priority, path, is_visible = item
+            # 找到该路径对应的索引
+            path_idx = -1
+            for idx in preload_indices:
+                if idx < len(self.image_files):
+                    fd = self.image_files[idx]
+                    p = fd.get("path") if isinstance(fd, dict) else str(fd)
+                    if p and self._normalize_path_key(p) == path:
+                        path_idx = idx
+                        break
+
+            # 检查是否在下两个屏幕范围内
+            if path_idx < 0 or not (next_screen_start <= path_idx <= next_screen_end):
+                continue
+
+            # 添加到下两个屏幕的预加载列表
+            filtered_preload_paths.append(item)
+
+        preload_paths_to_load = filtered_preload_paths
+
+        # 预加载区域限制数量，避免加载过多非可见缩略图
+        max_preload = cols * visible_rows * 2  # 最多预加载2屏
         if len(preload_paths_to_load) > max_preload:
-            # 只取前max_preload个预加载任务
             preload_paths_to_load = preload_paths_to_load[:max_preload]
         for item in preload_paths_to_load:
             paths_to_load.append(item)
@@ -10750,16 +10884,18 @@ class ImportPage(BaseImageBrowserPage):
             # 批量提交加载任务
             # 反转加载顺序，确保从左上角到右下角加载
             paths_to_load.reverse()
-            self.thumbnail_loader.load_thumbnails(paths_to_load, load_thumb_size, request_id=self._load_request_id)
-            # 在状态栏显示缩略图加载任务
+            # 使用 cache_type='import' 以启用对焦检测缓存
+            self.thumbnail_loader.load_thumbnails(paths_to_load, load_thumb_size, cache_type='import', request_id=self._load_request_id)
+            # 在状态栏显示缩略图加载任务（只显示可见区域，不显示预加载）
             visible_count = len(visible_paths_to_load)
-            preload_count = len(preload_paths_to_load)
-            if visible_count > 0 or preload_count > 0:
+            if visible_count > 0:
                 try:
                     # 如果已有任务，更新进度；否则启动新任务
                     if self._thumb_status_task_id is None:
-                        total = visible_count + preload_count
-                        task_msg = f"正在加载缩略图 ({total} 个)..."
+                        self._thumb_total_to_load = visible_count
+                        self._thumb_cache_loaded_count = 0
+                        self._thumb_generated_count = 0
+                        task_msg = f"正在加载缩略图 ({visible_count} 个)..."
                         self._thumb_status_task_id = StatusManager.instance().start_task(task_msg)
                 except Exception:
                     pass
@@ -10807,14 +10943,6 @@ class ImportPage(BaseImageBrowserPage):
         except Exception:
             pass
 
-        t1 = time.perf_counter()
-        if t1 - t0 > 0.005:
-            try:
-                from utils.log_manager import LogManager
-
-                LogManager.instance().debug(f"[Import] visible load took: {t1-t0:.4f}s (indices: {len(target_indices)})")
-            except Exception:
-                pass
 
     def _enforce_in_memory_thumbnail_limit(self):
         try:
@@ -14558,11 +14686,7 @@ class ImportPage(BaseImageBrowserPage):
                 src_meta = None
                 try:
                     from cache.focus_scaled_cache import try_load_meta
-                    focus_target = 640
-                    try:
-                        focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                    except Exception:
-                        focus_target = 640
+                    focus_target = 640  # 固定为640，与对焦检测保存时一致
                     src_meta = try_load_meta(str(src), int(focus_target), scope="import_focus")
                 except Exception:
                     src_meta = None
@@ -15946,11 +16070,7 @@ class ImportPage(BaseImageBrowserPage):
             try:
                 if "orig_w" not in extra or "orig_h" not in extra:
                     from cache.focus_scaled_cache import try_load_meta
-                    focus_target = 640
-                    try:
-                        focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                    except Exception:
-                        focus_target = 640
+                    focus_target = 640  # 固定为640，与对焦检测保存时一致
                     meta0 = try_load_meta(str(p), int(focus_target), scope="import_focus")
                     if isinstance(meta0, dict):
                         if "orig_w" not in extra and meta0.get("orig_w") is not None:
@@ -16190,7 +16310,8 @@ class ImportPage(BaseImageBrowserPage):
             try:
                 if not p:
                     continue
-                if disk_cache.has(p, (thumb_size, thumb_size), cache_type="general", scale_quality=scale_quality, base_px=base_px):
+                # 使用 cache_type='import' 以匹配保存时的缓存类型
+                if disk_cache.has(p, (thumb_size, thumb_size), cache_type="import", scale_quality=scale_quality, base_px=base_px):
                     continue
                 need.append(str(p))
             except Exception:
@@ -16212,11 +16333,7 @@ class ImportPage(BaseImageBrowserPage):
 
         def build_one(path: str):
             try:
-                focus_target = 640
-                try:
-                    focus_target = int(self.settings_manager.get("focus_detect/target_size", 640) or 640)
-                except Exception:
-                    focus_target = 640
+                focus_target = 640  # 固定为640，与对焦检测保存时一致
                 from cache.focus_scaled_cache import try_load_qimage
 
                 cached_img, _meta = try_load_qimage(path, int(focus_target), scope="import_focus")
@@ -16237,7 +16354,8 @@ class ImportPage(BaseImageBrowserPage):
                                 Qt.AspectRatioMode.KeepAspectRatio,
                                 Qt.TransformationMode.FastTransformation,
                             )
-                    disk_cache.put(path, cached_img, (thumb_size, thumb_size), cache_type="general", scale_quality="low", base_px=base_px)
+                    # 使用 cache_type='import' 以匹配导入页面的缓存类型
+                    disk_cache.put(path, cached_img, (thumb_size, thumb_size), cache_type="import", scale_quality="low", base_px=base_px)
                     return True
             except Exception:
                 pass
@@ -16275,7 +16393,8 @@ class ImportPage(BaseImageBrowserPage):
                     img = reader.read()
 
             if img and not img.isNull():
-                disk_cache.put(path, img, (thumb_size, thumb_size), cache_type="general", scale_quality="low", base_px=base_px)
+                # 使用 cache_type='import' 以匹配导入页面的缓存类型
+                disk_cache.put(path, img, (thumb_size, thumb_size), cache_type="import", scale_quality="low", base_px=base_px)
                 return True
             return False
 

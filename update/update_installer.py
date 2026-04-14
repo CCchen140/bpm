@@ -391,8 +391,8 @@ class InstallThread(QThread):
             copied_count = 0
             for root, dirs, files in os.walk(delta_path):
                 for file in files:
-                    # 跳过特殊文件
-                    if file.startswith('_'):
+                    # 跳过特殊文件（但保留Python模块文件，如__init__.py和_pynput相关文件）
+                    if file.startswith('_') and not (file.startswith('__') or 'pynput' in file.lower()):
                         continue
 
                     src_path = os.path.join(root, file)

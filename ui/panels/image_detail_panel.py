@@ -6480,10 +6480,7 @@ class ImageDetailPanel(QWidget):
                     pass
         try:
             from cache.focus_scaled_cache import try_load_meta
-            try:
-                focus_target = int(SettingsManager.instance().get("focus_detect/target_size", 640) or 640)
-            except Exception:
-                focus_target = 640
+            focus_target = 640  # 固定为640，与对焦检测保存时一致
             scope = "import_focus" if str(getattr(self, "_db_table_name", "")) == "import_cache" or str(getattr(self, "_big_cache_context", "")).lower() == "import" else "focus"
             meta0 = try_load_meta(p, int(focus_target), scope=str(scope))
             if isinstance(meta0, dict):

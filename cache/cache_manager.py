@@ -85,14 +85,15 @@ class ImageCacheManager:
         self.settings_manager = SettingsManager()
         self.persistent_cache_enabled = not bool(self.settings_manager.get("performance/disable_thumbnail_persistence", False))
         if self.context == "import":
-            self.max_cache_size = int(self.settings_manager.get("import/cache_size", 500))
+            # 导入页面使用更大的默认缓存（2000），因为通常需要浏览大量图片
+            self.max_cache_size = int(self.settings_manager.get("import/cache_size", 2000))
             import_size = int(self.settings_manager.get("import/thumbnail_cache_size", 300))
             legacy_size = int(self.settings_manager.get("performance/thumbnail_cache_size", 300))
             if import_size == 300 and legacy_size != 300:
                 import_size = legacy_size
             self.cache_thumbnail_size = import_size
         else:
-            self.max_cache_size = int(self.settings_manager.get("performance/thumbnail_cache_count", 500))
+            self.max_cache_size = int(self.settings_manager.get("performance/thumbnail_cache_count", 800))
             library_size = int(self.settings_manager.get("library/thumbnail_cache_size", 300))
             legacy_size = int(self.settings_manager.get("performance/thumbnail_cache_size", 300))
             if library_size == 300 and legacy_size != 300:
@@ -207,14 +208,15 @@ class ImageCacheManager:
         """更新设置"""
         self.persistent_cache_enabled = not bool(self.settings_manager.get("performance/disable_thumbnail_persistence", False))
         if self.context == "import":
-            self.max_cache_size = int(self.settings_manager.get("import/cache_size", 500))
+            # 导入页面使用更大的默认缓存（2000），因为通常需要浏览大量图片
+            self.max_cache_size = int(self.settings_manager.get("import/cache_size", 2000))
             import_size = int(self.settings_manager.get("import/thumbnail_cache_size", 300))
             legacy_size = int(self.settings_manager.get("performance/thumbnail_cache_size", 300))
             if import_size == 300 and legacy_size != 300:
                 import_size = legacy_size
             self.cache_thumbnail_size = import_size
         else:
-            self.max_cache_size = int(self.settings_manager.get("performance/thumbnail_cache_count", 500))
+            self.max_cache_size = int(self.settings_manager.get("performance/thumbnail_cache_count", 800))
             library_size = int(self.settings_manager.get("library/thumbnail_cache_size", 300))
             legacy_size = int(self.settings_manager.get("performance/thumbnail_cache_size", 300))
             if library_size == 300 and legacy_size != 300:

@@ -223,6 +223,17 @@ def compute_delta_files(old_dist_dir: str, new_dist_dir: str) -> dict:
     old_map = _walk_dist_files(old_dist_dir)
     new_map = _walk_dist_files(new_dist_dir)
     
+    print(f"[DEBUG] 旧版本文件数: {len(old_map)}")
+    print(f"[DEBUG] 新版本文件数: {len(new_map)}")
+    
+    # 检查pynput相关文件
+    old_pynput_files = [k for k in old_map.keys() if 'pynput' in k.lower()]
+    new_pynput_files = [k for k in new_map.keys() if 'pynput' in k.lower()]
+    print(f"[DEBUG] 旧版本pynput文件数: {len(old_pynput_files)}")
+    print(f"[DEBUG] 新版本pynput文件数: {len(new_pynput_files)}")
+    if new_pynput_files:
+        print(f"[DEBUG] 新版本pynput文件示例: {new_pynput_files[:5]}")
+    
     # 创建小写映射用于大小写不敏感比较
     old_map_lower = {k.lower(): k for k in old_map.keys()}
     new_map_lower = {k.lower(): k for k in new_map.keys()}
@@ -237,8 +248,22 @@ def compute_delta_files(old_dist_dir: str, new_dist_dir: str) -> dict:
         rel_lower = rel.lower()
         old_key = old_map_lower.get(rel_lower)
         
+        # 过滤掉错误的文件路径（PyInstaller打包错误导致的）
+        # 例如：pynput/__init__/__init__.pyc 应该是 pynput/__init__.pyc
+        if '/__init__/__init__.' in rel_lower:
+            print(f"[WARNING] 跳过错误的文件路径: {rel}")
+            continue
+        
+        # 过滤掉dist-info目录（Python包元数据，不需要包含在升级包中）
+        if '.dist-info/' in rel_lower:
+            print(f"[DEBUG] 跳过dist-info文件: {rel}")
+            continue
+        
         if old_key is None:
             added.append(rel)
+            # 调试：记录新增的文件
+            if 'pynput' in rel.lower():
+                print(f"[DEBUG] 新增pynput文件: {rel}")
             continue
         
         # 如果文件名大小写不同，记录为重命名
@@ -270,11 +295,26 @@ def compute_delta_files(old_dist_dir: str, new_dist_dir: str) -> dict:
         modified.append(rel)
     
     # 检查删除的文件（排除已重命名的）
+    # 注意：不要删除pynput相关的文件，因为它们是全局快捷键功能的关键依赖
     renamed_old_keys = set(r[0] for r in renamed)
     for rel in old_map.keys():
         rel_lower = rel.lower()
         if rel_lower not in new_map_lower and rel not in renamed_old_keys:
+            # 检查是否是pynput相关文件
+            if 'pynput' in rel_lower:
+                print(f"[WARNING] 跳过删除pynput文件: {rel}")
+                continue
             deleted.append(rel)
+    
+    print(f"[DEBUG] 新增文件数: {len(added)}")
+    print(f"[DEBUG] 修改文件数: {len(modified)}")
+    print(f"[DEBUG] 删除文件数: {len(deleted)}")
+    
+    # 检查新增的pynput文件
+    added_pynput = [f for f in added if 'pynput' in f.lower()]
+    print(f"[DEBUG] 新增pynput文件数: {len(added_pynput)}")
+    if added_pynput:
+        print(f"[DEBUG] 新增pynput文件: {added_pynput[:10]}")
     
     added.sort()
     modified.sort()
@@ -469,9 +509,12 @@ def generate_iss_script(
     try:
         # 收集所有需要打包的文件
         files_entries = []
+        pynput_files_count = 0
         for root, dirs, files in os.walk(source_dir):
             for filename in files:
-                if filename.startswith('_'):
+                # 只跳过_delete_files.txt等特殊文件，不跳过以_开头的模块文件
+                # pynput等库的模块文件名包含下划线（如_base.pyc, _win32.pyc）
+                if filename in ('_delete_files.txt',):
                     continue
                 src_path = os.path.join(root, filename)
                 rel_path = os.path.relpath(src_path, source_dir).replace('/', '\\')
@@ -484,6 +527,15 @@ def generate_iss_script(
 
                 rel_path_escaped = rel_path.replace('\\', '\\\\')
                 files_entries.append(f'Source: "{{#MyAppDistDir}}\\{rel_path_escaped}"; DestDir: "{dest_dir}"; Flags: ignoreversion')
+                
+                # 调试：记录pynput相关的文件
+                if 'pynput' in rel_path.lower():
+                    pynput_files_count += 1
+                    if pynput_files_count <= 10:
+                        print(f"[DEBUG] ISS条目: {rel_path}")
+        
+        if pynput_files_count > 0:
+            print(f"[DEBUG] ISS脚本包含 {pynput_files_count} 个pynput文件")
 
         files_content = '\n'.join(files_entries) if files_entries else '; 没有需要打包的文件'
 

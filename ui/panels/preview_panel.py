@@ -663,8 +663,8 @@ class PreviewPanel(QWidget):
         """加载并在预览区显示图片
 
         优化策略：
-        1. 先检查大图片缓存，如果有直接显示
-        2. 如果传入了 initial_pixmap（当前显示的缩略图），直接显示它（最快）
+        1. 如果传入了 initial_pixmap（当前显示的缩略图），立即显示它（最快路径）
+        2. 检查大图片缓存，如果有直接显示
         3. 如果没有传入，尝试从缩略图缓存加载
         4. 同时启动后台线程加载原图，加载完成后替换
 
@@ -676,8 +676,7 @@ class PreviewPanel(QWidget):
         self._showing_thumbnail = False
 
         if not image_path:
-            # 清空显示，不显示"图片不存在"，保持空白或显示之前的统计信息(如果没被清空的话)
-            # 但这里我们清空它，以便 clear_preview 能正常工作
+            # 清空显示
             self.image_label.setText("")
             self.image_label.setPixmap(QPixmap())
             self.current_original_pixmap = None
@@ -685,22 +684,32 @@ class PreviewPanel(QWidget):
             self._overlay_focus_point = None
             self._overlay_orig_size = None
             self.bottom_widget.hide()
-            try:
-                self.zoom_out_btn.setEnabled(False)
-                self.zoom_in_btn.setEnabled(False)
-                self.zoom_slider.setEnabled(False)
-                self.zoom_reset_btn.setEnabled(False)
-            except Exception:
-                pass
+            self.zoom_out_btn.setEnabled(False)
+            self.zoom_in_btn.setEnabled(False)
+            self.zoom_slider.setEnabled(False)
+            self.zoom_reset_btn.setEnabled(False)
             return
 
+        # 最快路径：如果有传入的缩略图pixmap，立即显示，不做任何额外操作
+        if initial_pixmap is not None and not initial_pixmap.isNull():
+            self.current_original_pixmap = initial_pixmap
+            self._showing_thumbnail = True
+            self._mark_image_dirty()
+            self.image_label.setText("")
+            if self.is_expanded:
+                self.bottom_widget.show()
+            self.zoom_out_btn.setEnabled(True)
+            self.zoom_in_btn.setEnabled(True)
+            self.zoom_slider.setEnabled(True)
+            self.zoom_reset_btn.setEnabled(True)
+            # 启动后台线程加载原图（缩略图已经显示，用户不会感觉到延迟）
+            self._start_background_load(image_path)
+            return
+
+        # 没有传入pixmap，走正常流程
         try:
             # 第一步：检查大图片缓存
-            cached = None
-            try:
-                cached = self._big_cache.get(image_path)
-            except Exception:
-                cached = None
+            cached = self._big_cache.get(image_path)
             if cached is not None and not cached.isNull():
                 pixmap = QPixmap.fromImage(cached)
                 if not pixmap.isNull():
@@ -709,49 +718,11 @@ class PreviewPanel(QWidget):
                     self.image_label.setText("")
                     if self.is_expanded:
                         self.bottom_widget.show()
-                    try:
-                        self.zoom_out_btn.setEnabled(True)
-                        self.zoom_in_btn.setEnabled(True)
-                        self.zoom_slider.setEnabled(True)
-                        self.zoom_reset_btn.setEnabled(True)
-                    except Exception:
-                        pass
+                    self.zoom_out_btn.setEnabled(True)
+                    self.zoom_in_btn.setEnabled(True)
+                    self.zoom_slider.setEnabled(True)
+                    self.zoom_reset_btn.setEnabled(True)
                     return
-
-            # 第二步：如果有传入的缩略图pixmap，直接显示（最快路径）
-            if initial_pixmap is not None and not initial_pixmap.isNull():
-                # 将传入的缩略图缩放到预览面板大小并显示
-                try:
-                    panel_size = self.size()
-                    margins = self.main_layout.contentsMargins()
-                    bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
-                    top_height = self.top_widget.height()
-                    available_width = panel_size.width() - margins.left() - margins.right() - 4
-                    available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
-
-                    # 缩略图缩放到适合预览面板的大小
-                    thumb_scaled = initial_pixmap.scaled(
-                        max(1, available_width),
-                        max(1, available_height),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    if not thumb_scaled.isNull():
-                        self.current_original_pixmap = thumb_scaled
-                        self._showing_thumbnail = True  # 标记当前显示的是缩略图
-                        self._mark_image_dirty()
-                        self.image_label.setText("")
-                        if self.is_expanded:
-                            self.bottom_widget.show()
-                        try:
-                            self.zoom_out_btn.setEnabled(True)
-                            self.zoom_in_btn.setEnabled(True)
-                            self.zoom_slider.setEnabled(True)
-                            self.zoom_reset_btn.setEnabled(True)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
             else:
                 # 第三步：没有传入pixmap，尝试从缩略图缓存加载
                 thumb_image = None
@@ -812,16 +783,11 @@ class PreviewPanel(QWidget):
                 max_edge = int(max(1600, min(4096, max(available_width, available_height) * 2)))
             except Exception:
                 pass
-            worker = PreviewLoadWorker(image_path, self._preview_load_gen, self._big_cache, self._preview_load_signals)
-            worker.set_max_long_edge(max_edge)
-            QThreadPool.globalInstance().start(worker)
+            self._start_background_load(image_path)
             return
             
         except Exception as e:
-            try:
-                LogManager.instance().warning(f"预览图片失败: {e}")
-            except Exception:
-                pass
+            LogManager.instance().warning(f"预览图片失败: {e}")
             self.image_label.setText(f"预览失败: {str(e)}")
             self.image_label.setPixmap(QPixmap())
             self.current_original_pixmap = None
@@ -830,13 +796,38 @@ class PreviewPanel(QWidget):
             self._overlay_eye_coordinates = None
             self._overlay_orig_size = None
             self.bottom_widget.hide()
-            try:
-                self.zoom_out_btn.setEnabled(False)
-                self.zoom_in_btn.setEnabled(False)
-                self.zoom_slider.setEnabled(False)
-                self.zoom_reset_btn.setEnabled(False)
-            except Exception:
-                pass
+            self.zoom_out_btn.setEnabled(False)
+            self.zoom_in_btn.setEnabled(False)
+            self.zoom_slider.setEnabled(False)
+            self.zoom_reset_btn.setEnabled(False)
+
+    def _start_background_load(self, image_path):
+        """启动后台线程加载原图
+        
+        说明：
+        - 缩略图已经显示，用户不会感觉到延迟
+        - 原图加载完成后会自动替换缩略图
+        """
+        self._preview_load_gen += 1
+        self.current_image_path = image_path
+        self._overlay_bbox = None
+        self._overlay_focus_point = None
+        self._overlay_orig_size = None
+        
+        # 计算最大边长
+        max_edge = 3840
+        panel_size = self.size()
+        margins = self.main_layout.contentsMargins()
+        bottom_height = self.bottom_widget.height() if self.bottom_widget.isVisible() else 0
+        top_height = self.top_widget.height()
+        available_width = panel_size.width() - margins.left() - margins.right() - 4
+        available_height = panel_size.height() - margins.top() - margins.bottom() - bottom_height - top_height - 20
+        max_edge = int(max(1600, min(4096, max(available_width, available_height) * 2)))
+        
+        # 启动后台线程
+        worker = PreviewLoadWorker(image_path, self._preview_load_gen, self._big_cache, self._preview_load_signals)
+        worker.set_max_long_edge(max_edge)
+        QThreadPool.globalInstance().start(worker)
 
     def _on_preview_load_finished(self, path: str, qimage, generation: int, error_msg=None):
         """仅在主线程执行：校验请求未过期后更新 UI，保证线程隔离。

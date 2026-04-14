@@ -835,13 +835,14 @@ class ImageThumbnail(QWidget):
                         Qt.TransformationMode.FastTransformation
                     )
 
-            # 优化：直接存储 QImage，避免主线程进行耗时的 QPixmap 转换
+            # 优化：延迟格式转换到真正显示时进行
+            # 原代码：if image.format() != QImage.Format.Format_ARGB32_Premultiplied: ...
+            # 现在：直接存储原始格式，在paintEvent中转换
             self._thumbnail_image = image
             self.thumbnail_pixmap = None
             self._cached_pixmap = None
 
             # 根据 immediate 参数决定是否立即更新
-            # immediate=True 用于预加载的图片，避免闪烁
             self._schedule_update(immediate=immediate)
 
         except Exception as e:
@@ -1344,7 +1345,12 @@ class ImageThumbnail(QWidget):
                     new_w,
                     new_h
                 )
-                painter.drawImage(target_rect, self._thumbnail_image)
+                # 优化：延迟格式转换到显示时进行
+                # 如果格式不是 ARGB32_Premultiplied，转换为该格式（QPixmap.fromImage 最快）
+                img_to_draw = self._thumbnail_image
+                if img_to_draw.format() != QImage.Format.Format_ARGB32_Premultiplied:
+                    img_to_draw = img_to_draw.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                painter.drawImage(target_rect, img_to_draw)
 
         elif getattr(self, "_has_error", False):
             # 绘制错误提示图标

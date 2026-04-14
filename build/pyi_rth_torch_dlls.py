@@ -20,11 +20,13 @@ def _detect_gpu_type():
     """
     try:
         import subprocess
+        # 使用更快的查询方式，只获取名称字段
         result = subprocess.run(
-            ["wmic", "path", "win32_VideoController", "get", "name"],
+            ["wmic", "path", "win32_VideoController", "get", "name", "/value"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=3,  # 减少超时时间
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
         )
         output = result.stdout.lower()
         
@@ -78,15 +80,25 @@ def _setup_torch_dll_paths():
     ]
 
     # 只有检测到NVIDIA GPU时才添加nvidia DLL目录
+    # 使用预定义的目录名称，避免递归遍历整个目录树
     if has_nvidia:
         nvidia_root = os.path.join(base, "nvidia")
         if os.path.isdir(nvidia_root):
-            try:
-                for dirpath, _, filenames in os.walk(nvidia_root):
-                    if any(fn.lower().endswith(".dll") for fn in filenames):
-                        dll_dirs.append(dirpath)
-            except Exception:
-                pass
+            # 预定义的nvidia子目录名称，避免扫描所有子目录
+            known_nvidia_dirs = [
+                "cublas", "cublas64", "cublas64_11", "cublas64_12",
+                "cudnn", "cudnn64", "cudnn64_8", "cudnn64_9",
+                "cufft", "cufft64", "curand", "curand64",
+                "cusolver", "cusolver64", "cusparse", "cusparse64",
+                "nvrtc", "nvrtc64", "nvtx", "nvToolsExt64",
+            ]
+            for known_dir in known_nvidia_dirs:
+                try:
+                    dir_path = os.path.join(nvidia_root, known_dir)
+                    if os.path.isdir(dir_path):
+                        dll_dirs.append(dir_path)
+                except Exception:
+                    pass
 
     existing_dirs = []
     for d in dll_dirs:

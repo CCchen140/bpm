@@ -87,76 +87,13 @@ def _write_crash_log(message: str):
 def check_single_instance():
     """检查是否已有实例在运行，防止程序被多次启动
     
-    如果发现有残留进程，会尝试终止它们
+    优化版本：先尝试创建互斥量，只有在互斥量已存在时才扫描进程
     """
     try:
         import ctypes
         from ctypes import wintypes
-        import psutil
         
-        # 首先检查并终止残留的 qitu.exe 进程
         current_pid = os.getpid()
-        current_exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-        current_exe_name = os.path.basename(current_exe).lower()
-        
-        killed_count = 0
-        print("\n[StartupDebug] ===== 扫描残留进程 =====")
-        print(f"[StartupDebug] 当前进程 PID: {current_pid}, Exe: {current_exe}")
-        
-        for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
-            try:
-                proc_info = proc.info
-                proc_name = proc_info.get('name', '').lower()
-                proc_exe = proc_info.get('exe', '')
-                proc_pid = proc_info.get('pid', 0)
-                proc_cmdline = proc_info.get('cmdline', [])
-                
-                # 跳过当前进程
-                if proc_pid == current_pid:
-                    continue
-                
-                # 检查是否是 qitu.exe 或类似的进程名
-                is_qitu = proc_name in ['qitu.exe', '栖图.exe'] or \
-                         (proc_exe and 'qitu' in proc_exe.lower() and proc_exe.lower() != current_exe.lower())
-                
-                # 打印所有进程信息用于调试
-                if is_qitu:
-                    print(f"[StartupDebug] 发现 qitu 进程:")
-                    print(f"[StartupDebug]   PID={proc_pid}, Name={proc_name}")
-                    print(f"[StartupDebug]   Exe={proc_exe}")
-                    if proc_cmdline:
-                        print(f"[StartupDebug]   Cmdline={' '.join(proc_cmdline[:3])}...")
-                    
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=2)
-                        killed_count += 1
-                        print(f"[StartupDebug]   已终止残留进程")
-                    except psutil.TimeoutExpired:
-                        # 超时后强制杀死
-                        try:
-                            proc.kill()
-                            proc.wait(timeout=1)
-                            killed_count += 1
-                            print(f"[StartupDebug]   已强制杀死残留进程")
-                        except Exception as e:
-                            print(f"[StartupDebug]   强制杀死失败: {e}")
-                    except Exception as e:
-                        print(f"[StartupDebug]   终止失败: {e}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            except Exception as e:
-                print(f"[StartupDebug] 扫描进程时出错: {e}")
-                continue
-        
-        print(f"[StartupDebug] ===== 扫描结束，共终止 {killed_count} 个进程 =====\n")
-        
-        if killed_count > 0:
-            print(f"共终止 {killed_count} 个残留进程")
-            _write_crash_log(f"启动时发现并终止了 {killed_count} 个残留进程")
-            # 等待一小段时间确保进程完全退出
-            import time
-            time.sleep(0.5)
         
         # 创建命名互斥量
         mutex_name = "Global\\BirdPictureManager_QiTu_SingleInstance"
@@ -167,11 +104,69 @@ def check_single_instance():
         last_error = kernel32.GetLastError()
         
         if last_error == 183:  # ERROR_ALREADY_EXISTS
-            # 互斥量已存在，说明仍有实例在运行
-            print("Another instance is already running. Exiting.")
-            _write_crash_log("已存在另一个实例，退出启动")
-            return False
+            # 互斥量已存在，说明有另一个实例在运行
+            # 此时才需要扫描并终止残留进程
+            print("[StartupDebug] 检测到已有实例运行，扫描残留进程...")
+            try:
+                import psutil
+                
+                current_exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+                current_exe_name = os.path.basename(current_exe).lower()
+                
+                killed_count = 0
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        proc_info = proc.info
+                        proc_name = proc_info.get('name', '').lower()
+                        proc_pid = proc_info.get('pid', 0)
+                        
+                        # 跳过当前进程
+                        if proc_pid == current_pid:
+                            continue
+                        
+                        # 只检查进程名，不获取详细信息（更快）
+                        if proc_name in ['qitu.exe', '栖图.exe']:
+                            print(f"[StartupDebug] 发现残留进程: PID={proc_pid}, Name={proc_name}")
+                            try:
+                                proc.terminate()
+                                proc.wait(timeout=2)
+                                killed_count += 1
+                            except psutil.TimeoutExpired:
+                                try:
+                                    proc.kill()
+                                    proc.wait(timeout=1)
+                                    killed_count += 1
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                    except Exception:
+                        continue
+                
+                if killed_count > 0:
+                    print(f"[StartupDebug] 共终止 {killed_count} 个残留进程")
+                    _write_crash_log(f"启动时发现并终止了 {killed_count} 个残留进程")
+                    import time
+                    time.sleep(0.3)
+                    
+                    # 重新尝试创建互斥量
+                    mutex = kernel32.CreateMutexW(None, False, mutex_name)
+                    last_error = kernel32.GetLastError()
+                    if last_error != 183:
+                        return True
+                
+                # 如果没有找到残留进程，说明有另一个正常实例在运行
+                print("Another instance is already running. Exiting.")
+                _write_crash_log("已存在另一个实例，退出启动")
+                return False
+            except Exception as e:
+                print(f"[StartupDebug] 扫描进程时出错: {e}")
+                # 扫描失败，仍然退出
+                return False
         
+        # 互斥量创建成功，说明是第一个实例
         return True
     except Exception as e:
         print(f"Single instance check failed: {e}")
@@ -230,10 +225,20 @@ def _configure_windows_dll_search_paths():
         nvidia_root = ""
     if nvidia_root and os.path.isdir(nvidia_root):
         try:
-            for root, _, filenames in os.walk(nvidia_root):
+            # 使用预定义的nvidia子目录名称，避免扫描所有子目录
+            # 这些是PyTorch CUDA版本通常需要的nvidia库目录
+            known_nvidia_dirs = [
+                "cublas", "cublas64", "cublas64_11", "cublas64_12",
+                "cudnn", "cudnn64", "cudnn64_8", "cudnn64_9",
+                "cufft", "cufft64", "curand", "curand64",
+                "cusolver", "cusolver64", "cusparse", "cusparse64",
+                "nvrtc", "nvrtc64", "nvtx", "nvToolsExt64",
+            ]
+            for known_dir in known_nvidia_dirs:
                 try:
-                    if any(str(fn).lower().endswith(".dll") for fn in filenames):
-                        dll_dirs.append(root)
+                    dir_path = os.path.join(nvidia_root, known_dir)
+                    if os.path.isdir(dir_path):
+                        dll_dirs.append(dir_path)
                 except Exception:
                     pass
         except Exception:
@@ -268,6 +273,26 @@ if __name__ == "__main__":
     
     mp.freeze_support()
     print("Multiprocessing support frozen")
+    
+    # 在多进程启动之前，设置环境变量，确保子进程能正确获取缓存目录
+    # 这一步必须在任何多进程操作之前完成
+    if not os.environ.get("BIRD_PICTURE_MANAGER_EXE_DIR"):
+        try:
+            if getattr(sys, 'frozen', False):
+                # 打包后的程序，使用可执行文件所在目录
+                exe_dir = os.path.dirname(sys.executable)
+                if "_internal" in exe_dir.lower():
+                    exe_dir = os.path.dirname(exe_dir)
+                os.environ["BIRD_PICTURE_MANAGER_EXE_DIR"] = exe_dir
+                print(f"设置 BIRD_PICTURE_MANAGER_EXE_DIR: {exe_dir}")
+            else:
+                # 开发环境，也设置环境变量，确保一致性
+                current_file_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root = os.path.abspath(os.path.join(current_file_dir, os.pardir))
+                os.environ["BIRD_PICTURE_MANAGER_EXE_DIR"] = project_root
+                print(f"设置 BIRD_PICTURE_MANAGER_EXE_DIR (开发环境): {project_root}")
+        except Exception as e:
+            print(f"设置 BIRD_PICTURE_MANAGER_EXE_DIR 失败: {e}")
     
     # 设置异常钩子
     setup_exception_hook()
@@ -383,7 +408,8 @@ if __name__ == "__main__":
     loading_dialog = None
     try:
         loading_dialog = QDialog()
-        loading_dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        # 移除 Tool 标志，避免影响主窗口的显示层级
+        loading_dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         loading_dialog.setModal(False)
         loading_dialog.setFixedSize(560, 360)
         dialog_layout = QVBoxLayout(loading_dialog)
@@ -549,6 +575,36 @@ if __name__ == "__main__":
 
     print("Importing MainWindow...")
     from ui.main_window import MainWindow
+    
+    # 在加载弹窗期间预先执行耗时操作
+    _preloaded_data = {}
+    def _preload_heavy_operations():
+        """在后台预加载耗时数据，避免主窗口显示后卡顿"""
+        try:
+            # 预加载数据库分类树统计
+            from utils.sql.data_base import BirdLibraryDB
+            db = BirdLibraryDB()
+            root_path = _sm.get("general/root_path", "")
+            if root_path:
+                try:
+                    stats = db.get_taxonomy_tree_stats(table_name="bird_results", root_path=root_path)
+                    _preloaded_data["taxonomy_stats"] = stats
+                    print("[Preload] taxonomy_stats loaded")
+                except Exception as e:
+                    print(f"[Preload] taxonomy_stats failed: {e}")
+                try:
+                    groups = db.get_unclassified_folder_groups(root_path=root_path, table_name="bird_results")
+                    _preloaded_data["unclassified_groups"] = groups
+                    print("[Preload] unclassified_groups loaded")
+                except Exception as e:
+                    print(f"[Preload] unclassified_groups failed: {e}")
+        except Exception as e:
+            print(f"[Preload] Heavy operations failed: {e}")
+    
+    # 在后台线程中预加载
+    preload_thread = Thread(target=_preload_heavy_operations, daemon=True, name="PreloadHeavyOps")
+    preload_thread.start()
+    
     tooltip_bg = cm.get("tooltip.background")
     tooltip_text = cm.get("tooltip.text")
     tooltip_border = cm.get("tooltip.border")
@@ -639,13 +695,15 @@ if __name__ == "__main__":
     if app_icon:
         window.setWindowIcon(app_icon)
 
-    # 初始化系统托盘管理器
-    try:
-        from ui.utils.system_tray_manager import SystemTrayManager
-        SystemTrayManager.instance().initialize(window, app_icon)
-        print("SystemTrayManager initialized")
-    except Exception as e:
-        print(f"SystemTrayManager initialization failed: {e}")
+    def _initialize_system_tray_later():
+        """延后初始化系统托盘，避免主窗口显示前阻塞主线程"""
+        try:
+            from ui.utils.system_tray_manager import SystemTrayManager
+
+            SystemTrayManager.instance().initialize(window, app_icon)
+            print("SystemTrayManager initialized")
+        except Exception as e:
+            print(f"SystemTrayManager initialization failed: {e}")
 
     is_first_run = window.settings_manager.get("general/first_run")
     if isinstance(is_first_run, str):
@@ -657,6 +715,7 @@ if __name__ == "__main__":
         window.show_guide()
         window.show()
         window.setWindowOpacity(1)
+        QTimer.singleShot(0, _initialize_system_tray_later)
         try:
             if loading_dialog:
                 loading_dialog.close()
@@ -676,79 +735,130 @@ if __name__ == "__main__":
         app.processEvents()
         
         def _start_async_init():
-            # 预初始化ExifHandleWorker，避免首次使用时阻塞UI
-            def _init_exif_worker():
-                try:
-                    print("[Init] 预初始化ExifHandleWorker...")
-                    from utils.exif.exif_utils import ExifHandleWorker
-                    ExifHandleWorker.get_instance()
-                    print("[Init] ExifHandleWorker预初始化完成")
-                except Exception as e:
-                    print(f"[Init] ExifHandleWorker预初始化失败: {e}")
-            Thread(target=_init_exif_worker, daemon=True, name="ExifWorkerInit").start()
+            preload_wait_attempts = {"count": 0}
 
-            try:
-                if hasattr(window, "page_library") and hasattr(window.page_library, "cache_manager"):
-                    window.page_library._library_cache_loading_started = True
-                    cache_thread = Thread(
-                        target=window.page_library.cache_manager.load_persistent_cache,
-                        daemon=True,
-                        name="LibraryCacheLoader",
-                    )
-                    cache_thread.start()
-            except Exception:
-                pass
-            page_library = getattr(window, "page_library", None)
-            page_import = getattr(window, "page_import", None)
-            if page_library is not None:
+            def _continue_async_init():
+                # 预初始化ExifHandleWorker，避免首次使用时阻塞UI
+                def _init_exif_worker():
+                    try:
+                        print("[Init] 预初始化ExifHandleWorker...")
+                        from utils.exif.exif_utils import ExifHandleWorker
+                        ExifHandleWorker.get_instance()
+                        print("[Init] ExifHandleWorker预初始化完成")
+                    except Exception as e:
+                        print(f"[Init] ExifHandleWorker预初始化失败: {e}")
+                Thread(target=_init_exif_worker, daemon=True, name="ExifWorkerInit").start()
+
                 try:
-                    page_library._startup_blocking_show = False
+                    if hasattr(window, "page_library") and hasattr(window.page_library, "cache_manager"):
+                        window.page_library._library_cache_loading_started = True
+                        cache_thread = Thread(
+                            target=window.page_library.cache_manager.load_persistent_cache,
+                            daemon=True,
+                            name="LibraryCacheLoader",
+                        )
+                        cache_thread.start()
                 except Exception:
                     pass
-                QTimer.singleShot(0, page_library.initialize)
-            if page_import is not None:
-                QTimer.singleShot(0, page_import._start_cache_loading)
-            try:
-                QTimer.singleShot(0, window._warmup_webengine_once)
-            except Exception:
-                pass
-            try:
-                window.show_main_interface()
-                window.setWindowOpacity(1)
-                window.raise_()
-                window.activateWindow()
-            except Exception:
-                pass
-            try:
-                if loading_dialog:
-                    def _close_loading():
-                        try:
-                            loading_dialog.close()
-                            loading_dialog.deleteLater()
-                        except Exception:
-                            pass
-                    QTimer.singleShot(50, _close_loading)
-            except Exception:
-                pass
-            
-            # 主窗口加载完成后，启动自动更新检查
-            try:
-                def _start_auto_update_check():
+                page_library = getattr(window, "page_library", None)
+                page_import = getattr(window, "page_import", None)
+                if page_library is not None:
                     try:
-                        from update.update_manager import get_update_manager
-                        update_manager = get_update_manager()
-                        # 设置主窗口已加载
-                        update_manager.set_main_window_loaded(True)
-                        # 延迟 3 秒后执行后台检查
-                        update_manager.check_update_after_load(delay_ms=3000)
-                        print("Auto update check scheduled")
+                        page_library._startup_blocking_show = False
+                    except Exception:
+                        pass
+                    # 使用lambda传递预加载的数据
+                    QTimer.singleShot(0, lambda: page_library.initialize(preloaded_data=_preloaded_data))
+                if page_import is not None:
+                    QTimer.singleShot(0, page_import._start_cache_loading)
+
+                # 把会导致首屏显示后卡顿的启动任务前移到加载弹窗阶段执行。
+                # 这样即使这些任务必须跑在主线程，也会被加载弹窗遮住，避免图库首屏“能看见但点不动”。
+                try:
+                    window._startup_import_page_prepared = True
+                    window._ensure_page_loaded(1)
+                except Exception:
+                    pass
+                try:
+                    window._startup_webengine_prepared = True
+                    window._warmup_webengine_once()
+                except Exception:
+                    pass
+                try:
+                    window._startup_bird_detect_prepared = True
+                    window._init_bird_detect_controller()
+                except Exception:
+                    pass
+
+                def _finalize_main_window_show():
+                    try:
+                        window.show_main_interface()
+                        window.setWindowOpacity(1)
+                        window.raise_()
+                        window.activateWindow()
+                    except Exception:
+                        pass
+                    QTimer.singleShot(0, _initialize_system_tray_later)
+                    try:
+                        if loading_dialog:
+                            def _close_loading():
+                                try:
+                                    # 先隐藏窗口，再关闭
+                                    loading_dialog.hide()
+                                    loading_dialog.close()
+                                    loading_dialog.deleteLater()
+                                    # 确保主窗口在最前面
+                                    window.raise_()
+                                    window.activateWindow()
+                                except Exception:
+                                    pass
+                            QTimer.singleShot(50, _close_loading)
+                    except Exception:
+                        pass
+                    
+                    # 主窗口加载完成后，启动自动更新检查
+                    try:
+                        def _start_auto_update_check():
+                            try:
+                                from update.update_manager import get_update_manager
+                                update_manager = get_update_manager()
+                                # 设置主窗口已加载
+                                update_manager.set_main_window_loaded(True)
+                                # 延迟 3 秒后执行后台检查
+                                update_manager.check_update_after_load(delay_ms=3000)
+                                print("Auto update check scheduled")
+                            except Exception as e:
+                                print(f"Start auto update check failed: {e}")
+                        
+                        # 延迟 5 秒后启动自动更新检查（确保主窗口完全加载）
+                        QTimer.singleShot(5000, _start_auto_update_check)
                     except Exception as e:
-                        print(f"Start auto update check failed: {e}")
-                
-                # 延迟 5 秒后启动自动更新检查（确保主窗口完全加载）
-                QTimer.singleShot(5000, _start_auto_update_check)
-            except Exception as e:
-                print(f"Schedule auto update check failed: {e}")
+                        print(f"Schedule auto update check failed: {e}")
+
+                # 通过再次进入事件循环，让前面排队的页面构造任务先在加载弹窗下执行。
+                QTimer.singleShot(0, _finalize_main_window_show)
+
+            def _wait_preload_non_blocking():
+                """非阻塞等待预加载线程，避免启动时主界面卡死"""
+                try:
+                    if not preload_thread.is_alive():
+                        print("[Init] 预加载线程完成")
+                        _continue_async_init()
+                        return
+                except Exception as e:
+                    print(f"[Init] 检查预加载线程状态失败: {e}")
+                    _continue_async_init()
+                    return
+
+                preload_wait_attempts["count"] += 1
+                if preload_wait_attempts["count"] >= 20:
+                    print("[Init] 预加载线程超时，继续启动")
+                    _continue_async_init()
+                    return
+
+                QTimer.singleShot(100, _wait_preload_non_blocking)
+
+            _wait_preload_non_blocking()
         
         try:
             if loading_dialog:

@@ -26,11 +26,23 @@ def load_image(file_path):
                     thumb = raw.extract_thumb()
                 except rawpy.LibRawNoThumbnailError:
                     try:
-                        LogManager.instance().debug(f"{os.path.basename(file_path)}: 无缩略图")
+                        LogManager.instance().debug(f"{os.path.basename(file_path)}: 无缩略图，尝试加载原图")
                     except Exception:
                         pass
+                    # 如果没有缩略图，尝试加载原图（解码RAW）
+                    try:
+                        rgb = raw.postprocess()
+                        if rgb is not None and rgb.size > 0:
+                            # 将RGB转换为BGR（OpenCV格式）
+                            image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                            return image
+                    except Exception as e:
+                        try:
+                            LogManager.instance().debug(f"{os.path.basename(file_path)}: 加载原图失败: {e}")
+                        except Exception:
+                            pass
                     return None
-                
+
                 if thumb.format == rawpy.ThumbFormat.JPEG:
                     # 解码二进制流为图像
                     img_array = np.frombuffer(thumb.data, dtype=np.uint8)

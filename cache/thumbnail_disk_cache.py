@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import hashlib
 import json
@@ -26,8 +27,73 @@ class ThumbnailDiskCache:
         if scope is None:
             scope = "import" if str(getattr(cache_manager, "context", "")).lower() == "import" else "library"
         self.scope = str(scope).lower()
-        base_dir = cache_dir or os.path.join("cache", "pictures")
+        
+        # 确定缓存目录，支持打包后的程序
+        # 辅助函数：记录日志
+        def _log(msg):
+            try:
+                from utils.log_manager import LogManager
+                LogManager.instance().debug(msg)
+            except Exception:
+                pass
+
+        if cache_dir:
+            base_dir = cache_dir
+        else:
+            # 优先使用环境变量指定的缓存目录
+            env_cache_dir = os.environ.get("BIRD_PICTURE_MANAGER_CACHE_DIR")
+            if env_cache_dir:
+                base_dir = os.path.join(env_cache_dir, "pictures")
+                _log(f"[ThumbnailDiskCache] 使用环境变量缓存目录: {base_dir}")
+            elif getattr(sys, 'frozen', False):
+                # 打包后的程序，使用可执行文件所在目录
+                # 注意：在多进程环境下，sys.executable 可能指向 Python 解释器
+                # 尝试通过多种方式找到正确的应用程序目录
+                exe_dir = os.path.dirname(sys.executable)
+                _log(f"[ThumbnailDiskCache] 初始 exe_dir={exe_dir}, sys.executable={sys.executable}")
+
+                # 如果 exe_dir 包含 "_internal"，则向上回退到上级目录
+                if "_internal" in exe_dir.lower():
+                    exe_dir = os.path.dirname(exe_dir)
+                    _log(f"[ThumbnailDiskCache] 包含_internal，回退到: {exe_dir}")
+                # 如果 exe_dir 包含 "python"，说明是Python解释器，尝试其他方式
+                elif "python" in os.path.basename(exe_dir).lower() or "python" in os.path.basename(sys.executable).lower():
+                    _log(f"[ThumbnailDiskCache] 检测到Python解释器，尝试通过sys.argv[0]查找")
+                    try:
+                        # 尝试使用 sys.argv[0] 获取主程序路径
+                        main_script = sys.argv[0] if sys.argv else None
+                        if main_script:
+                            main_dir = os.path.dirname(os.path.abspath(main_script))
+                            _log(f"[ThumbnailDiskCache] sys.argv[0]={main_script}, main_dir={main_dir}")
+                            if main_dir and os.path.isdir(main_dir):
+                                # 检查这个目录是否包含可执行文件（.exe）
+                                for f in os.listdir(main_dir):
+                                    if f.lower().endswith('.exe'):
+                                        exe_dir = main_dir
+                                        _log(f"[ThumbnailDiskCache] 找到.exe文件: {f}，使用目录: {exe_dir}")
+                                        break
+                                    # 如果上级目录包含 _internal，说明是打包后的程序
+                                    parent_dir = os.path.dirname(main_dir)
+                                    if "_internal" in os.path.basename(parent_dir).lower():
+                                        exe_dir = parent_dir
+                                        _log(f"[ThumbnailDiskCache] 上级目录包含_internal，使用: {exe_dir}")
+                                        break
+                    except Exception as e:
+                        _log(f"[ThumbnailDiskCache] 通过sys.argv[0]查找失败: {e}")
+
+                base_dir = os.path.join(exe_dir, "cache", "pictures")
+                _log(f"[ThumbnailDiskCache] 最终 exe_dir={exe_dir}, base_dir={base_dir}")
+            else:
+                # 开发环境
+                base_dir = os.path.join("cache", "pictures")
+                _log(f"[ThumbnailDiskCache] 开发环境，base_dir={base_dir}")
+
         self.cache_dir = os.path.join(base_dir, self.scope)
+        try:
+            from utils.log_manager import LogManager
+            LogManager.instance().debug(f"[ThumbnailDiskCache] 最终缓存目录: {self.cache_dir}")
+        except Exception:
+            pass
         self._last_cleanup_schedule_ts = 0.0
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
@@ -370,6 +436,50 @@ class ThumbnailDiskCache:
             except Exception:
                 pass
 
+    def invalidate_by_folder(self, folder_path: str):
+        """清理指定文件夹下的所有缓存文件
+
+        参数:
+            folder_path: 文件夹路径
+        """
+        if not folder_path:
+            return
+        folder_path = str(folder_path).replace("/", os.sep)
+        folder_path = os.path.normpath(folder_path)
+        if os.name == "nt":
+            folder_path = folder_path.lower()
+        try:
+            rows = self.db.list_thumbnail_disk_cache(scope=self.scope)
+        except Exception:
+            rows = []
+        for r in rows:
+            try:
+                file_path = str((r or {}).get("file_path") or "")
+                if not file_path:
+                    continue
+                file_folder = os.path.dirname(file_path)
+                file_folder = os.path.normpath(file_folder)
+                if os.name == "nt":
+                    file_folder = file_folder.lower()
+                if file_folder.startswith(folder_path):
+                    rel = str((r or {}).get("cache_rel_path") or "")
+                    if rel:
+                        abs_path = self._abs_path_from_rel(rel)
+                        try:
+                            if os.path.exists(abs_path):
+                                os.remove(abs_path)
+                        except Exception:
+                            pass
+                    cache_key = str((r or {}).get("cache_key") or "")
+                    variant = str((r or {}).get("variant") or "")
+                    if cache_key and variant:
+                        try:
+                            self.db.delete_thumbnail_disk_cache(cache_key, variant, scope=self.scope)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
     def _get_cleanup_limits(self):
         max_bytes = 2 * 1024 * 1024 * 1024
         batch = 500
@@ -386,6 +496,9 @@ class ThumbnailDiskCache:
         return max_bytes, batch
 
     def _schedule_cleanup_if_needed(self):
+        # 导入页面不自动清理缓存，只在移除/删除文件夹时手动清理
+        if self.scope == "import":
+            return
         max_bytes, _ = self._get_cleanup_limits()
         if max_bytes <= 0:
             return

@@ -1217,12 +1217,19 @@ class FolderPanel(QWidget):
             }}
         """)
 
-    def populate_tree(self, root_path):
-        """填充文件夹树"""
+    def populate_tree(self, root_path, preloaded_data=None):
+        """填充文件夹树
+        
+        参数:
+            root_path: 根目录路径
+            preloaded_data: 预加载的数据字典，包含:
+                - taxonomy_stats: 分类树统计数据
+                - unclassified_groups: 未分类文件夹分组数据
+        """
         self.folder_tree.clear()
 
         if str(self.context or "").lower() == "library":
-            self._populate_taxonomy_tree(root_path)
+            self._populate_taxonomy_tree(root_path, preloaded_data=preloaded_data)
             return
         
         root_item = QTreeWidgetItem(self.folder_tree, [root_path])
@@ -1270,22 +1277,30 @@ class FolderPanel(QWidget):
             self._add_subfolders(root_item, root_path, depth=0, max_depth=1)
         # root_item.setExpanded(True)
 
-    def _populate_taxonomy_tree(self, root_title):
+    def _populate_taxonomy_tree(self, root_title, preloaded_data=None):
         root_title = str(root_title or "")
         root_item = QTreeWidgetItem(self.folder_tree, [root_title])
         icon_color = ColorManager.instance().get("theme.text.dark")
         root_item.setIcon(0, qta.icon('mdi6.harddisk', color=icon_color))
         root_item.setData(0, Qt.ItemDataRole.UserRole, "virtual://taxonomy/root")
 
+        # 优先使用预加载的数据，避免主线程卡顿
         stats = {"tree": {}, "unclassified_image_count": 0}
         try:
             root_path = str(self.settings_manager.get("general/root_path", "") or "")
         except Exception:
             root_path = ""
-        try:
-            stats = self.db.get_taxonomy_tree_stats(table_name="bird_results", root_path=root_path) or stats
-        except Exception:
-            stats = {"tree": {}, "unclassified_image_count": 0}
+        
+        if preloaded_data and "taxonomy_stats" in preloaded_data:
+            # 使用预加载的数据
+            stats = preloaded_data.get("taxonomy_stats") or stats
+            print(f"[FolderPanel] 使用预加载的taxonomy_stats")
+        else:
+            # 没有预加载数据，在主线程中查询（可能卡顿）
+            try:
+                stats = self.db.get_taxonomy_tree_stats(table_name="bird_results", root_path=root_path) or stats
+            except Exception:
+                stats = {"tree": {}, "unclassified_image_count": 0}
 
         try:
             total_images = 0
@@ -1345,10 +1360,16 @@ class FolderPanel(QWidget):
         un_item.setData(0, Qt.ItemDataRole.UserRole, "virtual://taxonomy/unclassified")
         if self.show_db_stats:
             un_item.setText(0, f"未分类 (图片: {unclassified_count})")
-        try:
-            groups = self.db.get_unclassified_folder_groups(root_path=root_path, table_name="bird_results") or []
-        except Exception:
-            groups = []
+        
+        # 优先使用预加载的数据
+        if preloaded_data and "unclassified_groups" in preloaded_data:
+            groups = preloaded_data.get("unclassified_groups") or []
+            print(f"[FolderPanel] 使用预加载的unclassified_groups")
+        else:
+            try:
+                groups = self.db.get_unclassified_folder_groups(root_path=root_path, table_name="bird_results") or []
+            except Exception:
+                groups = []
         try:
             from urllib.parse import quote
         except Exception:

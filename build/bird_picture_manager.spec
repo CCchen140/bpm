@@ -3,12 +3,18 @@ import glob
 import os
 import re
 import sys
+
+# 强制添加 pynput 到隐藏导入（必须在最前面）
+# 这是为了解决 pynput.keyboard 在打包后无法导入的问题
+# 注意：不要设置 sys.modules['pynput'] = None，这会导致导入失败
+
 try:
-    from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+    from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, collect_all
 except Exception:
     collect_data_files = None
     collect_dynamic_libs = None
     collect_submodules = None
+    collect_all = None
 
 PROJECT_ROOT = ""
 try:
@@ -294,6 +300,86 @@ except Exception as e:
     print(f"[WARNING] 收集 ui 子模块失败: {e}")
 
 
+
+# 收集 pynput 库（全局快捷键功能需要）
+# 使用 collect_all 确保收集 pynput 的所有子模块和数据文件
+try:
+    if collect_all is not None:
+        pynput_datas, pynput_binaries, pynput_hiddenimports = collect_all("pynput")
+        datas += pynput_datas
+        binaries += pynput_binaries
+        hiddenimports += pynput_hiddenimports
+        print(f"[INFO] 使用 collect_all 收集 pynput: {len(pynput_hiddenimports)} 个 hiddenimports")
+        print(f"[INFO] pynput hiddenimports: {pynput_hiddenimports}")
+    elif collect_submodules is not None:
+        hiddenimports += collect_submodules("pynput")
+        print(f"[INFO] 使用 collect_submodules 收集 pynput")
+    else:
+        hiddenimports += ["pynput"]
+except Exception as e:
+    print(f"[WARNING] 收集 pynput 失败: {e}")
+    try:
+        hiddenimports += ["pynput"]
+    except Exception:
+        pass
+
+# 显式添加 pynput 的关键子模块（确保打包时包含）
+# 注意：不要包含 .__init__ 后缀，这会导致错误的文件结构
+pynput_explicit_modules = [
+    # keyboard 子包
+    "pynput.keyboard",
+    "pynput.keyboard._base",
+    "pynput.keyboard._win32",
+    "pynput.keyboard._dummy",
+    "pynput.keyboard._darwin",
+    "pynput.keyboard._xorg",
+    "pynput.keyboard._uinput",
+    # mouse 子包
+    "pynput.mouse",
+    "pynput.mouse._base",
+    "pynput.mouse._win32",
+    "pynput.mouse._dummy",
+    "pynput.mouse._darwin",
+    "pynput.mouse._xorg",
+    # _util 子包
+    "pynput._util",
+    "pynput._util.win32",
+    "pynput._util.win32_vks",
+    "pynput._util.darwin",
+    "pynput._util.darwin_vks",
+    "pynput._util.xorg",
+    "pynput._util.xorg_keysyms",
+    "pynput._util.uinput",
+]
+hiddenimports += pynput_explicit_modules
+print(f"[INFO] 显式添加 pynput 模块: {len(pynput_explicit_modules)} 个")
+
+# pynput 依赖 six 库
+hiddenimports += ["six"]
+
+# 收集 pynput 的数据文件
+try:
+    if collect_data_files is not None:
+        pynput_datas = collect_data_files("pynput")
+        datas += pynput_datas
+        print(f"[INFO] 收集 pynput 数据文件: {len(pynput_datas)} 个")
+except Exception as e:
+    print(f"[WARNING] 收集 pynput 数据文件失败: {e}")
+
+# 尝试收集 pynput 的所有子包（递归）
+try:
+    if collect_submodules is not None:
+        pynput_all_submodules = collect_submodules("pynput", submod_filter=lambda name: True)
+        print(f"[INFO] collect_submodules(pynput) 收集到 {len(pynput_all_submodules)} 个子模块")
+        print(f"[INFO] pynput 子模块列表: {pynput_all_submodules}")
+        # 只添加尚未在 hiddenimports 中的模块
+        existing = set(hiddenimports)
+        new_modules = [m for m in pynput_all_submodules if m not in existing]
+        if new_modules:
+            hiddenimports += new_modules
+            print(f"[INFO] 新增 pynput 子模块: {len(new_modules)} 个")
+except Exception as e:
+    print(f"[WARNING] collect_submodules(pynput) 失败: {e}")
 
 for _opt_pkg in ("pypinyin", "geopy", "GPUtil", "send2trash", "psutil"):
     try:
@@ -651,9 +737,10 @@ analysis = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[BUILD_DIR],
     runtime_hooks=[
         os.path.join(BUILD_DIR, "pyi_rth_multiprocessing_nowindow.py"),  # 必须在最前面，确保在其他导入之前执行
+        os.path.join(BUILD_DIR, "pyi_rth_pynput.py"),  # 确保pynput在启动时正确初始化
         os.path.join(BUILD_DIR, "pyi_rth_torch_dlls.py"),
     ],
     excludes=[

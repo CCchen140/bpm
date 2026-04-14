@@ -609,12 +609,13 @@ class FocusDetectDialog(BasePopupDialog):
         self.initial_conf_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
         form.addRow("初始置信度:", self.initial_conf_spin)
 
-        self.target_size_spin = QSpinBox()
-        self.target_size_spin.setRange(256, 2048)
-        self.target_size_spin.setSingleStep(32)
-        self.target_size_spin.setValue(640)
-        self.target_size_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
-        form.addRow("缩放尺寸:", self.target_size_spin)
+        # 缩放尺寸固定为640，不再提供编辑选项
+        # self.target_size_spin = QSpinBox()
+        # self.target_size_spin.setRange(256, 2048)
+        # self.target_size_spin.setSingleStep(32)
+        # self.target_size_spin.setValue(640)
+        # self.target_size_spin.setStyleSheet(f"padding: 6px 10px; border: 1px solid {border_color}; border-radius: 4px; color: {text_color}; background-color: {light_bg};")
+        # form.addRow("缩放尺寸:", self.target_size_spin)
 
         self.burst_min_count_spin = QSpinBox()
         self.burst_min_count_spin.setRange(1, 999)
@@ -1447,7 +1448,8 @@ class FocusDetectDialog(BasePopupDialog):
                 self.initial_conf_spin.setValue(0.15)
             except Exception:
                 pass
-        self.target_size_spin.setValue(int(self.settings_manager.get("focus_detect/target_size", 640)))
+        # 缩放尺寸固定为640，不再从设置加载
+        # self.target_size_spin.setValue(int(self.settings_manager.get("focus_detect/target_size", 640)))
         self.burst_min_count_spin.setValue(int(self.settings_manager.get("focus_detect/burst_min_count", 10)))
         self.burst_fps_spin.setValue(int(self.settings_manager.get("focus_detect/burst_fps", 20)))
         # 计算默认检测线程数（全部CPU核心数减4）
@@ -1754,10 +1756,11 @@ class FocusDetectDialog(BasePopupDialog):
             self.initial_conf_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/initial_conf", float(v)))
         except Exception:
             pass
-        try:
-            self.target_size_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/target_size", int(v)))
-        except Exception:
-            pass
+        # 缩放尺寸固定为640，不再保存设置
+        # try:
+        #     self.target_size_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/target_size", int(v)))
+        # except Exception:
+        #     pass
         try:
             self.burst_min_count_spin.valueChanged.connect(lambda v: self._set_setting("focus_detect/burst_min_count", int(v)))
         except Exception:
@@ -1903,7 +1906,7 @@ class FocusDetectDialog(BasePopupDialog):
             "no_db_write": self._option_checked("no_db_write"),
             "model": str(self.model_combo.currentText() or "x").lower(),
             "initial_conf": float(self.initial_conf_spin.value()),
-            "target_size": int(self.target_size_spin.value()),
+            "target_size": 640,  # 缩放尺寸固定为640
             "burst_min_count": int(self.burst_min_count_spin.value()),
             "burst_fps": int(self.burst_fps_spin.value()),
             "detect_threads": int(self.detect_threads_spin.value()),

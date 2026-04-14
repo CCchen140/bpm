@@ -2022,7 +2022,8 @@ class SettingsPage(QWidget):
         self.import_cache_count_input.setRange(100, 5000)
         self.import_cache_count_input.setSingleStep(100)
         self.import_cache_count_input.setMaximumWidth(200)
-        self.import_cache_count_input.setValue(int(self.settings_manager.get("import/cache_size", 800)))
+        # 增加默认值到2000，以支持更多的对焦检测缓存
+        self.import_cache_count_input.setValue(int(self.settings_manager.get("import/cache_size", 2000)))
         self.import_cache_count_input.spinbox.valueChanged.connect(
             lambda v: self.settings_manager.set("import/cache_size", v)
         )
