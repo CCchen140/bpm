@@ -55,10 +55,11 @@ from ui.panels.image_detail_panel import ImageDetailPanel
 from ui.common.styles import TOOLBAR_BTN_STYLE
 
 import utils.file.file as file_utils
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote, unquote
 import shutil
 
 from ui.dialogs.edit_species_dialog import EditSpeciesDialog
+from ui.dialogs.quick_filter_folder_dialog import QuickFilterFolderDialog
 
 class FolderLoadWorker(QThread):
     finished = pyqtSignal(str, object)
@@ -1496,7 +1497,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
     def _build_ui_skeleton(self):
         """构建UI骨架（第一阶段）：只创建核心可见组件"""
         # 左侧：文件夹区域（必须立即创建，用户需要看到）
-        self.folder_panel = FolderPanel(self.db, self.settings_manager, context="library")
+        self.folder_panel = FolderPanel(self.db, self.settings_manager, parent=self, context="library")
         # Restore standard toolbar buttons for library page
         self.folder_panel.add_search_button()
         self.folder_panel.add_sort_button()
@@ -1504,6 +1505,9 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.folder_panel.folderSelected.connect(self.on_folder_selected)
         self.folder_panel.folderClicked.connect(self.on_folder_clicked)
         self.folder_panel.folderRenamed.connect(self.on_folder_renamed_from_panel)
+        self.folder_panel.quickFilterAddRequested.connect(self.on_add_quick_filter_folder)
+        self.folder_panel.quickFilterEditRequested.connect(self.on_edit_quick_filter_folder)
+        self.folder_panel.quickFilterDeleteRequested.connect(self.on_delete_quick_filter_folder)
         try:
             self.folder_panel.folderDeletedOnDisk.connect(self.on_folder_deleted_from_panel)
         except Exception:
@@ -1512,6 +1516,7 @@ class ImageLibraryPage(BaseImageBrowserPage):
         self.folder_tree_visible = True
 
         self.set_left_panel(self.folder_panel)
+        QTimer.singleShot(120, self._refresh_quick_filter_folders_ui)
 
         # ========== 工具栏（骨架阶段创建）==========
         self.toolbar = ToolbarView(self, self.settings_manager, config={"show_stash": False, "show_new_folder": False, "compact_quick_filter_spacing": True})
@@ -6326,7 +6331,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                     cur = str(self.current_folder_path or "")
                 except Exception:
                     cur = ""
-                if cur.startswith("virtual://taxonomy"):
+                if self._is_quick_filter_role(cur):
+                    if not self._apply_quick_filter_role(cur):
+                        self._restore_last_library_view()
+                elif cur.startswith("virtual://taxonomy"):
                     self.load_images_from_taxonomy(cur)
                 else:
                     self.load_images_from_folder(cur)
@@ -7665,8 +7673,33 @@ class ImageLibraryPage(BaseImageBrowserPage):
         finally:
             self._suspend_filter_panel_auto_hide = False
 
-    def on_load_filter(self):
-        """加载过滤条件"""
+    def _quick_filter_settings_key(self) -> str:
+        """返回快捷筛选配置在设置中的存储键。"""
+        return "library/quick_filter_virtual_folders"
+
+    def _make_quick_filter_role(self, folder_id: str) -> str:
+        """根据配置 ID 生成快捷筛选虚拟路径。"""
+        return f"virtual://saved_filter?id={quote(str(folder_id or ''))}"
+
+    def _parse_quick_filter_role(self, role: str) -> str:
+        """从快捷筛选虚拟路径中解析配置 ID。"""
+        raw = str(role or "")
+        if not raw.startswith("virtual://saved_filter?"):
+            return ""
+        parsed = urlparse(raw.replace("virtual://saved_filter", "http://saved_filter", 1))
+        qs = parse_qs(parsed.query or "")
+        folder_id = (qs.get("id") or [""])[0]
+        try:
+            return str(unquote(str(folder_id or "")))
+        except Exception:
+            return str(folder_id or "")
+
+    def _is_quick_filter_role(self, role: str) -> bool:
+        """判断是否为快捷筛选虚拟路径。"""
+        return str(role or "").startswith("virtual://saved_filter?")
+
+    def _get_filter_preset_dir(self) -> str:
+        """返回已保存筛选方案目录，并自动迁移旧目录。"""
         from utils.paths import PathManager
         pm = PathManager.instance()
         save_dir = str(pm.get_user_data_path() / "filter")
@@ -7683,11 +7716,8 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         continue
                     src = os.path.join(legacy_dir, str(name))
                     dst = os.path.join(save_dir, str(name))
-                    try:
-                        if os.path.exists(dst):
-                            continue
-                    except Exception:
-                        pass
+                    if os.path.exists(dst):
+                        continue
                     try:
                         with open(src, "rb") as rf:
                             data = rf.read()
@@ -7697,9 +7727,299 @@ class ImageLibraryPage(BaseImageBrowserPage):
                         pass
         except Exception:
             pass
-            
-        # 获取所有 .bft 文件
-        files = [f for f in os.listdir(save_dir) if f.endswith('.bft')]
+        return save_dir
+
+    def _get_filter_preset_files(self):
+        """获取所有已保存筛选方案文件名。"""
+        save_dir = self._get_filter_preset_dir()
+        try:
+            files = [f for f in os.listdir(save_dir) if str(f).lower().endswith(".bft")]
+        except Exception:
+            files = []
+        try:
+            files.sort(key=lambda x: str(x).lower())
+        except Exception:
+            pass
+        return save_dir, files
+
+    def _get_filter_preset_options(self):
+        """将筛选方案转换为弹窗需要的选项结构。"""
+        _save_dir, files = self._get_filter_preset_files()
+        options = []
+        for file_name in files:
+            base_name = os.path.splitext(str(file_name))[0]
+            options.append({
+                "label": base_name,
+                "file_name": str(file_name),
+                "display_name": base_name,
+            })
+        return options
+
+    def _normalize_quick_filter_config(self, config: dict, index: int = 0):
+        """规范化单个快捷筛选配置。"""
+        if not isinstance(config, dict):
+            return None
+        folder_id = str(config.get("id") or "").strip()
+        if not folder_id:
+            folder_id = f"quick_filter_{int(index)}_{int(time.time() * 1000)}"
+        name = str(config.get("name") or "").strip()
+        preset_file = str(config.get("preset_file") or "").strip()
+        if not name:
+            if preset_file:
+                name = os.path.splitext(os.path.basename(preset_file))[0]
+            else:
+                name = f"快捷筛选 {int(index) + 1}"
+        return {
+            "id": folder_id,
+            "name": name,
+            "preset_file": preset_file,
+        }
+
+    def _get_quick_filter_folder_configs(self):
+        """读取快捷筛选虚拟文件夹配置。"""
+        raw_value = self.settings_manager.get(self._quick_filter_settings_key(), [])
+        if not isinstance(raw_value, list):
+            raw_value = []
+        items = []
+        for index, item in enumerate(raw_value):
+            normalized = self._normalize_quick_filter_config(item, index=index)
+            if normalized:
+                items.append(normalized)
+        return items
+
+    def _save_quick_filter_folder_configs(self, configs):
+        """保存快捷筛选虚拟文件夹配置。"""
+        normalized_items = []
+        for index, item in enumerate(list(configs or [])):
+            normalized = self._normalize_quick_filter_config(item, index=index)
+            if normalized:
+                normalized_items.append(normalized)
+        self.settings_manager.set(self._quick_filter_settings_key(), normalized_items)
+        try:
+            self.settings_manager.sync()
+        except Exception:
+            pass
+
+    def _get_quick_filter_config_by_id(self, folder_id: str):
+        """根据配置 ID 获取快捷筛选配置。"""
+        target_id = str(folder_id or "")
+        for item in self._get_quick_filter_folder_configs():
+            if str(item.get("id") or "") == target_id:
+                return item
+        return None
+
+    def _refresh_quick_filter_folders_ui(self):
+        """刷新左侧快捷筛选区域。"""
+        panel = getattr(self, "folder_panel", None)
+        if panel is None:
+            return
+        preset_name_map = {}
+        for option in self._get_filter_preset_options():
+            preset_name_map[str(option.get("file_name") or "")] = str(option.get("display_name") or "")
+
+        ui_items = []
+        for item in self._get_quick_filter_folder_configs():
+            preset_file = str(item.get("preset_file") or "")
+            preset_name = preset_name_map.get(preset_file, "")
+            if not preset_name and preset_file:
+                preset_name = f"{os.path.splitext(os.path.basename(preset_file))[0]}（缺失）"
+            ui_items.append({
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("name") or ""),
+                "preset_name": preset_name,
+                "role": self._make_quick_filter_role(str(item.get("id") or "")),
+            })
+        try:
+            panel.set_quick_filter_folders(ui_items)
+            panel.set_active_quick_filter_role(
+                str(getattr(self, "current_folder_path", "") or "")
+                if self._is_quick_filter_role(getattr(self, "current_folder_path", "") or "")
+                else ""
+            )
+        except Exception:
+            pass
+
+    def _ensure_global_scope_for_conditions(self, conditions):
+        """将快捷筛选应用到全局范围，避免依赖当前文件夹上下文。"""
+        result = []
+        scope_all = False
+        scope_fav = False
+        for condition in list(conditions or []):
+            if not isinstance(condition, dict):
+                continue
+            item = dict(condition)
+            field = str(item.get("field") or "")
+            if field == "__scope_all__":
+                scope_all = bool(item.get("value", False))
+            elif field == "__scope_fav__":
+                scope_fav = bool(item.get("value", False))
+            result.append(item)
+        if scope_all or scope_fav:
+            return result
+
+        replaced = False
+        for item in result:
+            if str(item.get("field") or "") == "__scope_all__":
+                item["value"] = True
+                replaced = True
+                break
+        if not replaced:
+            result.append({
+                "field": "__scope_all__",
+                "value": True,
+                "logic": "AND",
+                "fuzzy": False,
+            })
+        return result
+
+    def _restore_last_library_view(self):
+        """删除快捷筛选或退出虚拟视图后恢复到上次正常浏览位置。"""
+        last_folder = str(self.settings_manager.get("library/last_folder", "") or "")
+        if last_folder.startswith("virtual://taxonomy"):
+            self.current_folder_path = last_folder
+            try:
+                self.folder_panel.set_active_quick_filter_role("")
+            except Exception:
+                pass
+            self.load_images_from_taxonomy(last_folder)
+            return
+        folder_path = self._normalize_path_str(last_folder)
+        if folder_path and os.path.isdir(folder_path):
+            try:
+                self.folder_panel.set_active_quick_filter_role("")
+            except Exception:
+                pass
+            self.current_folder_path = folder_path
+            self.load_images_from_folder(folder_path)
+            return
+        NotificationManager.instance().show_toast("已删除当前快捷筛选")
+
+    def on_add_quick_filter_folder(self):
+        """新增快捷筛选虚拟文件夹。"""
+        preset_options = self._get_filter_preset_options()
+        if not preset_options:
+            NotificationManager.instance().show_toast("请先在筛选面板中保存一个筛选方案")
+            return
+        configs = self._get_quick_filter_folder_configs()
+        dialog = QuickFilterFolderDialog(
+            self,
+            preset_options=preset_options,
+            initial_name=f"快捷筛选 {len(configs) + 1}",
+            initial_preset_file=str(preset_options[0].get("file_name") or ""),
+        )
+        self._suspend_filter_panel_auto_hide = True
+        try:
+            if not dialog.exec():
+                return
+            result = dialog.get_result()
+            if not result:
+                return
+            new_item = {
+                "id": f"quick_filter_{int(time.time() * 1000)}",
+                "name": str(result.get("name") or "").strip(),
+                "preset_file": str(result.get("preset_file") or "").strip(),
+            }
+            configs.append(new_item)
+            self._save_quick_filter_folder_configs(configs)
+            self._refresh_quick_filter_folders_ui()
+        finally:
+            self._suspend_filter_panel_auto_hide = False
+
+    def on_edit_quick_filter_folder(self, folder_id: str):
+        """编辑快捷筛选虚拟文件夹。"""
+        config = self._get_quick_filter_config_by_id(folder_id)
+        if not config:
+            NotificationManager.instance().show_warning("错误", "未找到要设置的快捷筛选文件夹")
+            return
+        preset_options = self._get_filter_preset_options()
+        if not preset_options:
+            NotificationManager.instance().show_toast("请先在筛选面板中保存一个筛选方案")
+            return
+        dialog = QuickFilterFolderDialog(
+            self,
+            preset_options=preset_options,
+            initial_name=str(config.get("name") or ""),
+            initial_preset_file=str(config.get("preset_file") or ""),
+        )
+        self._suspend_filter_panel_auto_hide = True
+        try:
+            if not dialog.exec():
+                return
+            result = dialog.get_result()
+            if not result:
+                return
+            updated_configs = []
+            for item in self._get_quick_filter_folder_configs():
+                if str(item.get("id") or "") == str(folder_id or ""):
+                    item = dict(item)
+                    item["name"] = str(result.get("name") or "").strip()
+                    item["preset_file"] = str(result.get("preset_file") or "").strip()
+                updated_configs.append(item)
+            self._save_quick_filter_folder_configs(updated_configs)
+            self._refresh_quick_filter_folders_ui()
+        finally:
+            self._suspend_filter_panel_auto_hide = False
+
+    def on_delete_quick_filter_folder(self, folder_id: str):
+        """删除快捷筛选虚拟文件夹。"""
+        config = self._get_quick_filter_config_by_id(folder_id)
+        if not config:
+            return
+        name = str(config.get("name") or "快捷筛选")
+        if not NotificationManager.instance().ask_confirmation("确认删除", f"确定要删除快捷筛选文件夹“{name}”吗？"):
+            return
+        target_role = self._make_quick_filter_role(folder_id)
+        configs = [item for item in self._get_quick_filter_folder_configs() if str(item.get("id") or "") != str(folder_id or "")]
+        self._save_quick_filter_folder_configs(configs)
+        self._refresh_quick_filter_folders_ui()
+        if str(getattr(self, "current_folder_path", "") or "") == str(target_role):
+            try:
+                self.folder_panel.set_active_quick_filter_role("")
+            except Exception:
+                pass
+            self.filter_panel.reset_to_default()
+            self._restore_last_library_view()
+
+    def _apply_quick_filter_role(self, role: str) -> bool:
+        """应用快捷筛选虚拟文件夹对应的已保存方案。"""
+        folder_id = self._parse_quick_filter_role(role)
+        if not folder_id:
+            return False
+        config = self._get_quick_filter_config_by_id(folder_id)
+        if not config:
+            NotificationManager.instance().show_warning("错误", "未找到对应的快捷筛选配置")
+            return False
+        preset_file = str(config.get("preset_file") or "").strip()
+        if not preset_file:
+            NotificationManager.instance().show_toast("该快捷筛选尚未绑定筛选方案")
+            return False
+        preset_path = os.path.join(self._get_filter_preset_dir(), preset_file)
+        if not os.path.isfile(preset_path):
+            NotificationManager.instance().show_warning("错误", f"筛选方案不存在：{preset_file}")
+            return False
+        try:
+            self.folder_panel.set_active_quick_filter_role(str(role or ""))
+        except Exception:
+            pass
+        self.current_folder_path = str(role or "")
+        self.showing_search_results = True
+        self.clear_preview()
+        self._load_filter_file(
+            preset_path,
+            trigger_search=True,
+            force_global_scope=True,
+            show_toast=False,
+            open_filter_panel=False,
+        )
+        try:
+            self.preview_panel.show_folder_stats(str(config.get("name") or "快捷筛选"), {"image_count": len(self.image_files)})
+        except Exception:
+            pass
+        return True
+
+    def on_load_filter(self):
+        """加载过滤条件"""
+        save_dir, files = self._get_filter_preset_files()
         
         if not files:
             NotificationManager.instance().show_toast("没有找到已保存的搜索方案")
@@ -7939,6 +8259,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 try:
                     os.remove(fp)
                     NotificationManager.instance().show_toast(f"方案 '{display_name}' 已删除")
+                    try:
+                        self.parent()._refresh_quick_filter_folders_ui()
+                    except Exception:
+                        pass
                 except Exception as e:
                     NotificationManager.instance().show_warning("错误", f"删除失败: {e}")
                     return
@@ -8032,8 +8356,15 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"读取Exif失败: {e}")
 
-    def _load_filter_file(self, file_path):
-        """执行加载文件逻辑"""
+    def _load_filter_file(
+        self,
+        file_path,
+        trigger_search: bool = False,
+        force_global_scope: bool = False,
+        show_toast: bool = True,
+        open_filter_panel: bool = True,
+    ):
+        """执行加载文件逻辑。"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -8049,19 +8380,33 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 NotificationManager.instance().show_warning("错误", "文件格式不正确")
                 return
 
+            if force_global_scope:
+                conditions = self._ensure_global_scope_for_conditions(conditions)
+
             # 设置过滤条件
             self.filter_panel.set_conditions(conditions)
             
             # 设置星级
             if hasattr(self, 'star_rating'):
-                # 使用 emit_signal=False 避免 toggle 行为，然后手动触发更新
                 self.star_rating.set_rating(rating, emit_signal=False)
+            self.rating_filter = int(rating or 0)
+            if trigger_search:
+                try:
+                    self.on_advanced_search(self.filter_panel.get_all_conditions())
+                except Exception:
+                    pass
+                try:
+                    self.apply_quick_filters()
+                except Exception:
+                    pass
+            else:
                 self.on_toolbar_rating_changed(rating)
             
             # 加载后自动展开面板
-            if not self.filter_btn.isChecked():
+            if open_filter_panel and not self.filter_btn.isChecked():
                 self.filter_btn.setChecked(True)
-            NotificationManager.instance().show_toast("方案已加载")
+            if show_toast:
+                NotificationManager.instance().show_toast("方案已加载")
         except Exception as e:
             NotificationManager.instance().show_warning("错误", f"加载失败: {e}")
 
@@ -8434,7 +8779,15 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             current_fp = ""
         try:
-            if isinstance(folder_path, str) and folder_path.startswith("virtual://taxonomy"):
+            if self._is_quick_filter_role(folder_path):
+                if str(folder_path) == str(current_fp):
+                    if not (self.showing_search_results or self.filter_panel.has_conditions()):
+                        try:
+                            self._schedule_visible_load(immediate=True)
+                        except Exception:
+                            pass
+                        return
+            elif isinstance(folder_path, str) and folder_path.startswith("virtual://taxonomy"):
                 if str(folder_path) == str(current_fp):
                     if not (self.showing_search_results or self.filter_panel.has_conditions()):
                         try:
@@ -8457,7 +8810,14 @@ class ImageLibraryPage(BaseImageBrowserPage):
         except Exception:
             pass
         try:
+            if self._is_quick_filter_role(folder_path):
+                if self._apply_quick_filter_role(str(folder_path)):
+                    return
             if isinstance(folder_path, str) and folder_path.startswith("virtual://taxonomy"):
+                try:
+                    self.folder_panel.set_active_quick_filter_role("")
+                except Exception:
+                    pass
                 try:
                     if current_fp and str(folder_path) != str(current_fp):
                         self._persist_folder_view_state_now()
@@ -8500,6 +8860,10 @@ class ImageLibraryPage(BaseImageBrowserPage):
                 except Exception:
                     pass
                 return
+        except Exception:
+            pass
+        try:
+            self.folder_panel.set_active_quick_filter_role("")
         except Exception:
             pass
         folder_path = self._normalize_path_str(folder_path)

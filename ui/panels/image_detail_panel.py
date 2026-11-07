@@ -1023,7 +1023,7 @@ class ImageDetailPanel(QWidget):
     stash_toggle_requested = pyqtSignal(str)
     _all_info_html_ready = pyqtSignal(str)  # 后台线程 EXIF 数据准备就绪
 
-    def __init__(self, image_list, current_index=0, parent=None, compare_indices=None, cache_manager=None, show_action_overlay: bool = True, show_import_to_library_button: bool = False, show_stash_controls: bool = False, db_table_name: str = "bird_results", big_cache_context: str = "library", initial_magnifier_lens_radius=None):
+    def __init__(self, image_list, current_index=0, parent=None, compare_indices=None, cache_manager=None, show_action_overlay: bool = True, show_import_to_library_button: bool = False, show_stash_controls: bool = False, db_table_name: str = "bird_results", big_cache_context: str = "library", initial_magnifier_lens_radius=None, boundary_navigation_handler=None):
         super().__init__(parent)
         try:
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1127,6 +1127,7 @@ class ImageDetailPanel(QWidget):
         self._show_action_overlay = bool(show_action_overlay)
         self._show_import_to_library_button = bool(show_import_to_library_button)
         self._show_stash_controls = bool(show_stash_controls)
+        self._boundary_navigation_handler = boundary_navigation_handler
         if sm is not None:
             try:
                 self._focus_point_display_enabled = bool(sm.get("focus_detect_ui/show_focus_point", True))
@@ -4131,19 +4132,9 @@ class ImageDetailPanel(QWidget):
             direction = 1 if int(direction) >= 0 else -1
         except Exception:
             direction = 1
-        try:
-            idx0 = int(getattr(self, "current_index", 0) or 0)
-        except Exception:
-            idx0 = 0
         if direction > 0:
-            if idx0 >= len(self.image_list) - 1:
-                return False
-            self._on_next_image_shortcut()
-            return True
-        if idx0 <= 0:
-            return False
-        self._on_prev_image_shortcut()
-        return True
+            return bool(self._on_next_image_shortcut())
+        return bool(self._on_prev_image_shortcut())
 
     def _auto_nav_start(self, direction: int, *, immediate: bool):
         self._auto_nav_active = True
@@ -5922,6 +5913,8 @@ class ImageDetailPanel(QWidget):
             self.load_current_image()
             self.update_thumbnail_selection()
             self.update_nav_buttons_pos()
+            return
+        self._try_boundary_navigation(-1)
 
     def show_next_image(self):
         if self.current_index < len(self.image_list) - 1:
@@ -5931,6 +5924,8 @@ class ImageDetailPanel(QWidget):
             self.load_current_image()
             self.update_thumbnail_selection()
             self.update_nav_buttons_pos()
+            return
+        self._try_boundary_navigation(1)
 
     def _save_all_info_scroll_pos(self):
         """保存大浮层的滚动位置"""
@@ -5962,6 +5957,34 @@ class ImageDetailPanel(QWidget):
         except Exception as e:
             print(f"[DEBUG] Restore scroll error: {e}")
 
+    def _try_boundary_navigation(self, direction: int) -> bool:
+        """尝试在当前列表首尾处向外层请求跨组导航。
+
+        参数:
+            direction: 导航方向，`-1` 表示跳到上一组，`1` 表示跳到下一组
+        """
+        try:
+            direction = 1 if int(direction) >= 0 else -1
+        except Exception:
+            direction = 1
+        if bool(getattr(self, "compare_mode", False)):
+            return False
+        handler = getattr(self, "_boundary_navigation_handler", None)
+        if not callable(handler):
+            return False
+        try:
+            self._save_all_info_scroll_pos()
+        except Exception:
+            pass
+        try:
+            return bool(handler(int(direction)))
+        except Exception as e:
+            try:
+                LogManager.instance().warning(f"详情页跨组导航失败: {e}")
+            except Exception:
+                pass
+            return False
+
     def _on_prev_image_shortcut(self):
         if self.current_index > 0:
             self.current_index -= 1
@@ -5969,6 +5992,8 @@ class ImageDetailPanel(QWidget):
             self.update_nav_buttons_pos()
             if not self._schedule_deferred_big_image_load(int(self.current_index), delay_ms=140):
                 self.load_current_image()
+            return True
+        return self._try_boundary_navigation(-1)
 
     def _on_next_image_shortcut(self):
         if self.current_index < len(self.image_list) - 1:
@@ -5977,6 +6002,8 @@ class ImageDetailPanel(QWidget):
             self.update_nav_buttons_pos()
             if not self._schedule_deferred_big_image_load(int(self.current_index), delay_ms=140):
                 self.load_current_image()
+            return True
+        return self._try_boundary_navigation(1)
 
     def _get_viewport_scene_center(self, view) -> QPointF:
         """获取当前视口几何中心对应的场景点，使用 2x2 邻域平均避免整数中心带来的左上偏置。"""

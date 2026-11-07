@@ -142,17 +142,21 @@ def get_cache_dir(scope: str = "import_focus") -> str:
     支持打包后的程序（PyInstaller）
     """
     # 辅助函数：记录日志
-    def _log(msg):
+    def _log(msg, level: str = "info"):
         try:
             from utils.log_manager import LogManager
-            LogManager.instance().info(msg)  # 使用info级别确保被记录
+            logger = LogManager.instance()
+            if str(level or "info").lower() == "debug":
+                logger.debug(msg)
+            else:
+                logger.info(msg)
         except Exception:
             pass
 
-    _log(f"[get_cache_dir] 开始执行，scope={scope}")
-    _log(f"[get_cache_dir] sys.executable={sys.executable}")
-    _log(f"[get_cache_dir] sys.frozen={getattr(sys, 'frozen', False)}")
-    _log(f"[get_cache_dir] sys.argv={sys.argv}")
+    _log(f"[get_cache_dir] 开始执行，scope={scope}", level="debug")
+    _log(f"[get_cache_dir] sys.executable={sys.executable}", level="debug")
+    _log(f"[get_cache_dir] sys.frozen={getattr(sys, 'frozen', False)}", level="debug")
+    _log(f"[get_cache_dir] sys.argv={sys.argv}", level="debug")
 
     try:
         # 优先使用环境变量指定的缓存目录（打包后的程序可以设置这个变量）
@@ -166,7 +170,7 @@ def get_cache_dir(scope: str = "import_focus") -> str:
             env_exe_dir = os.environ.get("BIRD_PICTURE_MANAGER_EXE_DIR")
             if env_exe_dir and os.path.isdir(env_exe_dir):
                 base = os.path.join(env_exe_dir, "cache")
-                _log(f"[get_cache_dir] 使用环境变量主程序目录: env_exe_dir={env_exe_dir}, base={base}")
+                _log(f"[get_cache_dir] 使用环境变量主程序目录: env_exe_dir={env_exe_dir}, base={base}", level="debug")
             else:
                 # 检测是否在PyInstaller打包环境中
                 is_frozen = getattr(sys, 'frozen', False)
@@ -197,7 +201,7 @@ def get_cache_dir(scope: str = "import_focus") -> str:
         except Exception as e:
             _log(f"[get_cache_dir] 创建目录失败: {e}")
 
-        _log(f"[get_cache_dir] scope={scope}, 最终缓存目录: {cache_dir}")
+        _log(f"[get_cache_dir] scope={scope}, 最终缓存目录: {cache_dir}", level="debug")
         return cache_dir
     except Exception as e:
         # 如果失败，使用基于当前工作目录的路径（兼容旧逻辑）

@@ -3634,6 +3634,7 @@ class ImportPage(BaseImageBrowserPage):
                 db_table_name="import_cache",
                 big_cache_context="import",
                 initial_magnifier_lens_radius=self._get_initial_magnifier_lens_radius(),
+                boundary_navigation_handler=self._navigate_detail_to_adjacent_burst_group,
             )
             self.center_stack_layout.addWidget(self.detail_panel)
         except Exception as e:
@@ -3835,6 +3836,274 @@ class ImportPage(BaseImageBrowserPage):
                     break
         except Exception:
             pass
+
+    def _find_focus_detect_tree_item_by_role(self, role: str):
+        """按虚拟路径在对焦检测树中查找节点。
+
+        参数:
+            role: 需要匹配的虚拟路径
+        """
+        if not isinstance(role, str) or not role:
+            return None
+        tree = getattr(self.folder_panel, "folder_tree", None) if hasattr(self, "folder_panel") else None
+        if tree is None:
+            return None
+        try:
+            from PyQt6.QtCore import Qt
+        except Exception:
+            return None
+        try:
+            for i in range(tree.topLevelItemCount()):
+                top = tree.topLevelItem(i)
+                if top is None:
+                    continue
+                if top.data(0, Qt.ItemDataRole.UserRole) != "virtual://focus_detect_root":
+                    continue
+                stack = [top]
+                while stack:
+                    item = stack.pop()
+                    if item is None:
+                        continue
+                    try:
+                        if item.data(0, Qt.ItemDataRole.UserRole) == role:
+                            return item
+                    except Exception:
+                        pass
+                    try:
+                        for j in range(item.childCount()):
+                            child = item.child(j)
+                            if child is not None:
+                                stack.append(child)
+                    except Exception:
+                        pass
+                break
+        except Exception:
+            return None
+        return None
+
+    def _resolve_adjacent_focus_detect_burst_role(self, direction: int) -> str:
+        """根据当前连拍虚拟节点，解析相邻连拍组对应的目标虚拟路径。
+
+        参数:
+            direction: 导航方向，`-1` 表示上一组，`1` 表示下一组
+        """
+        try:
+            direction = 1 if int(direction) >= 0 else -1
+        except Exception:
+            direction = 1
+        current_role = str(getattr(self, "_current_folder_path", "") or "")
+        if not current_role.startswith("virtual://focus_detect_burst?"):
+            return ""
+        folder, first_name, status = self._parse_focus_detect_burst_virtual_path(current_role)
+        if not folder or not first_name:
+            return ""
+        current_item = self._find_focus_detect_tree_item_by_role(current_role)
+        if current_item is None:
+            return ""
+        try:
+            from PyQt6.QtCore import Qt
+        except Exception:
+            return ""
+
+        group_item = current_item
+        try:
+            parent_item = current_item.parent()
+        except Exception:
+            parent_item = None
+        if parent_item is not None:
+            try:
+                parent_role = parent_item.data(0, Qt.ItemDataRole.UserRole)
+            except Exception:
+                parent_role = None
+            if isinstance(parent_role, str) and parent_role.startswith("virtual://focus_detect_burst?"):
+                p_folder, p_first_name, _ = self._parse_focus_detect_burst_virtual_path(parent_role)
+                if str(p_folder or "") == str(folder or "") and str(p_first_name or "") == str(first_name or ""):
+                    group_item = parent_item
+
+        try:
+            burst_root_item = group_item.parent()
+        except Exception:
+            burst_root_item = None
+        if burst_root_item is None:
+            return ""
+
+        group_items = []
+        try:
+            for i in range(burst_root_item.childCount()):
+                item = burst_root_item.child(i)
+                if item is None:
+                    continue
+                role = item.data(0, Qt.ItemDataRole.UserRole)
+                if not isinstance(role, str) or not role.startswith("virtual://focus_detect_burst?"):
+                    continue
+                folder2, first_name2, status2 = self._parse_focus_detect_burst_virtual_path(role)
+                if str(folder2 or "") != str(folder or "") or not str(first_name2 or "") or str(status2 or "All") != "All":
+                    continue
+                group_items.append(item)
+        except Exception:
+            group_items = []
+        if not group_items:
+            return ""
+
+        current_group_index = -1
+        for i, item in enumerate(group_items):
+            if item is group_item:
+                current_group_index = int(i)
+                break
+        if current_group_index < 0:
+            return ""
+
+        target_group_index = int(current_group_index) + int(direction)
+        if target_group_index < 0 or target_group_index >= len(group_items):
+            return ""
+
+        target_group_item = group_items[target_group_index]
+        try:
+            target_group_role = target_group_item.data(0, Qt.ItemDataRole.UserRole)
+        except Exception:
+            target_group_role = ""
+        if not isinstance(target_group_role, str) or not target_group_role:
+            return ""
+        if str(status or "All") == "All":
+            return target_group_role
+
+        try:
+            for i in range(target_group_item.childCount()):
+                child = target_group_item.child(i)
+                if child is None:
+                    continue
+                child_role = child.data(0, Qt.ItemDataRole.UserRole)
+                if not isinstance(child_role, str) or not child_role.startswith("virtual://focus_detect_burst?"):
+                    continue
+                folder2, first_name2, status2 = self._parse_focus_detect_burst_virtual_path(child_role)
+                if (
+                    str(folder2 or "") == str(folder or "")
+                    and str(first_name2 or "") != ""
+                    and str(status2 or "All") == str(status or "All")
+                ):
+                    return child_role
+        except Exception:
+            pass
+        return target_group_role
+
+    def _sync_detail_panel_after_burst_group_switch(self, target_index: int) -> bool:
+        """在切换连拍组后同步刷新当前大图面板。
+
+        参数:
+            target_index: 新列表中需要显示的图片索引
+        """
+        panel = getattr(self, "detail_panel", None)
+        if panel is None or not self.image_files:
+            return False
+        try:
+            target_index = int(target_index)
+        except Exception:
+            target_index = 0
+        target_index = max(0, min(int(target_index), len(self.image_files) - 1))
+        try:
+            panel.image_list = self.image_files
+        except Exception:
+            pass
+        try:
+            panel.current_index = int(target_index)
+        except Exception:
+            pass
+        try:
+            panel.populate_thumbnails()
+        except Exception:
+            pass
+        try:
+            panel.load_current_image()
+        except Exception:
+            return False
+        try:
+            panel.update_thumbnail_selection()
+        except Exception:
+            pass
+        try:
+            panel.update_nav_buttons_pos()
+        except Exception:
+            pass
+        try:
+            panel.update_stash_ui()
+        except Exception:
+            pass
+        try:
+            panel.setFocus()
+        except Exception:
+            pass
+        try:
+            self._detail_last_index = int(target_index)
+        except Exception:
+            self._detail_last_index = None
+        return True
+
+    def _navigate_detail_to_adjacent_burst_group(self, direction: int) -> bool:
+        """在大图模式的连拍组边界处切换到相邻连拍文件夹。
+
+        参数:
+            direction: 导航方向，`-1` 表示上一组，`1` 表示下一组
+        """
+        panel = getattr(self, "detail_panel", None)
+        if panel is None:
+            return False
+        try:
+            if bool(getattr(panel, "compare_mode", False)):
+                return False
+        except Exception:
+            return False
+
+        target_role = self._resolve_adjacent_focus_detect_burst_role(direction)
+        if not target_role:
+            return False
+
+        tree = getattr(self.folder_panel, "folder_tree", None) if hasattr(self, "folder_panel") else None
+        target_item = self._find_focus_detect_tree_item_by_role(target_role)
+        if tree is not None and target_item is not None:
+            try:
+                old_block = bool(tree.blockSignals(True))
+            except Exception:
+                old_block = False
+            try:
+                tree.setCurrentItem(target_item)
+            except Exception:
+                pass
+            try:
+                tree.blockSignals(bool(old_block))
+            except Exception:
+                pass
+
+        self.on_folder_selected(str(target_role), 0)
+
+        if not self.image_files:
+            folder, first_name, status = self._parse_focus_detect_burst_virtual_path(target_role)
+            if folder and first_name and str(status or "All") != "All":
+                import urllib.parse
+                fallback_role = (
+                    f"virtual://focus_detect_burst?folder={urllib.parse.quote(str(folder or ''))}"
+                    f"&first={urllib.parse.quote(str(first_name or ''))}&status=All"
+                )
+                fallback_item = self._find_focus_detect_tree_item_by_role(fallback_role)
+                if tree is not None and fallback_item is not None:
+                    try:
+                        old_block = bool(tree.blockSignals(True))
+                    except Exception:
+                        old_block = False
+                    try:
+                        tree.setCurrentItem(fallback_item)
+                    except Exception:
+                        pass
+                    try:
+                        tree.blockSignals(bool(old_block))
+                    except Exception:
+                        pass
+                self.on_folder_selected(str(fallback_role), 0)
+
+        if not self.image_files:
+            return False
+
+        target_index = 0 if int(direction) > 0 else len(self.image_files) - 1
+        return self._sync_detail_panel_after_burst_group_switch(int(target_index))
 
     def _on_detail_stash_toggle_requested(self, path: str):
         if not path:

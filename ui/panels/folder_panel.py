@@ -1,9 +1,10 @@
 import os
 import subprocess
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLineEdit, QListWidget, QListWidgetItem, QTreeWidget, 
-                             QTreeWidgetItem, QTreeWidgetItemIterator, QMenu, 
-                             QAbstractItemView, QHeaderView, QSpacerItem, QSizePolicy)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                             QLineEdit, QListWidget, QListWidgetItem, QTreeWidget,
+                             QTreeWidgetItem, QTreeWidgetItemIterator, QMenu,
+                             QAbstractItemView, QHeaderView, QSpacerItem, QSizePolicy,
+                             QLabel, QFrame)
 from PyQt6.QtCore import Qt, QSize, QPoint, pyqtSignal, QTimer, QEvent, QModelIndex
 from PyQt6.QtGui import QShortcut, QPainter, QPen, QColor, QIcon, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
@@ -47,6 +48,269 @@ def load_svg_icon(icon_name, color=None, style='line'):
     """
     # 直接使用qta.icon
     return qta.icon(icon_name, color=color)
+
+
+class _QuickFilterFolderItem(QWidget):
+    """快捷筛选文件夹条目。"""
+
+    clicked = pyqtSignal()
+    editRequested = pyqtSignal()
+    deleteRequested = pyqtSignal()
+
+    def __init__(self, title: str, preset_name: str = "", parent=None, show_actions: bool = True):
+        super().__init__(parent)
+        self._title = str(title or "")
+        self._preset_name = str(preset_name or "")
+        self._active = False
+        self._hovered = False
+        self._show_actions = bool(show_actions)
+        self._build_ui()
+        self.apply_theme_styles()
+
+    def _build_ui(self):
+        """构建条目控件。"""
+        self.setObjectName("quickFilterFolderItem")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumHeight(42)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(6)
+
+        self.icon_label = QLabel(self)
+        self.icon_label.setFixedSize(18, 18)
+        self.icon_label.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+        self.title_label = QLabel(self._title, self)
+        self.title_label.setWordWrap(False)
+        text_layout.addWidget(self.title_label)
+
+        self.subtitle_label = QLabel(self._preset_name, self)
+        self.subtitle_label.setVisible(bool(self._preset_name))
+        text_layout.addWidget(self.subtitle_label)
+        layout.addLayout(text_layout, 1)
+
+        self.edit_btn = QPushButton(self)
+        self.edit_btn.setToolTip("设置")
+        self.edit_btn.setFixedSize(26, 26)
+        self.edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_btn.clicked.connect(self.editRequested.emit)
+
+        self.delete_btn = QPushButton(self)
+        self.delete_btn.setToolTip("删除")
+        self.delete_btn.setFixedSize(26, 26)
+        self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.clicked.connect(self.deleteRequested.emit)
+
+        layout.addWidget(self.edit_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.delete_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.edit_btn.setVisible(self._show_actions)
+        self.delete_btn.setVisible(self._show_actions)
+
+    def set_active(self, active: bool):
+        """设置当前条目的激活状态。"""
+        self._active = bool(active)
+        self.apply_theme_styles()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.apply_theme_styles()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.apply_theme_styles()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        """点击整行时触发选中。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _button_style(self, bg: str, border: str, hover_bg: str) -> str:
+        """返回操作按钮样式。"""
+        return f"""
+            QPushButton {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+        """
+
+    def _icon_label_style(self) -> str:
+        """返回图标标签样式，避免图标区域出现底色。"""
+        return """
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """
+
+    def apply_theme_styles(self):
+        """刷新条目样式。"""
+        cm = ColorManager.instance()
+        primary = cm.get("theme.primary", "#2196F3")
+        text = cm.get("theme.text.dark", "#333333")
+        sub_text = cm.get("popup.border.primary", "#8A8A8A")
+        border = cm.get("popup.border.primary", "#D0D0D0")
+        item_bg = cm.get("theme.background.primary", "#FFFFFF")
+        hover_bg = cm.get("theme.background.light", "#F5F5F5")
+        active_bg = cm.get("settings.shortcut_table.row.hover_background", "#EEF3FA")
+        active_text = cm.get("theme.primary", "#2196F3")
+        icon_color = active_text if self._active else text
+        current_bg = active_bg if self._active else (hover_bg if self._hovered else item_bg)
+        current_border = primary if self._active else border
+
+        self.setStyleSheet(f"""
+            QWidget#quickFilterFolderItem {{
+                background-color: {current_bg};
+                border: 1px solid {current_border};
+                border-radius: 6px;
+            }}
+        """)
+        self.icon_label.setStyleSheet(self._icon_label_style())
+        self.icon_label.setPixmap(load_svg_icon("mdi6.folder", color=icon_color).pixmap(QSize(18, 18)))
+        self.title_label.setStyleSheet(f"""
+            border: none;
+            background: transparent;
+            color: {active_text if self._active else text};
+            font-size: 12px;
+            font-weight: 600;
+        """)
+        self.subtitle_label.setVisible(bool(self._preset_name))
+        self.subtitle_label.setStyleSheet(f"""
+            border: none;
+            background: transparent;
+            color: {active_text if self._active else sub_text};
+            font-size: 11px;
+        """)
+        self.edit_btn.setIcon(load_svg_icon("mdi6.cog-outline", color=text))
+        self.delete_btn.setIcon(load_svg_icon("mdi6.trash-can-outline", color=text))
+        btn_bg = cm.get("theme.background.light", "#FFFFFF")
+        btn_hover = cm.get("theme.background.dark", "#EDEDED")
+        self.edit_btn.setStyleSheet(self._button_style(btn_bg, border, btn_hover))
+        self.delete_btn.setStyleSheet(self._button_style(btn_bg, border, btn_hover))
+
+
+class _QuickFilterAddItem(QWidget):
+    """快捷筛选新增按钮条目。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hovered = False
+        self._build_ui()
+        self.apply_theme_styles()
+
+    def _build_ui(self):
+        """构建新增条目。"""
+        self.setObjectName("quickFilterAddItem")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumHeight(40)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(6)
+
+        self.icon_label = QLabel(self)
+        self.icon_label.setFixedSize(18, 18)
+        self.icon_label.setStyleSheet("background: transparent; border: none;")
+        layout.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.title_label = QLabel("添加快捷筛选", self)
+        layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
+
+        self.plus_btn = QPushButton(self)
+        self.plus_btn.setToolTip("添加快捷筛选文件夹")
+        self.plus_btn.setFixedSize(26, 26)
+        self.plus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.plus_btn.clicked.connect(self.clicked.emit)
+        layout.addWidget(self.plus_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def _button_style(self, bg: str, border: str, hover_bg: str) -> str:
+        """返回新增按钮样式，和其他操作按钮保持一致。"""
+        return f"""
+            QPushButton {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+        """
+
+    def _icon_label_style(self) -> str:
+        """返回图标标签样式，避免图标区域出现底色。"""
+        return """
+            QLabel {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.apply_theme_styles()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.apply_theme_styles()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        """点击整行时触发新增。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def apply_theme_styles(self):
+        """刷新新增条目样式。"""
+        cm = ColorManager.instance()
+        primary = cm.get("theme.primary", "#2196F3")
+        text = cm.get("theme.text.dark", "#333333")
+        border = cm.get("popup.border.primary", "#D0D0D0")
+        item_bg = cm.get("theme.background.primary", "#FFFFFF")
+        hover_bg = cm.get("theme.background.light", "#F5F5F5")
+        current_bg = hover_bg if self._hovered else item_bg
+        self.setStyleSheet(f"""
+            QWidget#quickFilterAddItem {{
+                background-color: {current_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+        """)
+        self.icon_label.setStyleSheet(self._icon_label_style())
+        self.icon_label.setPixmap(load_svg_icon("mdi6.folder-plus", color=primary).pixmap(QSize(18, 18)))
+        self.title_label.setStyleSheet(f"""
+            border: none;
+            background: transparent;
+            color: {text};
+            font-size: 12px;
+            font-weight: 600;
+        """)
+        self.plus_btn.setIcon(load_svg_icon("mdi6.plus", color=primary))
+        self.plus_btn.setStyleSheet(self._button_style(item_bg, border, hover_bg))
 
 class _DropSplitOverlay(QWidget):
     def __init__(self, parent=None):
@@ -322,6 +586,9 @@ class FolderPanel(QWidget):
     folderDeletedOnDisk = pyqtSignal(str)  # path
     rootFoldersChanged = pyqtSignal()
     focusDetectFoldersDropped = pyqtSignal(object)
+    quickFilterAddRequested = pyqtSignal()
+    quickFilterEditRequested = pyqtSignal(str)
+    quickFilterDeleteRequested = pyqtSignal(str)
 
     def __init__(self, db, settings_manager, parent=None, context="library"):
         super().__init__(parent)
@@ -336,6 +603,14 @@ class FolderPanel(QWidget):
         self.spacers = [] # Store spacers for layout management
         self.search_btn = None # Initialize as None
         self.sort_btn = None
+        self.quick_filter_items = []
+        self.quick_filter_widgets = {}
+        self.active_quick_filter_role = ""
+        self.quick_filter_visible = True
+        self.quick_filter_toggle_btn = None
+        self._quick_filter_initialized = False
+        self._quick_filter_show_ready = False
+        self._pending_quick_filter_rebuild = False
         
         self.override_strict_mode = None # Allow overriding strict mode setting
         self.show_db_stats = True # 是否显示数据库统计信息
@@ -386,6 +661,17 @@ class FolderPanel(QWidget):
                 sc.setKey(seq)
             except Exception:
                 pass
+
+    def showEvent(self, event):
+        """延后快捷筛选首次构建，避免启动时闪出独立小窗。"""
+        super().showEvent(event)
+        if str(self.context or "").lower() != "library":
+            return
+        if bool(getattr(self, "_quick_filter_show_ready", False)):
+            return
+        self._quick_filter_show_ready = True
+        if bool(getattr(self, "_pending_quick_filter_rebuild", False)):
+            QTimer.singleShot(0, self._finalize_quick_filter_rebuild)
 
     def _toggle_current_folder_expand(self):
         tree = getattr(self, "folder_tree", None)
@@ -455,6 +741,9 @@ class FolderPanel(QWidget):
         
         # Search Results
         self.setup_search_results()
+
+        # 快捷筛选区域
+        self.setup_quick_filter_area(layout)
         
         # Folder Tree
         self.setup_folder_tree(layout)
@@ -650,6 +939,40 @@ class FolderPanel(QWidget):
                     background-color: {scrollbar_handle_hover};
                 }}
             """)
+        try:
+            if hasattr(self, "quick_filter_container") and self.quick_filter_container:
+                self.quick_filter_container.setStyleSheet(f"""
+                    QWidget#quickFilterContainer {{
+                        background-color: {tree_bg};
+                        border: none;
+                    }}
+                """)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "quick_filter_separator") and self.quick_filter_separator:
+                self.quick_filter_separator.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: {border};
+                        border: none;
+                        min-height: 1px;
+                        max-height: 1px;
+                    }}
+                """)
+        except Exception:
+            pass
+        try:
+            for widget in list(getattr(self, "quick_filter_widgets", {}).values()):
+                if widget is not None and hasattr(widget, "apply_theme_styles"):
+                    widget.apply_theme_styles()
+        except Exception:
+            pass
+        try:
+            add_widget = getattr(self, "quick_filter_add_widget", None)
+            if add_widget is not None and hasattr(add_widget, "apply_theme_styles"):
+                add_widget.apply_theme_styles()
+        except Exception:
+            pass
         if self.toggle_btn:
             icon_name = self.toggle_btn.property("icon_name") or "mdi6.chevron-left"
             self.toggle_btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
@@ -662,6 +985,9 @@ class FolderPanel(QWidget):
             icon_name = self.sort_btn.property("icon_name") or "mdi6.sort-alphabetical-ascending"
             self.sort_btn.setIcon(load_svg_icon(icon_name, color=toolbar_icon_color))
             self.style_tool_btn(self.sort_btn, primary)
+        if self.quick_filter_toggle_btn:
+            self.style_tool_btn(self.quick_filter_toggle_btn, primary)
+            self._update_quick_filter_toggle_button()
         for btn in self.tool_buttons:
             if not isinstance(btn, QPushButton):
                 continue
@@ -689,7 +1015,7 @@ class FolderPanel(QWidget):
                         stack.append(item.child(j))
             
     def setup_search_area(self, parent_layout):
-        self.search_container = QWidget()
+        self.search_container = QWidget(self)
         self.search_container.setObjectName("folderSearchContainer")
         self.search_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         
@@ -702,10 +1028,10 @@ class FolderPanel(QWidget):
         self._init_search_panel()
 
         # No initial stretch. Buttons will be distributed evenly using spacers.
-        
+
         # Toggle Button (Always present)
         icon_color = ColorManager.instance().get("theme.text.dark")
-        self.toggle_btn = QPushButton()
+        self.toggle_btn = QPushButton(self.search_container)
         self.toggle_btn.setProperty("icon_name", "mdi6.chevron-left")
         self.toggle_btn.setIcon(load_svg_icon('mdi6.chevron-left', color=icon_color))
         self.toggle_btn.setIconSize(QSize(18, 18))
@@ -714,8 +1040,30 @@ class FolderPanel(QWidget):
         self.style_tool_btn(self.toggle_btn)
         self.toggle_btn.clicked.connect(self.on_toggle_clicked)
         layout.addWidget(self.toggle_btn)
+
+        if str(self.context or "").lower() == "library":
+            self.add_quick_filter_toggle_button()
         
         parent_layout.addWidget(self.search_container)
+
+    def add_quick_filter_toggle_button(self):
+        """添加快捷筛选区域折叠/展开按钮。"""
+        if self.quick_filter_toggle_btn:
+            return self.quick_filter_toggle_btn
+
+        btn = QPushButton(self.search_container)
+        btn.setCheckable(True)
+        btn.setChecked(True)
+        btn.setProperty("icon_name", "mdi6.chevron-up")
+        btn.setIconSize(QSize(18, 18))
+        btn.setFixedSize(24, 24)
+        btn.setToolTip("折叠快捷筛选")
+        self.style_tool_btn(btn)
+        btn.toggled.connect(self.on_quick_filter_toggle_clicked)
+        self.quick_filter_toggle_btn = btn
+        self.tool_buttons.append(btn)
+        self._insert_tool_btn(btn)
+        return btn
 
     def _init_search_panel(self):
         # Search Panel (Popup)
@@ -727,7 +1075,7 @@ class FolderPanel(QWidget):
         search_panel_layout.setContentsMargins(8, 4, 8, 4)
         search_panel_layout.setSpacing(6)
         
-        self.search_input = QLineEdit()
+        self.search_input = QLineEdit(self.search_panel)
         self.search_input.setPlaceholderText("搜索文件夹...")
         self.search_input.textChanged.connect(self.on_search_text_changed)
         search_panel_layout.addWidget(self.search_input)
@@ -751,7 +1099,7 @@ class FolderPanel(QWidget):
 
     def add_tool_button(self, icon, tooltip, callback=None):
         """动态添加工具栏按钮"""
-        btn = QPushButton()
+        btn = QPushButton(self.search_container)
         if isinstance(icon, str):
             icon_color = ColorManager.instance().get("theme.text.dark")
             btn.setProperty("icon_name", icon)
@@ -781,7 +1129,7 @@ class FolderPanel(QWidget):
         """添加搜索按钮"""
         if self.search_btn: return self.search_btn
         
-        self.search_btn = QPushButton()
+        self.search_btn = QPushButton(self.search_container)
         icon_color = ColorManager.instance().get("theme.text.dark")
         self.search_btn.setProperty("icon_name", "mdi6.magnify")
         self.search_btn.setIcon(load_svg_icon('mdi6.magnify', color=icon_color))
@@ -800,7 +1148,7 @@ class FolderPanel(QWidget):
         """添加排序按钮"""
         if self.sort_btn: return self.sort_btn
         
-        self.sort_btn = QPushButton()
+        self.sort_btn = QPushButton(self.search_container)
         icon_color = ColorManager.instance().get("theme.text.dark")
         self.sort_btn.setProperty("icon_name", "mdi6.sort-alphabetical-ascending")
         self.sort_btn.setIcon(load_svg_icon('mdi6.sort-alphabetical-ascending', color=icon_color))
@@ -823,8 +1171,160 @@ class FolderPanel(QWidget):
         self.search_results.hide()
         self.search_results.itemClicked.connect(self.on_search_result_clicked)
 
+    def setup_quick_filter_area(self, parent_layout):
+        """创建文件树顶部的快捷筛选区域。"""
+        self.quick_filter_container = QWidget(self)
+        self.quick_filter_container.setObjectName("quickFilterContainer")
+        self.quick_filter_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.quick_filter_container.hide()
+
+        container_layout = QVBoxLayout(self.quick_filter_container)
+        container_layout.setContentsMargins(8, 6, 8, 4)
+        container_layout.setSpacing(4)
+        self.quick_filter_layout = container_layout
+        self.quick_filter_add_widget = None
+        self.quick_filter_separator = None
+
+        parent_layout.addWidget(self.quick_filter_container)
+
+    def set_quick_filter_folders(self, folders):
+        """设置快捷筛选条目并重建界面。"""
+        self.quick_filter_items = list(folders or [])
+        if not bool(getattr(self, "_quick_filter_show_ready", False)):
+            self._pending_quick_filter_rebuild = True
+            return
+        self._finalize_quick_filter_rebuild()
+
+    def _finalize_quick_filter_rebuild(self):
+        """在面板真正显示后再执行快捷筛选区域重建。"""
+        self._pending_quick_filter_rebuild = False
+        self._rebuild_quick_filter_area()
+        self._quick_filter_initialized = True
+        self.set_quick_filter_visible(self.quick_filter_visible)
+
+    def set_active_quick_filter_role(self, role: str):
+        """更新当前激活的快捷筛选条目。"""
+        self.active_quick_filter_role = str(role or "")
+        for item_role, widget in list(self.quick_filter_widgets.items()):
+            try:
+                widget.set_active(str(item_role) == self.active_quick_filter_role)
+            except Exception:
+                pass
+
+    def clear_tree_selection(self):
+        """清空真实文件树选中状态。"""
+        try:
+            self.folder_tree.clearSelection()
+        except Exception:
+            pass
+
+    def set_quick_filter_visible(self, visible: bool):
+        """设置快捷筛选区域可见性。"""
+        self.quick_filter_visible = bool(visible)
+        should_show = (
+            bool(self.quick_filter_visible)
+            and bool(self.folder_tree_visible)
+            and bool(getattr(self, "_quick_filter_initialized", False))
+            and str(self.context or "").lower() == "library"
+        )
+        try:
+            if hasattr(self, "quick_filter_container") and self.quick_filter_container is not None:
+                self.quick_filter_container.setVisible(should_show)
+        except Exception:
+            pass
+        try:
+            if self.quick_filter_toggle_btn is not None:
+                self.quick_filter_toggle_btn.blockSignals(True)
+                self.quick_filter_toggle_btn.setChecked(bool(self.quick_filter_visible))
+                self.quick_filter_toggle_btn.blockSignals(False)
+        except Exception:
+            pass
+        self._update_quick_filter_toggle_button()
+
+    def _update_quick_filter_toggle_button(self):
+        """刷新快捷筛选折叠按钮图标和提示。"""
+        btn = getattr(self, "quick_filter_toggle_btn", None)
+        if btn is None:
+            return
+        try:
+            icon_color = ColorManager.instance().get("theme.text.dark")
+        except Exception:
+            icon_color = "#333333"
+        if bool(self.quick_filter_visible):
+            btn.setProperty("icon_name", "mdi6.chevron-up")
+            btn.setIcon(load_svg_icon("mdi6.chevron-up", color=icon_color))
+            btn.setToolTip("折叠快捷筛选")
+        else:
+            btn.setProperty("icon_name", "mdi6.chevron-down")
+            btn.setIcon(load_svg_icon("mdi6.chevron-down", color=icon_color))
+            btn.setToolTip("展开快捷筛选")
+
+    def on_quick_filter_toggle_clicked(self, checked):
+        """处理快捷筛选区域折叠/展开。"""
+        self.set_quick_filter_visible(bool(checked))
+
+    def _rebuild_quick_filter_area(self):
+        """重建快捷筛选区域。"""
+        if not hasattr(self, "quick_filter_layout") or self.quick_filter_layout is None:
+            return
+        try:
+            self.quick_filter_container.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
+            while self.quick_filter_layout.count() > 0:
+                item = self.quick_filter_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.quick_filter_container.setUpdatesEnabled(True)
+            except Exception:
+                pass
+
+        self.quick_filter_widgets = {}
+        for item in self.quick_filter_items:
+            try:
+                role = str(item.get("role") or "")
+                title = str(item.get("title") or "")
+                preset_name = str(item.get("preset_name") or "")
+                folder_id = str(item.get("id") or "")
+            except Exception:
+                continue
+            row = _QuickFilterFolderItem(title=title, preset_name=preset_name, parent=self.quick_filter_container)
+            row.clicked.connect(lambda _checked=False, path=role: self._on_quick_filter_clicked(path))
+            row.editRequested.connect(lambda _checked=False, fid=folder_id: self.quickFilterEditRequested.emit(fid))
+            row.deleteRequested.connect(lambda _checked=False, fid=folder_id: self.quickFilterDeleteRequested.emit(fid))
+            self.quick_filter_layout.addWidget(row)
+            self.quick_filter_widgets[role] = row
+
+        self.quick_filter_add_widget = _QuickFilterAddItem(self.quick_filter_container)
+        self.quick_filter_add_widget.clicked.connect(self.quickFilterAddRequested.emit)
+        self.quick_filter_layout.addWidget(self.quick_filter_add_widget)
+
+        self.quick_filter_separator = QFrame(self.quick_filter_container)
+        self.quick_filter_separator.setFrameShape(QFrame.Shape.HLine)
+        self.quick_filter_separator.setFrameShadow(QFrame.Shadow.Plain)
+        self.quick_filter_layout.addWidget(self.quick_filter_separator)
+
+        self.set_active_quick_filter_role(self.active_quick_filter_role)
+        self._apply_theme_styles()
+
+    def _on_quick_filter_clicked(self, role: str):
+        """点击快捷筛选条目时切换到对应虚拟文件夹。"""
+        role = str(role or "")
+        if not role:
+            return
+        self.clear_tree_selection()
+        self.set_active_quick_filter_role(role)
+        self.folderSelected.emit(role, 0)
+
     def setup_folder_tree(self, parent_layout):
-        self.folder_tree = _GuidedTreeWidget()
+        self.folder_tree = _GuidedTreeWidget(self)
         try:
             self.folder_tree.setProperty("show_guides", False)
         except Exception:
@@ -2025,6 +2525,10 @@ class FolderPanel(QWidget):
         selected_items = self.folder_tree.selectedItems()
         if not selected_items:
             return
+        try:
+            self.set_active_quick_filter_role("")
+        except Exception:
+            pass
         item = selected_items[0]
         folder_path = item.data(0, Qt.ItemDataRole.UserRole)
         if not folder_path or folder_path == "__placeholder__":
@@ -3137,6 +3641,7 @@ class FolderPanel(QWidget):
         
         if self.folder_tree_visible:
             self.folder_tree.show()
+            self.set_quick_filter_visible(self.quick_filter_visible)
             for btn in self.tool_buttons:
                 btn.show()
             
@@ -3169,6 +3674,11 @@ class FolderPanel(QWidget):
             self.toggle_btn.setToolTip("折叠文件夹")
         else:
             self.folder_tree.hide()
+            try:
+                if hasattr(self, "quick_filter_container") and self.quick_filter_container is not None:
+                    self.quick_filter_container.hide()
+            except Exception:
+                pass
             for btn in self.tool_buttons:
                 btn.hide()
             try:
